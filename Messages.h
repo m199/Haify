@@ -1,0 +1,62 @@
+#ifndef MESSAGES_H
+#define MESSAGES_H
+
+enum {
+
+	MSG_PLAY_PAUSE		= 'plpa',
+	MSG_NEXT_TRACK		= 'nxtr',
+	MSG_PREV_TRACK		= 'pvtr',
+
+
+	MSG_OPEN_BROWSER	= 'opbr',
+	MSG_OPEN_PLAYLIST	= 'oppl',
+	MSG_QUIT_APP		= 'qapp',
+	MSG_SHOW_PLAYER_WINDOW		= 'shpw',
+	MSG_HIDE_PLAYER_WINDOW		= 'hipw',
+	MSG_TOGGLE_PLAYER_WINDOW	= 'tgpw',
+	MSG_OPEN_SETTINGS			= 'opst',
+	MSG_OPEN_ARTWORK			= 'opaw',
+	MSG_SHOW_REPLICANT_MENU		= 'srpm',
+
+
+	MSG_INIT_AUTH		= 'iaut',
+	MSG_AUTH_COMPLETE	= 'acmp',
+
+
+	MSG_SEARCH			= 'srch',
+
+
+	MSG_TRACK_INVOKED	= 'trin',
+	MSG_SHOW_ALBUM		= 'shal',
+	MSG_SHOW_ARTIST		= 'shar',
+
+
+	MSG_OPEN_QUEUE		= 'opqu',
+
+
+	MSG_OPEN_SEARCH		= 'opsh',
+
+
+	MSG_TOGGLE_SHUFFLE			= 'tshf',
+	MSG_TOGGLE_REPEAT			= 'trep',
+	MSG_TOGGLE_LIBRESPOT_AUTOPLAY = 'tlap',
+	MSG_TOGGLE_MUTE			= 'tmte',
+	MSG_SET_VOLUME				= 'svol',
+	MSG_SEEK_REQUEST			= 'seek',
+	MSG_SEEKBAR_COLOR_DROPPED	= 'sbcd',
+	MSG_SEEKBAR_COLOR_CHANGED	= 'sbcc',
+	MSG_DESKBAR_REPLICANT_CHANGED = 'dbCh',
+	MSG_REPLICANT_APPEARANCE_CHANGED = 'raCh',
+	MSG_SAVE_CURRENT_TRACK		= 'svct',
+	MSG_SHOW_ADD_TRACK_MENU		= 'satm',
+	MSG_PLAYLISTS_CHANGED		= 'plCh',
+	MSG_LIBRARY_CHANGED			= 'lbCh',
+	MSG_SPOTIFY_CAPABILITIES_CHANGED = 'spCp',
+
+	MSG_REGISTER_REPLICANT		= 'rRpl',
+	MSG_UNREGISTER_REPLICANT	= 'uRpl',
+	MSG_SYNC_REPLICANT_STATE	= 'sRpl',
+	MSG_REPLICANT_STATE			= 'rSt8',
+};
+
+#endif
