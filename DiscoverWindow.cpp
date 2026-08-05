@@ -1756,7 +1756,7 @@ void
 DiscoverWindow::_InitLayout()
 {
 	fTabView = new DiscoverTabView();
-	fTabView->SetBorder(B_NO_BORDER);
+	fTabView->SetBorder(B_FANCY_BORDER);
 	_RebuildTabs();
 
 	BLayoutBuilder::Group<>(this, B_VERTICAL, 0)

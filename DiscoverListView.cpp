@@ -149,6 +149,8 @@ DiscoverListView::DiscoverListView(const char* name,
 	: BColumnListView(name, B_NAVIGABLE, B_NO_BORDER, false),
 	  fLogicalTab(logicalTab)
 {
+	SetViewUIColor(B_LIST_BACKGROUND_COLOR);
+	
 	for (int32 i = 0; i < (int32)cols.size(); i++) {
 		BColumn* col = new BoldStringColumn(cols[i].label, cols[i].width,
 			60, 9999, B_TRUNCATE_END);
