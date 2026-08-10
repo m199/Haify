@@ -1,4 +1,8 @@
 # Haify
+[![Platform: Haiku](https://img.shields.io/badge/platform-Haiku-yellow.svg)](https://www.haiku-os.org/)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Spotify](https://img.shields.io/badge/Spotify-Web%20API-1DB954?logo=spotify&logoColor=white)](https://developer.spotify.com/documentation/web-api)
+[![AI Assisted](https://img.shields.io/badge/AI%20assisted-OpenAI%20Codex-black)](https://openai.com/codex/)
 
 A Spotify WebAPI client for Haiku.
 
