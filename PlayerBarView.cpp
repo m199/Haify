@@ -197,6 +197,16 @@ public:
         Invalidate();
     }
 
+    void SetFitText(const char* text)
+    {
+        BString next(text ? text : "");
+        if (fFitText == next)
+            return;
+
+        fFitText = next;
+        Invalidate();
+    }
+
     void SetAlignment(alignment align)
     {
         fAlignment = align;
@@ -223,16 +233,36 @@ public:
         }
 
         SetDrawingMode(fTransparentBackground ? B_OP_ALPHA : B_OP_COPY);
+        BFont baseFont;
+        GetFont(&baseFont);
+        BFont fittedFont(baseFont);
+
+        const float available = Bounds().Width();
+        const char* fitText = fFitText.IsEmpty()
+            ? fText.String() : fFitText.String();
+        const float textWidth = fittedFont.StringWidth(fitText);
+        const float minFontSize = 8.0f;
+        if (textWidth > available && textWidth > 0.0f) {
+            float fittedSize = fittedFont.Size() * (available / textWidth);
+            if (fittedSize < minFontSize)
+                fittedSize = minFontSize;
+            fittedFont.SetSize(fittedSize);
+            SetFont(&fittedFont);
+        }
+
         font_height fh;
-        GetFontHeight(&fh);
+        fittedFont.GetHeight(&fh);
         float textHeight = fh.ascent + fh.descent;
         float y = floorf((Bounds().Height() - textHeight) / 2.0f + fh.ascent);
 
         SetHighColor(fTextColor);
         float x = 0.0f;
         if (Alignment() == B_ALIGN_RIGHT)
-            x = Bounds().Width() - StringWidth(fText.String());
+            x = Bounds().Width() - fittedFont.StringWidth(fText.String());
+        if (x < 0.0f)
+            x = 0.0f;
         DrawString(fText.String(), BPoint(x, y));
+        SetFont(&baseFont);
         SetDrawingMode(B_OP_COPY);
     }
 
@@ -252,6 +282,7 @@ private:
     bool fTransparentBackground = false;
     rgb_color fTextColor = ui_color(B_PANEL_TEXT_COLOR);
     BString fText;
+    BString fFitText;
     alignment fAlignment = B_ALIGN_LEFT;
 };
 
@@ -603,10 +634,10 @@ BArchivable* PlayerBarView::Instantiate(BMessage* data) {
 status_t PlayerBarView::Archive(BMessage* data, bool) const {
     BView::Archive(data, false);
     data->AddString("add_on", HAIFY_MIME_SIG);
-    data->AddInt32("be:add_on_version", 5);
+    data->AddInt32("be:add_on_version", 6);
     data->AddBool("be:load_each_time", true);
     data->AddBool("be:unload_on_delete", true);
-    data->AddInt32("version", 5);
+    data->AddInt32("version", 6);
     data->AddBool("playing", fIsPlaying);
     data->AddBool("seekbar_use_system_color", fUseSystemSeekBarColor);
     data->AddData("seekbar_color", B_RGB_COLOR_TYPE, &fSeekBarColor,
@@ -1474,6 +1505,15 @@ void PlayerBarView::_UpdatePlaybackPosition(bigtime_t pos, bigtime_t duration) {
 void PlayerBarView::_UpdateTimeLabels(bigtime_t pos, bigtime_t duration) {
     BString position = _FormatTime(pos);
     BString total = _FormatTime(duration);
+
+    if (fPositionView && fDurationView) {
+        BFont font;
+        fPositionView->GetFont(&font);
+        const BString& fitText = font.StringWidth(position.String())
+            > font.StringWidth(total.String()) ? position : total;
+        fPositionView->SetFitText(fitText.String());
+        fDurationView->SetFitText(fitText.String());
+    }
 
     if (fPositionView)
         fPositionView->SetText(position.String());
