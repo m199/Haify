@@ -7,6 +7,7 @@
 #include <vector>
 
 class BButton;
+class BFilePanel;
 class BRow;
 class BGroupView;
 class BMenuBar;
@@ -109,6 +110,7 @@ private:
 	bool					fSubscriptionPending	= false;
 	BTextView*				fDescriptionView  = nullptr;
 	BScrollView*			fDescriptionScroll= nullptr;
+	BFilePanel*				fPlaylistCoverPanel = nullptr;
 	std::string             fUri;
 	std::string             fCoverUrl;
 	std::string				fPlaylistSnapshotId;

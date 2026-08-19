@@ -43,6 +43,7 @@ public:
 	SpotifyCapabilities*	GetCapabilities() { return &fCapabilities; }
 	void					RefreshSpotifyCapabilities(bool force = false);
 	bool					IsQuitting() const { return fIsQuitting; }
+	bool					IsLibrespotRunning();
 	void					SetArtworkWindowOpen(bool open);
 
 private:

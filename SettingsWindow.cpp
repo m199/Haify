@@ -337,6 +337,9 @@ SettingsWindow::SettingsWindow()
 
 SettingsWindow::~SettingsWindow()
 {
+	delete fLibrespotPanel;
+	delete fCachePanel;
+
 	if (!fCategoryList)
 		return;
 	while (fCategoryList->CountItems() > 0)
@@ -1039,18 +1042,23 @@ SettingsWindow::_BroadcastReplicantAppearance()
 void
 SettingsWindow::_BrowseLibrespot()
 {
-	BFilePanel* panel = new BFilePanel(B_OPEN_PANEL, new BMessenger(this),
-		nullptr, B_FILE_NODE, false, new BMessage(kMsgPanelResult));
-	panel->Show();
+	if (!fLibrespotPanel) {
+		fLibrespotPanel = new BFilePanel(B_OPEN_PANEL, new BMessenger(this),
+			nullptr, B_FILE_NODE, false, new BMessage(kMsgPanelResult));
+	}
+	fLibrespotPanel->Show();
 }
 
 
 void
 SettingsWindow::_BrowseCachePath()
 {
-	BFilePanel* panel = new BFilePanel(B_OPEN_PANEL, new BMessenger(this),
-		nullptr, B_DIRECTORY_NODE, false, new BMessage(kMsgCachePanelResult));
-	panel->Show();
+	if (!fCachePanel) {
+		fCachePanel = new BFilePanel(B_OPEN_PANEL, new BMessenger(this),
+			nullptr, B_DIRECTORY_NODE, false,
+			new BMessage(kMsgCachePanelResult));
+	}
+	fCachePanel->Show();
 }
 
 

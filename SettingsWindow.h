@@ -9,6 +9,7 @@ class BButton;
 class BCardLayout;
 class BCheckBox;
 class BColorControl;
+class BFilePanel;
 class BListView;
 class BMenuField;
 class BPopUpMenu;
@@ -56,12 +57,14 @@ private:
 
 	BTextControl*				fPathControl		= nullptr;
 	BButton*					fBrowseButton		= nullptr;
+	BFilePanel*				fLibrespotPanel		= nullptr;
 	BCheckBox*					fAlwaysStartCheck	= nullptr;
 	BButton*					fOAuthButton		= nullptr;
 	BTextView*					fOAuthStatusView	= nullptr;
 	BCheckBox*					fDisableDiscoveryCheck = nullptr;
 	BTextControl*				fCachePathControl	= nullptr;
 	BButton*					fCacheBrowseButton	= nullptr;
+	BFilePanel*				fCachePanel		= nullptr;
 	BTextControl*				fAdditionalArgsControl = nullptr;
 
 

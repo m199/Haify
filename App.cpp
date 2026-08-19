@@ -219,6 +219,14 @@ App::ReadyToRun()
 }
 
 
+bool
+App::IsLibrespotRunning()
+{
+	_ReapLibrespot(false);
+	return fLibrespotPid > 0;
+}
+
+
 void
 App::ArgvReceived(int32 argc, char** argv)
 {
@@ -970,6 +978,14 @@ App::MessageReceived(BMessage* message)
 
 		case 'lbSp':
 			_StopLibrespot();
+			break;
+
+		case MSG_TOGGLE_LIBRESPOT_RUNNING:
+			_ReapLibrespot(false);
+			if (fLibrespotPid > 0)
+				_StopLibrespot();
+			else
+				_StartLibrespot(kLibrespotTransferAlways);
 			break;
 
 		case kMsgTransferLibrespotPlayback:

@@ -43,12 +43,14 @@ private:
 								BPoint screenWhere, bool liked);
 	void					_RemoveCurrentTrackFromLikedSongs(
 								const std::string& trackUri);
+	void					_UpdateLibrespotMenuItems();
 	void					_ApplySizeLimits();
 	void					_ShowAboutWindow();
 
 	BMenuBar*				fMenuBar       = nullptr;
 	BMenuItem*				fAuthItem      = nullptr;
-	BMenuItem*				fAutoplayItem  = nullptr;
+	BMenuItem*				fLibrespotToggleItem = nullptr;
+	BMenuItem*				fAutostartItem = nullptr;
 	BMenu*					fDeviceMenu    = nullptr;
 	PlayerBarView*			fPlayerBar     = nullptr;
 	BMessageRunner*			fPollTimer     = nullptr;

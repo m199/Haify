@@ -1172,15 +1172,20 @@ PlayerWindow::MessageReceived(BMessage* message)
 			break;
 		}
 
-		case MSG_TOGGLE_LIBRESPOT_AUTOPLAY:
+		case MSG_TOGGLE_LIBRESPOT_RUNNING:
+			be_app->PostMessage(MSG_TOGGLE_LIBRESPOT_RUNNING);
+			_UpdateLibrespotMenuItems();
+			break;
+
+		case MSG_TOGGLE_LIBRESPOT_AUTOSTART:
 		{
-			bool autoplay = false;
+			bool autostart = false;
 			SettingsController::Update([&](HaifySettings& s) {
-				s.librespotAutoplay = !s.librespotAutoplay;
-				autoplay = s.librespotAutoplay;
+				s.librespotAlwaysStart = !s.librespotAlwaysStart;
+				autostart = s.librespotAlwaysStart;
 			});
-			if (fAutoplayItem)
-				fAutoplayItem->SetMarked(autoplay);
+			if (fAutostartItem)
+				fAutostartItem->SetMarked(autostart);
 			break;
 		}
 
@@ -1425,9 +1430,7 @@ PlayerWindow::_ShowAboutWindow()
 void
 PlayerWindow::MenusBeginning()
 {
-	if (fAutoplayItem)
-		fAutoplayItem->SetMarked(
-			SettingsController::Load().librespotAutoplay);
+	_UpdateLibrespotMenuItems();
 
 	if (!fDeviceMenu) return;
 
@@ -1455,6 +1458,23 @@ PlayerWindow::MenusBeginning()
 		self.SendMessage(msg);
 		delete msg;
 	});
+}
+
+
+void
+PlayerWindow::_UpdateLibrespotMenuItems()
+{
+	App* app = dynamic_cast<App*>(be_app);
+	if (fLibrespotToggleItem) {
+		bool running = app && app->IsLibrespotRunning();
+		fLibrespotToggleItem->SetLabel(running
+			? B_TRANSLATE("Stop librespot")
+			: B_TRANSLATE("Start librespot"));
+	}
+
+	if (fAutostartItem)
+		fAutostartItem->SetMarked(
+			SettingsController::Load().librespotAlwaysStart);
 }
 
 
@@ -1494,11 +1514,16 @@ PlayerWindow::_InitMenu()
 	fMenuBar->AddItem(fDeviceMenu);
 
 	BMenu* playMenu = new BMenu(B_TRANSLATE("Playback"));
-	fAutoplayItem = new BMenuItem(
-		B_TRANSLATE("Autoplay"),
-		new BMessage(MSG_TOGGLE_LIBRESPOT_AUTOPLAY));
-	fAutoplayItem->SetMarked(SettingsController::Load().librespotAutoplay);
-	playMenu->AddItem(fAutoplayItem);
+	fLibrespotToggleItem = new BMenuItem(
+		B_TRANSLATE("Start librespot"),
+		new BMessage(MSG_TOGGLE_LIBRESPOT_RUNNING));
+	playMenu->AddItem(fLibrespotToggleItem);
+	fAutostartItem = new BMenuItem(
+		B_TRANSLATE("Autostart librespot"),
+		new BMessage(MSG_TOGGLE_LIBRESPOT_AUTOSTART));
+	fAutostartItem->SetMarked(SettingsController::Load().librespotAlwaysStart);
+	playMenu->AddItem(fAutostartItem);
+	_UpdateLibrespotMenuItems();
 	playMenu->AddSeparatorItem();
 	playMenu->AddItem(new BMenuItem(B_TRANSLATE("Play / Pause"),
 		new BMessage(MSG_PLAY_PAUSE), ' '));

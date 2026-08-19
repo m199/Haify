@@ -2433,10 +2433,12 @@ void
 PlaylistWindow::_ChoosePlaylistCover()
 {
 	if (!fPlaylistOwned || _PlaylistId().empty()) return;
-	BFilePanel* panel = new BFilePanel(B_OPEN_PANEL, new BMessenger(this),
-		nullptr, B_FILE_NODE, false,
-		new BMessage(kMsgPlaylistCoverSelected));
-	panel->Show();
+	if (!fPlaylistCoverPanel) {
+		fPlaylistCoverPanel = new BFilePanel(B_OPEN_PANEL,
+			new BMessenger(this), nullptr, B_FILE_NODE, false,
+			new BMessage(kMsgPlaylistCoverSelected));
+	}
+	fPlaylistCoverPanel->Show();
 }
 
 void
@@ -3740,6 +3742,7 @@ PlaylistWindow::_DeleteCache()
 
 PlaylistWindow::~PlaylistWindow()
 {
+	delete fPlaylistCoverPanel;
 	delete fEpisodeSearchRunner;
 	delete fEpisodeSearchRetryRunner;
 	delete fCacheSaveRunner;
