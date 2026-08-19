@@ -664,22 +664,22 @@ status_t SettingsController::Save(const HaifySettings& s)
     if (fd < 0)
         return B_IO_ERROR;
 
-    size_t written = 0;
-    while (written < data.size()) {
-        ssize_t result = write(fd, data.data() + written, data.size() - written);
-        if (result < 0 && errno == EINTR)
-            continue;
-        if (result <= 0) {
-            close(fd);
-            unlink(temporaryPath.c_str());
-            return B_IO_ERROR;
-        }
-        written += (size_t)result;
+    FILE* file = fdopen(fd, "wb");
+    if (!file) {
+        close(fd);
+        unlink(temporaryPath.c_str());
+        return B_IO_ERROR;
     }
 
-    bool syncFailed = fsync(fd) != 0;
-    bool closeFailed = close(fd) != 0;
+    bool writeFailed = fwrite(data.data(), 1, data.size(), file) != data.size();
+    bool flushFailed = fflush(file) != 0;
+    bool syncFailed = fsync(fileno(file)) != 0;
+    bool closeFailed = fclose(file) != 0;
     if (syncFailed || closeFailed) {
+        unlink(temporaryPath.c_str());
+        return B_IO_ERROR;
+    }
+    if (writeFailed || flushFailed) {
         unlink(temporaryPath.c_str());
         return B_IO_ERROR;
     }
