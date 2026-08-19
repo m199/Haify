@@ -395,7 +395,7 @@ FormatTrackDuration(int ms)
 	int mins = seconds / 60;
 	seconds = seconds % 60;
 	char buf[16];
-	sprintf(buf, "%d:%02d", mins, seconds);
+	snprintf(buf, sizeof(buf), "%d:%02d", mins, seconds);
 	return std::string(buf);
 }
 
@@ -1357,10 +1357,10 @@ PlaylistWindow::MessageReceived(BMessage* message)
 			const char* countLabel =
 				(fUri.find("spotify:show:") == 0) ? "Episodes" : "Songs";
 			if (total > fTrackList->CountRows())
-				sprintf(info, "%s \xC2\xB7 %ld/%ld %s", typeStr,
+				snprintf(info, sizeof(info), "%s \xC2\xB7 %ld/%ld %s", typeStr,
 					(long)fTrackList->CountRows(), (long)total, countLabel);
 			else
-				sprintf(info, "%s \xC2\xB7 %ld %s", typeStr,
+				snprintf(info, sizeof(info), "%s \xC2\xB7 %ld %s", typeStr,
 					(long)fTrackList->CountRows(), countLabel);
 			fPlaylistInfo->SetText(info);
 			if (append && scrollBar)
@@ -2670,10 +2670,10 @@ PlaylistWindow::_UpdatePlaylistTrackInfo()
 		return;
 	char info[64];
 	if (fPageTotal > fTrackList->CountRows()) {
-		sprintf(info, "Playlist \xC2\xB7 %ld/%ld Songs",
+		snprintf(info, sizeof(info), "Playlist \xC2\xB7 %ld/%ld Songs",
 			(long)fTrackList->CountRows(), (long)fPageTotal);
 	} else {
-		sprintf(info, "Playlist \xC2\xB7 %ld Songs",
+		snprintf(info, sizeof(info), "Playlist \xC2\xB7 %ld Songs",
 			(long)fTrackList->CountRows());
 	}
 	fPlaylistInfo->SetText(info);
@@ -3334,10 +3334,12 @@ PlaylistWindow::_UpdateEpisodeInfo()
 
 	char info[64];
 	if (fEpisodeTotal > (int32)fEpisodes.size())
-		sprintf(info, B_TRANSLATE("Podcast \xC2\xB7 %d/%d Episodes"),
+		snprintf(info, sizeof(info),
+			B_TRANSLATE("Podcast \xC2\xB7 %d/%d Episodes"),
 			(int)fEpisodes.size(), (int)fEpisodeTotal);
 	else
-			sprintf(info, B_TRANSLATE("Podcast \xC2\xB7 %d Episodes"),
+		snprintf(info, sizeof(info),
+			B_TRANSLATE("Podcast \xC2\xB7 %d Episodes"),
 			(int)fEpisodes.size());
 	fPlaylistInfo->SetText(info);
 
@@ -3351,22 +3353,22 @@ PlaylistWindow::_UpdateEpisodeInfo()
 	char searchInfo[96];
 	int32 matches = fTrackList ? fTrackList->CountRows() : 0;
 	if (fEpisodeSearchWaitingRetry) {
-		sprintf(searchInfo, B_TRANSLATE(
+		snprintf(searchInfo, sizeof(searchInfo), B_TRANSLATE(
 			"%d matches\nRetrying search..."), (int)matches);
 	} else if (fEpisodeSearchPaging && fEpisodeTotal > 0) {
-		sprintf(searchInfo, B_TRANSLATE(
+		snprintf(searchInfo, sizeof(searchInfo), B_TRANSLATE(
 			"%d matches\nSearching: %d/%d"), (int)matches,
 			(int)fEpisodeOffset, (int)fEpisodeTotal);
 	} else if (fEpisodeSearchPaging) {
-		sprintf(searchInfo, B_TRANSLATE(
+		snprintf(searchInfo, sizeof(searchInfo), B_TRANSLATE(
 			"%d matches\nSearching: %d"), (int)matches,
 			(int)fEpisodeOffset);
 	} else if (fEpisodeSearchFailed && fEpisodeTotal > 0) {
-		sprintf(searchInfo, B_TRANSLATE(
+		snprintf(searchInfo, sizeof(searchInfo), B_TRANSLATE(
 			"%d matches\nStopped: %d/%d"), (int)matches,
 			(int)fEpisodeOffset, (int)fEpisodeTotal);
 	} else {
-		sprintf(searchInfo, B_TRANSLATE(
+		snprintf(searchInfo, sizeof(searchInfo), B_TRANSLATE(
 			"%d matches\nSearched: %d"), (int)matches,
 			(int)fEpisodeOffset);
 	}
@@ -3546,11 +3548,11 @@ PlaylistWindow::_LoadCache()
 			const char* typeStr = isPlaylist
 				? B_TRANSLATE("Playlist") : B_TRANSLATE("Liked Songs");
 			if (fPageTotal > fTrackList->CountRows())
-				sprintf(info, "%s \xC2\xB7 %ld/%ld %s", typeStr,
+				snprintf(info, sizeof(info), "%s \xC2\xB7 %ld/%ld %s", typeStr,
 					(long)fTrackList->CountRows(), (long)fPageTotal,
 					"Songs");
 			else
-				sprintf(info, "%s \xC2\xB7 %ld %s", typeStr,
+				snprintf(info, sizeof(info), "%s \xC2\xB7 %ld %s", typeStr,
 					(long)fTrackList->CountRows(), "Songs");
 			fPlaylistInfo->SetText(info);
 
