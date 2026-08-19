@@ -23,6 +23,7 @@
 #include <OS.h>
 #include <Size.h>
 #include <algorithm>
+#include <cctype>
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
@@ -48,6 +49,39 @@ static const uint32 kMsgVerifyPoll = 'vpol';
 static const uint32 kMsgPlaybackTick = 'ptik';
 static const uint32 kMsgPlaybackPollResult = 'pbrs';
 static const uint32 kMsgApplyMuteToggle = 'amte';
+
+
+static bool
+_IsLikelyHexIdentifier(const std::string& value)
+{
+	if (value.size() < 16)
+		return false;
+
+	for (unsigned char character : value) {
+		if (!std::isxdigit(character))
+			return false;
+	}
+	return true;
+}
+
+
+static std::string
+_SpotifyDeviceDisplayName(const std::string& id, const std::string& name,
+	const std::string& type)
+{
+	if (!name.empty() && name != id && !_IsLikelyHexIdentifier(name))
+		return name;
+
+	std::string display = type.empty() ? B_TRANSLATE("Device") : type;
+	std::string shortId = id.empty() ? name : id;
+	if (!shortId.empty()) {
+		const size_t idLength = std::min<size_t>(8, shortId.size());
+		display += " (";
+		display += shortId.substr(0, idLength);
+		display += ")";
+	}
+	return display;
+}
 
 
 static bool
@@ -1333,12 +1367,15 @@ PlayerWindow::MessageReceived(BMessage* message)
 			const char* id;
 			while (message->FindString("id", i, &id) == B_OK) {
 				const char* name   = message->FindString("name",   i);
+				const char* type   = message->FindString("type",   i);
 				bool        active = false;
 				message->FindBool("active", i, &active);
 
 				BMessage* msg = new BMessage('toDv');
 				msg->AddString("id", id);
-				BMenuItem* item = new BMenuItem(name ? name : id, msg);
+				std::string displayName = _SpotifyDeviceDisplayName(
+					id ? id : "", name ? name : "", type ? type : "");
+				BMenuItem* item = new BMenuItem(displayName.c_str(), msg);
 				item->SetMarked(active);
 				fDeviceMenu->AddItem(item);
 				i++;
