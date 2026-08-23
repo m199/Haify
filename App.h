@@ -28,7 +28,8 @@ struct ReplicantRegistration {
 
 enum LibrespotTransferMode {
 	kLibrespotTransferAlways,
-	kLibrespotTransferIfIdle
+	kLibrespotTransferIfIdle,
+	kLibrespotTransferNever
 };
 
 class App : public BApplication {
