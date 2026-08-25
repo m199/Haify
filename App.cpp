@@ -968,12 +968,12 @@ App::MessageReceived(BMessage* message)
 		case 'lbSt':
 			if (message->GetBool("restart", false))
 				_StopLibrespot();
-			_StartLibrespot(kLibrespotTransferNever);
+			_StartLibrespot(kLibrespotTransferAlways);
 			break;
 
 		case 'lbRg':
 			_StopLibrespot();
-			_StartLibrespot(kLibrespotTransferNever, true);
+			_StartLibrespot(kLibrespotTransferAlways, true);
 			break;
 
 		case 'lbSp':
@@ -985,7 +985,7 @@ App::MessageReceived(BMessage* message)
 			if (fLibrespotPid > 0)
 				_StopLibrespot();
 			else
-				_StartLibrespot(kLibrespotTransferNever);
+				_StartLibrespot(kLibrespotTransferAlways);
 			break;
 
 		case kMsgTransferLibrespotPlayback:
@@ -1009,8 +1009,6 @@ App::MessageReceived(BMessage* message)
 				if (GetApi() && fLibrespotPid > 0 && deviceId && deviceId[0])
 					_TransferPlaybackToLibrespotDevice(deviceId);
 			} else if (fLibrespotPid > 0
-					&& (fLibrespotTransferMode != kLibrespotTransferNever
-						|| fLibrespotOAuthRegistration)
 					&& fLibrespotTransferAttempts
 						< (fLibrespotOAuthRegistration ? 150 : 5)) {
 				_ScheduleLibrespotTransfer(
@@ -1262,9 +1260,7 @@ App::_StartLibrespot(LibrespotTransferMode mode, bool registerOAuth)
 	fLibrespotTransferMode = mode;
 	if (fLibrespotPid > 0) {
 		fLibrespotTransferAttempts = 0;
-		if (fLibrespotTransferMode != kLibrespotTransferNever
-				|| registerOAuth)
-			_ScheduleLibrespotTransfer(3000000LL);
+		_ScheduleLibrespotTransfer(3000000LL);
 		return;
 	}
 
@@ -1360,9 +1356,7 @@ App::_StartLibrespot(LibrespotTransferMode mode, bool registerOAuth)
 	} else if (pid > 0) {
 		fLibrespotPid = pid;
 		fLibrespotTransferAttempts = 0;
-		if (fLibrespotTransferMode != kLibrespotTransferNever
-				|| fLibrespotOAuthRegistration)
-			_ScheduleLibrespotTransfer(3000000LL);
+		_ScheduleLibrespotTransfer(3000000LL);
 	} else if (fLibrespotOAuthRegistration) {
 		SettingsController::FinishLibrespotOAuthRegistration();
 		fLibrespotOAuthRegistration = false;
@@ -1431,9 +1425,6 @@ App::_TransferPlaybackToLibrespotDevice(const char* deviceId)
 {
 	SpotifyApi* api = GetApi();
 	if (!api || fLibrespotPid <= 0 || !deviceId || !deviceId[0])
-		return;
-
-	if (fLibrespotTransferMode == kLibrespotTransferNever)
 		return;
 
 	if (fLibrespotTransferMode == kLibrespotTransferAlways) {

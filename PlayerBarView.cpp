@@ -1,6 +1,7 @@
 #include "PlayerBarView.h"
 #include "Config.h"
 #include "Messages.h"
+#include "NowPlayingFields.h"
 #include "PlaybackSeekBarView.h"
 #include "SettingsController.h"
 #include <Message.h>
@@ -1103,6 +1104,13 @@ void PlayerBarView::MouseDown(BPoint where) {
         return;
     }
 
+    if (!fCurrentOpenUri.empty()) {
+        BMessage open('open');
+        open.AddString("uri", fCurrentOpenUri.c_str());
+        _ForwardMessage(&open);
+        return;
+    }
+
     BView::MouseDown(where);
 }
 
@@ -1183,6 +1191,11 @@ void PlayerBarView::MessageReceived(BMessage* msg) {
             _ApplyReplicantAppearance(msg);
             SetTrack(msg->GetString("title", ""), msg->GetString("artist", ""));
             SetTrackUri(msg->GetString("track_uri", ""));
+            const char* openUri = msg->GetString(
+                kNowPlayingPrimaryOpenUriField, "");
+            if (!openUri || !openUri[0])
+                openUri = msg->GetString("track_uri", "");
+            SetOpenUri(openUri);
             SetTrackIds(msg->GetString("album_id", ""), msg->GetString("artist_id", ""));
             SetPlaying(msg->GetBool("is_playing", false));
             int32 pos = msg->GetInt32("progress_ms", 0);
@@ -1411,6 +1424,10 @@ void PlayerBarView::SetTrackUri(const char* trackUri) {
     if (fAddTrackButton)
         fAddTrackButton->SetEnabled(
             fCurrentTrackUri.find("spotify:track:") == 0);
+}
+
+void PlayerBarView::SetOpenUri(const char* uri) {
+    fCurrentOpenUri = uri ? uri : "";
 }
 
 void PlayerBarView::SetTrackIds(const char* albumId, const char* artistId) {

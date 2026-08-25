@@ -3,6 +3,7 @@
 #include "Config.h"
 
 #include "Messages.h"
+#include "NowPlayingFields.h"
 #include "SettingsController.h"
 
 #include <algorithm>
@@ -456,6 +457,14 @@ ArtworkReplicantView::MouseDown(BPoint where)
         return;
     }
 
+    if (!fOpenUri.IsEmpty()) {
+        BMessage open('open');
+        open.AddString("uri", fOpenUri.String());
+        open.AddString("title", fTitle.String());
+        _ForwardMessage(&open);
+        return;
+    }
+
     ArtworkView::MouseDown(where);
 }
 
@@ -518,6 +527,11 @@ ArtworkReplicantView::MessageReceived(BMessage* message)
                 _Register();
             fTitle = message->GetString("title", "");
             fArtist = message->GetString("artist", "");
+            const char* openUri = message->GetString(
+                kNowPlayingPrimaryOpenUriField, "");
+            if (!openUri || !openUri[0])
+                openUri = message->GetString("track_uri", "");
+            fOpenUri = openUri;
             _ApplyAppearance(message);
             SetArtworkUrl(message->GetString("artwork_url", ""));
             break;

@@ -30,6 +30,7 @@ public:
 
     void    SetTrack(const char* title, const char* artist);
     void    SetTrackUri(const char* trackUri);
+    void    SetOpenUri(const char* uri);
     void    SetTrackIds(const char* albumId, const char* artistId);
     void    SetArtwork(BBitmap* bitmap);
     void    SetPlaying(bool playing);
@@ -112,6 +113,7 @@ private:
     std::string             fCurrentAlbumId;
     std::string             fCurrentArtistId;
     std::string             fCurrentTrackUri;
+    std::string             fCurrentOpenUri;
     BMessageRunner*         fTickTimer      = nullptr;
     bigtime_t               fLastSyncUs     = 0;
     bigtime_t               fLastPosUs      = 0;

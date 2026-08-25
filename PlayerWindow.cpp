@@ -5,6 +5,7 @@
 #include "SettingsController.h"
 #include "TrackContextMenu.h"
 #include "Messages.h"
+#include "NowPlayingItem.h"
 #include "App.h"
 #include "HaifyDebug.h"
 #include "Config.h"
@@ -91,56 +92,7 @@ _FillTrackMessage(BMessage& message, const nlohmann::json& item,
 	if (!item.is_object())
 		return false;
 
-	message.AddString("title", item.value("name", "").c_str());
-	message.AddInt32("duration_ms", (int32)item.value("duration_ms", 0));
-	message.AddString("track_uri", item.value("uri", "").c_str());
-
-	std::string itemType = item.value("type", fallbackType);
-	if (itemType != "episode"
-			&& item.contains("artists") && item["artists"].is_array()
-			&& !item["artists"].empty()) {
-		message.AddString("artist",
-			item["artists"][0].value("name", "").c_str());
-		message.AddString("artist_id",
-			item["artists"][0].value("id", "").c_str());
-	}
-	if (itemType == "episode" && item.contains("show")
-			&& item["show"].is_object()) {
-		const auto& show = item["show"];
-		std::string showName = show.value("name", "");
-		std::string publisher = show.value("publisher", "");
-		if (!showName.empty())
-			message.AddString("artist", showName.c_str());
-		else if (!publisher.empty())
-			message.AddString("artist", publisher.c_str());
-	}
-
-	if (item.contains("album") && item["album"].is_object()) {
-		const auto& album = item["album"];
-		message.AddString("album_id", album.value("id", "").c_str());
-		if (album.contains("images") && album["images"].is_array()
-				&& !album["images"].empty()) {
-			message.AddString("artwork_url",
-				album["images"][0].value("url", "").c_str());
-		}
-	}
-	if (itemType == "episode") {
-		const nlohmann::json* images = nullptr;
-		if (item.contains("images") && item["images"].is_array()
-				&& !item["images"].empty()) {
-			images = &item["images"];
-		} else if (item.contains("show") && item["show"].is_object()
-				&& item["show"].contains("images")
-				&& item["show"]["images"].is_array()
-				&& !item["show"]["images"].empty()) {
-			images = &item["show"]["images"];
-		}
-		if (images) {
-			message.AddString("artwork_url",
-				(*images)[0].value("url", "").c_str());
-		}
-	}
-
+	NowPlayingItem::FromSpotifyItem(item, fallbackType).AddToMessage(message);
 	return true;
 }
 
@@ -385,6 +337,14 @@ PlayerWindow::_ApplyPlaybackMessage(BMessage* message)
 	const char* artist      = message->GetString("artist",      "");
 	const char* albumId     = message->GetString("album_id",    "");
 	const char* artistId    = message->GetString("artist_id",   "");
+	const char* itemKind    = message->GetString(kNowPlayingItemKindField, "");
+	const char* openUri = message->GetString(
+		kNowPlayingPrimaryOpenUriField, "");
+	const char* parentUri = message->GetString(kNowPlayingParentUriField, "");
+	const char* parentKind = message->GetString(kNowPlayingParentKindField, "");
+	const char* showId = message->GetString(kNowPlayingShowIdField, "");
+	const char* audiobookId = message->GetString(
+		kNowPlayingAudiobookIdField, "");
 	const char* repeatState = message->GetString("repeat_state","off");
 	bool shuffleState = message->GetBool("shuffle_state", false);
 	const char* artworkUrl  = message->GetString("artwork_url",  "");
@@ -398,6 +358,12 @@ PlayerWindow::_ApplyPlaybackMessage(BMessage* message)
 	std::string effectiveArtist = artist;
 	std::string effectiveAlbumId = albumId;
 	std::string effectiveArtistId = artistId;
+	std::string effectiveItemKind = itemKind;
+	std::string effectiveOpenUri = openUri;
+	std::string effectiveParentUri = parentUri;
+	std::string effectiveParentKind = parentKind;
+	std::string effectiveShowId = showId;
+	std::string effectiveAudiobookId = audiobookId;
 	std::string effectiveArtworkUrl = ResolvePlaybackArtworkUrl(artworkUrl,
 		fLastArtworkUrl, preserveCurrentArtwork);
 
@@ -460,9 +426,37 @@ PlayerWindow::_ApplyPlaybackMessage(BMessage* message)
 			effectiveAlbumId = fCurrentAlbumId;
 		if (effectiveArtistId.empty())
 			effectiveArtistId = fCurrentArtistId;
+		if (effectiveItemKind.empty())
+			effectiveItemKind = fCurrentItemKind;
+		if (effectiveOpenUri.empty())
+			effectiveOpenUri = fCurrentPrimaryOpenUri;
+		if (effectiveParentUri.empty())
+			effectiveParentUri = fCurrentParentUri;
+		if (effectiveParentKind.empty())
+			effectiveParentKind = fCurrentParentKind;
+		if (effectiveShowId.empty())
+			effectiveShowId = fCurrentShowId;
+		if (effectiveAudiobookId.empty())
+			effectiveAudiobookId = fCurrentAudiobookId;
 		if (effectiveArtworkUrl.empty())
 			effectiveArtworkUrl = fLastArtworkUrl;
 	}
+	if (!optimistic && !trackChanged && trackUri[0]) {
+		if (effectiveItemKind.empty())
+			effectiveItemKind = fCurrentItemKind;
+		if (effectiveOpenUri.empty())
+			effectiveOpenUri = fCurrentPrimaryOpenUri;
+		if (effectiveParentUri.empty())
+			effectiveParentUri = fCurrentParentUri;
+		if (effectiveParentKind.empty())
+			effectiveParentKind = fCurrentParentKind;
+		if (effectiveShowId.empty())
+			effectiveShowId = fCurrentShowId;
+		if (effectiveAudiobookId.empty())
+			effectiveAudiobookId = fCurrentAudiobookId;
+	}
+	if (effectiveOpenUri.empty() && trackUri[0])
+		effectiveOpenUri = trackUri;
 
 	if (!optimistic || !effectiveTitle.empty())
 		fCurrentTitle = effectiveTitle;
@@ -472,6 +466,18 @@ PlayerWindow::_ApplyPlaybackMessage(BMessage* message)
 		fCurrentAlbumId = effectiveAlbumId;
 	if (!optimistic || !effectiveArtistId.empty())
 		fCurrentArtistId = effectiveArtistId;
+	if (!optimistic || !effectiveItemKind.empty())
+		fCurrentItemKind = effectiveItemKind;
+	if (!optimistic || !effectiveOpenUri.empty())
+		fCurrentPrimaryOpenUri = effectiveOpenUri;
+	if (!optimistic || !effectiveParentUri.empty())
+		fCurrentParentUri = effectiveParentUri;
+	if (!optimistic || !effectiveParentKind.empty())
+		fCurrentParentKind = effectiveParentKind;
+	if (!optimistic || !effectiveShowId.empty())
+		fCurrentShowId = effectiveShowId;
+	if (!optimistic || !effectiveAudiobookId.empty())
+		fCurrentAudiobookId = effectiveAudiobookId;
 
 	fIsPlaying = isPlaying;
 	fProgressMs = progressMs;
@@ -490,6 +496,7 @@ PlayerWindow::_ApplyPlaybackMessage(BMessage* message)
 	if (fPlayerBar) {
 		fPlayerBar->SetTrack(effectiveTitle.c_str(), effectiveArtist.c_str());
 		fPlayerBar->SetTrackUri(trackUri);
+		fPlayerBar->SetOpenUri(effectiveOpenUri.c_str());
 		fPlayerBar->SetTrackIds(effectiveAlbumId.c_str(), effectiveArtistId.c_str());
 		fPlayerBar->SetPlaying(isPlaying);
 		fPlayerBar->SetPosition(
@@ -516,27 +523,12 @@ PlayerWindow::_ApplyPlaybackMessage(BMessage* message)
 		be_app->PostMessage(&nowPlaying);
 	}
 
+	fLastArtworkUrl = effectiveArtworkUrl;
+
 	{
 		BMessage stateMsg(MSG_REPLICANT_STATE);
-		stateMsg.AddBool("is_playing",    isPlaying);
-		stateMsg.AddInt32("progress_ms",  progressMs);
-		stateMsg.AddInt32("duration_ms",  durationMs);
-		stateMsg.AddString("title",        effectiveTitle.c_str());
-		stateMsg.AddString("artist",       effectiveArtist.c_str());
-		stateMsg.AddString("album_id",     effectiveAlbumId.c_str());
-		stateMsg.AddString("artist_id",    effectiveArtistId.c_str());
-		stateMsg.AddString("track_uri",    trackUri);
-		stateMsg.AddString("repeat_state", repeatState);
-		stateMsg.AddBool("shuffle_state",  shuffleState);
-		if (volumePct >= 0)
-			stateMsg.AddInt32("volume_percent", volumePct);
-		stateMsg.AddString("artwork_url", effectiveArtworkUrl.c_str());
+		_FillReplicantStateMessage(stateMsg, progressMs);
 		be_app->PostMessage(&stateMsg);
-	}
-
-	std::string url = effectiveArtworkUrl;
-	if (!url.empty() && url != fLastArtworkUrl) {
-		fLastArtworkUrl = url;
 	}
 
 	if (trackChanged && fIsPlaying)
@@ -570,6 +562,18 @@ PlayerWindow::_ApplyOptimisticPlay(BMessage* message)
 	optimistic.AddString("artist", message->GetString("artist", ""));
 	optimistic.AddString("album_id", message->GetString("album_id", ""));
 	optimistic.AddString("artist_id", message->GetString("artist_id", ""));
+	optimistic.AddString(kNowPlayingItemKindField,
+		message->GetString(kNowPlayingItemKindField, ""));
+	optimistic.AddString(kNowPlayingPrimaryOpenUriField,
+		message->GetString(kNowPlayingPrimaryOpenUriField, uri));
+	optimistic.AddString(kNowPlayingParentUriField,
+		message->GetString(kNowPlayingParentUriField, ""));
+	optimistic.AddString(kNowPlayingParentKindField,
+		message->GetString(kNowPlayingParentKindField, ""));
+	optimistic.AddString(kNowPlayingShowIdField,
+		message->GetString(kNowPlayingShowIdField, ""));
+	optimistic.AddString(kNowPlayingAudiobookIdField,
+		message->GetString(kNowPlayingAudiobookIdField, ""));
 	optimistic.AddString("artwork_url", message->GetString("artwork_url", ""));
 
 	if (!oldTrackUri.empty() && oldTrackUri != uri) {
@@ -855,6 +859,15 @@ PlayerWindow::_PublishReplicantState()
 	}
 
 	BMessage stateMsg(MSG_REPLICANT_STATE);
+	_FillReplicantStateMessage(stateMsg, progressMs);
+	be_app->PostMessage(&stateMsg);
+}
+
+
+void
+PlayerWindow::_FillReplicantStateMessage(BMessage& stateMsg,
+	int32 progressMs) const
+{
 	stateMsg.AddBool("is_playing",    fIsPlaying);
 	stateMsg.AddInt32("progress_ms",  progressMs);
 	stateMsg.AddInt32("duration_ms",  fDurationMs);
@@ -863,12 +876,19 @@ PlayerWindow::_PublishReplicantState()
 	stateMsg.AddString("album_id",     fCurrentAlbumId.c_str());
 	stateMsg.AddString("artist_id",    fCurrentArtistId.c_str());
 	stateMsg.AddString("track_uri",    fCurrentTrackUri.c_str());
+	stateMsg.AddString(kNowPlayingItemKindField, fCurrentItemKind.c_str());
+	stateMsg.AddString(kNowPlayingPrimaryOpenUriField,
+		fCurrentPrimaryOpenUri.c_str());
+	stateMsg.AddString(kNowPlayingParentUriField, fCurrentParentUri.c_str());
+	stateMsg.AddString(kNowPlayingParentKindField, fCurrentParentKind.c_str());
+	stateMsg.AddString(kNowPlayingShowIdField, fCurrentShowId.c_str());
+	stateMsg.AddString(kNowPlayingAudiobookIdField,
+		fCurrentAudiobookId.c_str());
 	stateMsg.AddString("repeat_state", fRepeatState.c_str());
 	stateMsg.AddBool("shuffle_state",  fShuffleOn);
 	if (fVolumePct >= 0)
 		stateMsg.AddInt32("volume_percent", fVolumePct);
 	stateMsg.AddString("artwork_url", fLastArtworkUrl.c_str());
-	be_app->PostMessage(&stateMsg);
 }
 
 
@@ -1203,19 +1223,7 @@ PlayerWindow::MessageReceived(BMessage* message)
 				if (fPlayerBar)
 					fPlayerBar->SetPosition(posUs, (bigtime_t)fDurationMs * 1000LL);
 				BMessage stateMsg(MSG_REPLICANT_STATE);
-				stateMsg.AddBool("is_playing",    fIsPlaying);
-				stateMsg.AddInt32("progress_ms",  fProgressMs);
-				stateMsg.AddInt32("duration_ms",  fDurationMs);
-				stateMsg.AddString("title",        fCurrentTitle.c_str());
-				stateMsg.AddString("artist",       fCurrentArtist.c_str());
-				stateMsg.AddString("album_id",     fCurrentAlbumId.c_str());
-				stateMsg.AddString("artist_id",    fCurrentArtistId.c_str());
-				stateMsg.AddString("track_uri",    fCurrentTrackUri.c_str());
-				stateMsg.AddString("repeat_state", fRepeatState.c_str());
-				stateMsg.AddBool("shuffle_state",  fShuffleOn);
-				if (fVolumePct >= 0)
-					stateMsg.AddInt32("volume_percent", fVolumePct);
-				stateMsg.AddString("artwork_url", fLastArtworkUrl.c_str());
+				_FillReplicantStateMessage(stateMsg, fProgressMs);
 				be_app->PostMessage(&stateMsg);
 				api->Seek((int)(posUs / 1000LL), nullptr);
 				_ScheduleVerifyPoll(kVerifyPollDelay);

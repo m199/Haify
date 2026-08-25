@@ -53,6 +53,7 @@ private:
     BString                 fArtworkUrl;
     BString                 fTitle;
     BString                 fArtist;
+    BString                 fOpenUri;
     bool                    fIsReplicant = false;
     bool                    fRegisterForUpdates = false;
     bool                    fRegistered = false;

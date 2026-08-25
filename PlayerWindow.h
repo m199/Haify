@@ -33,6 +33,8 @@ private:
 	void					_ApplyPlaybackMessage(BMessage* message);
 	void					_PlayUri(BMessage* message);
 	void					_ApplyOptimisticPlay(BMessage* message);
+	void					_FillReplicantStateMessage(BMessage& message,
+								int32 progressMs) const;
 	void					_ReadLibrespotEvent();
 	void					_ApplyLibrespotEvent(
 								const std::map<std::string, std::string>& fields);
@@ -80,6 +82,12 @@ private:
 	std::string				fCurrentArtist;
 	std::string				fCurrentAlbumId;
 	std::string				fCurrentArtistId;
+	std::string				fCurrentItemKind;
+	std::string				fCurrentPrimaryOpenUri;
+	std::string				fCurrentParentUri;
+	std::string				fCurrentParentKind;
+	std::string				fCurrentShowId;
+	std::string				fCurrentAudiobookId;
 	std::string				fLastArtworkUrl;
 	std::string				fVolumeDeviceId;
 	std::string				fCurrentTrackUri;

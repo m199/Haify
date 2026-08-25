@@ -5,6 +5,7 @@
 #include "DiscoverListView.h"
 #include "MediaHeaderStyle.h"
 #include "Messages.h"
+#include "NowPlayingFields.h"
 #include "spotify/api/SpotifyApi.h"
 
 #include <Alert.h>
@@ -380,8 +381,20 @@ AudiobookWindow::MessageReceived(BMessage* message)
 		{
 			const char* uri = message->GetString("uri", "");
 			if (*uri) {
+				std::string audiobookUri = fAudiobookUri.empty()
+					? "spotify:audiobook:" + fAudiobookId : fAudiobookUri;
 				BMessage play('play');
 				play.AddString("uri", uri);
+				play.AddString("title", message->GetString("title", ""));
+				play.AddString("artist", fName->Text());
+				play.AddString(kNowPlayingItemKindField, "episode");
+				play.AddString(kNowPlayingPrimaryOpenUriField,
+					audiobookUri.c_str());
+				play.AddString(kNowPlayingParentUriField,
+					audiobookUri.c_str());
+				play.AddString(kNowPlayingParentKindField, "audiobook");
+				play.AddString(kNowPlayingAudiobookIdField,
+					fAudiobookId.c_str());
 				be_app->PostMessage(&play);
 			}
 			break;
