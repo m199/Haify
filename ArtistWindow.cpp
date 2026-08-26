@@ -12,6 +12,7 @@
 #include <Alignment.h>
 #include <ColumnListView.h>
 #include <ColumnTypes.h>
+#include <InterfaceDefs.h>
 #include <LayoutBuilder.h>
 #include <MessageFilter.h>
 #include <PopUpMenu.h>
@@ -75,7 +76,7 @@ class ArtistWindow;
 class TrackArtistListView : public BColumnListView {
 public:
 	TrackArtistListView(const char* name)
-		: BColumnListView(name, B_NAVIGABLE, B_FANCY_BORDER, false) {}
+		: BColumnListView(name, B_NAVIGABLE, B_FANCY_BORDER, true) {}
 
 	class RightClickFilter : public BMessageFilter {
 	public:
@@ -218,7 +219,7 @@ private:
 class AlbumArtistListView : public BColumnListView {
 public:
 	AlbumArtistListView()
-		: BColumnListView("albums", B_NAVIGABLE, B_FANCY_BORDER, false) {}
+		: BColumnListView("albums", B_NAVIGABLE, B_FANCY_BORDER, true) {}
 
 	class RightClickFilter : public BMessageFilter {
 	public:
@@ -374,7 +375,7 @@ static std::string FormatFollowers(int n) {
 
 ArtistWindow::ArtistWindow(const std::string& artistId)
 	: BWindow(BRect(100, 100, 680, 600), "Artist",
-	          B_TITLED_WINDOW,
+	          B_DOCUMENT_WINDOW,
 	          B_ASYNCHRONOUS_CONTROLS),
 	  fArtistId(artistId)
 {

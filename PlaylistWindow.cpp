@@ -41,6 +41,7 @@
 #include <View.h>
 #include <Font.h>
 #include <IconUtils.h>
+#include <InterfaceDefs.h>
 #include <Resources.h>
 #include <String.h>
 #include <Catalog.h>
@@ -53,6 +54,7 @@
 #include <cstdio>
 #include <cstring>
 #include <map>
+#include <time.h>
 #include <thread>
 #include <utility>
 #include <unistd.h>
@@ -81,7 +83,9 @@ static const uint32 kMsgApplyEpisodeSearch = 'aEps';
 static const uint32 kMsgRetryEpisodeSearch = 'rEps';
 static const int32 kLikedSongsIconResource = 2015;
 static const int32 kSearchIconResource = 2016;
+static const int32 kLikedSongsCacheVersion = 1;
 static const int32 kShowCacheVersion = 2;
+static const time_t kLikedSongsCacheMaxAge = 5 * 60;
 
 class ResourceIconView : public BView {
 public:
@@ -495,6 +499,17 @@ LikedSongsCachePath(BPath& path, bool createDirectories)
 }
 
 static bool
+IsLikedSongsCacheFresh(const nlohmann::json& object)
+{
+	if (JsonInt(object, "version") < kLikedSongsCacheVersion)
+		return false;
+	time_t cachedAt = (time_t)JsonInt(object, "cached_at", 0);
+	time_t now = time(NULL);
+	return cachedAt > 0 && now >= cachedAt
+		&& now - cachedAt <= kLikedSongsCacheMaxAge;
+}
+
+static bool
 PlaylistCachePath(const std::string& playlistId, BPath& path,
 	bool createDirectories)
 {
@@ -830,7 +845,7 @@ PlaylistWindow::PlaylistWindow(const char* playlistName, const char* uri, const 
 	: BWindow(BRect(200, 200,
 		200 + kDefaultPlaylistWindowWidth,
 		200 + kDefaultPlaylistWindowHeight), playlistName,
-		B_TITLED_WINDOW,
+		B_DOCUMENT_WINDOW,
 		B_ASYNCHRONOUS_CONTROLS), fUri(uri), fCoverUrl(coverUrl)
 {
 	HaifySettings s = SettingsController::Load();
@@ -2266,26 +2281,29 @@ PlaylistWindow::_InitLayout(const char* playlistName)
 	if (isPodcast) {
 		BLayoutBuilder::Group<>(this, B_VERTICAL, 0)
 			.Add(fMenuBar)
-			.AddGroup(B_HORIZONTAL, B_USE_DEFAULT_SPACING, 0.0f)
-				.SetInsets(B_USE_DEFAULT_SPACING)
-				.Add(fCoverView, 0.0f)
-				.AddGroup(B_VERTICAL, 2, 0.0f)
-					.Add(fPlaylistName)
-					.Add(fPlaylistInfo)
-					.Add(fPodcastSearchInfo)
-					.AddGlue()
-					.Add(fSubscribeButton, 0.0f)
-				.End()
-				.AddGroup(B_VERTICAL, 4, 1.0f)
-					.Add(fDescriptionScroll, 1.0f)
-					.AddGroup(B_HORIZONTAL, B_USE_SMALL_SPACING, 0.0f)
-						.Add(new ResourceIconView("searchIcon",
-							kSearchIconResource, 16.0f), 0.0f)
-						.Add(fSearchBox, 1.0f)
+			.AddGroup(B_VERTICAL, 0, 1.0f)
+				.SetInsets(0)
+				.AddGroup(B_HORIZONTAL, B_USE_DEFAULT_SPACING, 0.0f)
+					.SetInsets(B_USE_DEFAULT_SPACING)
+					.Add(fCoverView, 0.0f)
+					.AddGroup(B_VERTICAL, 2, 0.0f)
+						.Add(fPlaylistName)
+						.Add(fPlaylistInfo)
+						.Add(fPodcastSearchInfo)
+						.AddGlue()
+						.Add(fSubscribeButton, 0.0f)
+					.End()
+					.AddGroup(B_VERTICAL, 4, 1.0f)
+						.Add(fDescriptionScroll, 1.0f)
+						.AddGroup(B_HORIZONTAL, B_USE_SMALL_SPACING, 0.0f)
+							.Add(new ResourceIconView("searchIcon",
+								kSearchIconResource, 16.0f), 0.0f)
+							.Add(fSearchBox, 1.0f)
+						.End()
 					.End()
 				.End()
-			.End()
-			.Add(fTrackList, 1);
+				.Add(fTrackList, 1)
+			.End();
 	} else if (isAlbum) {
 		fPlaylistName->SetExplicitMinSize(BSize(0, B_SIZE_UNSET));
 		fPlaylistName->SetExplicitAlignment(BAlignment(
@@ -2313,25 +2331,33 @@ PlaylistWindow::_InitLayout(const char* playlistName)
 
 		BLayoutBuilder::Group<>(this, B_VERTICAL, 0)
 			.Add(fMenuBar)
-			.AddGroup(B_HORIZONTAL, B_USE_DEFAULT_SPACING, 0.0f)
-				.SetInsets(B_USE_DEFAULT_SPACING)
-				.Add(fCoverView, 0.0f)
-				.Add(albumInfo, 1.0f)
+			.AddGroup(B_VERTICAL, 0, 1.0f)
+				.SetInsets(0)
+				.AddGroup(B_HORIZONTAL, B_USE_DEFAULT_SPACING, 0.0f)
+					.SetInsets(B_USE_DEFAULT_SPACING)
+					.Add(fCoverView, 0.0f)
+					.Add(albumInfo, 1.0f)
+				.End()
+				.Add(fTrackList, 1)
 			.End()
-			.Add(fTrackList, 1);
+		.End();
 	} else {
 		BLayoutBuilder::Group<>(this, B_VERTICAL, 0)
 			.Add(fMenuBar)
-			.AddGroup(B_HORIZONTAL, B_USE_DEFAULT_SPACING, 0.0f)
-				.SetInsets(B_USE_DEFAULT_SPACING)
-				.Add(fCoverView, 0.0f)
-				.AddGroup(B_VERTICAL, 2, 1.0f)
-					.Add(fPlaylistName, 0.0f)
-					.Add(fPlaylistInfo, 0.0f)
-					.AddGlue()
+			.AddGroup(B_VERTICAL, 0, 1.0f)
+				.SetInsets(0)
+				.AddGroup(B_HORIZONTAL, B_USE_DEFAULT_SPACING, 0.0f)
+					.SetInsets(B_USE_DEFAULT_SPACING)
+					.Add(fCoverView, 0.0f)
+					.AddGroup(B_VERTICAL, 2, 1.0f)
+						.Add(fPlaylistName, 0.0f)
+						.Add(fPlaylistInfo, 0.0f)
+						.AddGlue()
+					.End()
 				.End()
+				.Add(fTrackList, 1)
 			.End()
-			.Add(fTrackList, 1);
+		.End();
 	}
 
 	if (isPodcast)
@@ -3056,6 +3082,8 @@ PlaylistWindow::_LoadData(bool ignoreEpisodeCache)
 	if (fUri == "spotify:collection") {
 		if (_LoadCache())
 			loadFirstPage = false;
+		else
+			api->InvalidateCachePrefix("/me/tracks");
 	} else if (fUri.find("spotify:playlist:") == 0) {
 		std::string id = fUri.substr(17);
 		if (_LoadCache())
@@ -3611,6 +3639,8 @@ PlaylistWindow::_LoadCache()
 				if (fCachedPlaylistSnapshotId.empty())
 					return false;
 				fPlaylistSnapshotId = fCachedPlaylistSnapshotId;
+			} else if (!IsLikedSongsCacheFresh(j)) {
+				return false;
 			}
 
 			if (fTrackList)
@@ -3752,8 +3782,12 @@ PlaylistWindow::_WriteCacheNow()
 		nlohmann::json j;
 		j["total"] = fPageTotal;
 		j["next_offset"] = fPageOffset;
-		if (isPlaylist)
+		if (isPlaylist) {
 			j["snapshot_id"] = fPlaylistSnapshotId;
+		} else {
+			j["version"] = kLikedSongsCacheVersion;
+			j["cached_at"] = (int)time(NULL);
+		}
 		j["tracks"] = nlohmann::json::array();
 		for (int32 i = 0; i < fTrackList->CountRows(); i++) {
 			TrackRow* row = (TrackRow*)fTrackList->RowAt(i);

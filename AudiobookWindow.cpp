@@ -17,6 +17,7 @@
 #include <Button.h>
 #include <Catalog.h>
 #include <Font.h>
+#include <InterfaceDefs.h>
 #include <LayoutBuilder.h>
 #include <Menu.h>
 #include <MenuBar.h>
@@ -202,7 +203,7 @@ FontLineHeight(const BFont& font)
 
 AudiobookWindow::AudiobookWindow(const std::string& audiobookId)
 	: BWindow(BRect(170, 110, 800, 650), B_TRANSLATE("Audiobook"),
-		B_TITLED_WINDOW, B_ASYNCHRONOUS_CONTROLS),
+		B_DOCUMENT_WINDOW, B_ASYNCHRONOUS_CONTROLS),
 	  fAudiobookId(audiobookId)
 {
 	fArtwork = new ArtworkView("audiobookArtwork");
@@ -256,7 +257,7 @@ AudiobookWindow::AudiobookWindow(const std::string& audiobookId)
 	fChapterList = new DiscoverListView("Chapters", {
 		{B_TRANSLATE("Chapter"), 390, kColPlayOnDouble},
 		{B_TRANSLATE("Duration"), 90, kColNone}
-	}, -1);
+	}, -1, true);
 	fChapterList->SetExplicitMinSize(BSize(B_SIZE_UNSET, 96));
 	fChapterList->SetExplicitPreferredSize(BSize(B_SIZE_UNSET, 136));
 	BScrollView* descriptionScroll = new BScrollView(
@@ -291,9 +292,10 @@ AudiobookWindow::AudiobookWindow(const std::string& audiobookId)
 
 	BLayoutBuilder::Group<>(this, B_VERTICAL, 0)
 		.Add(fMenuBar, 0.0f)
-		.AddGroup(B_VERTICAL, B_USE_DEFAULT_SPACING, 1.0f)
-			.SetInsets(B_USE_DEFAULT_SPACING)
+		.AddGroup(B_VERTICAL, 0, 1.0f)
+			.SetInsets(0)
 			.AddGroup(B_HORIZONTAL, B_USE_DEFAULT_SPACING, 0.0f)
+				.SetInsets(B_USE_DEFAULT_SPACING)
 				.Add(fArtwork, 0.0f)
 				.Add(headerInfo, 1.0f)
 			.End()

@@ -13,6 +13,7 @@
 #include <Application.h>
 #include <Autolock.h>
 #include <File.h>
+#include <InterfaceDefs.h>
 #include <LayoutBuilder.h>
 #include <Locker.h>
 #include <MenuBar.h>
@@ -436,7 +437,7 @@ DiscoverWindow::DiscoverWindow()
 	: BWindow(BRect(250, 200,
 		250 + kDefaultDiscoverWindowWidth,
 		200 + kDefaultDiscoverWindowHeight), "Discover",
-		B_TITLED_WINDOW,
+		B_DOCUMENT_WINDOW,
 		B_ASYNCHRONOUS_CONTROLS | B_AUTO_UPDATE_SIZE_LIMITS),
 	  fPlaylistSyncGeneration(0)
 {
@@ -526,7 +527,7 @@ DiscoverWindow::_LogicalTab(int32 visual) const
 BColumnListView*
 DiscoverWindow::_MakeList(int32 i)
 {
-	return new DiscoverListView(kTabDefs[i].label, kTabCols[i], i);
+	return new DiscoverListView(kTabDefs[i].label, kTabCols[i], i, true);
 }
 
 
@@ -1756,12 +1757,15 @@ void
 DiscoverWindow::_InitLayout()
 {
 	fTabView = new DiscoverTabView();
-	fTabView->SetBorder(B_FANCY_BORDER);
+	fTabView->SetBorder(B_NO_BORDER);
 	_RebuildTabs();
 
 	BLayoutBuilder::Group<>(this, B_VERTICAL, 0)
 		.Add(fMenuBar)
-		.Add(fTabView, 1)
+		.AddGroup(B_VERTICAL, 0, 1.0f)
+			.SetInsets(0)
+			.Add(fTabView, 1)
+		.End()
 	.End();
 
 	SetSizeLimits(300, 100000, 200, 100000);

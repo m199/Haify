@@ -326,7 +326,7 @@ StoredReplicantColor(const HaifySettings& settings)
 
 SettingsWindow::SettingsWindow()
 	: BWindow(BRect(100, 100, 840, 680), B_TRANSLATE("Settings"),
-		B_TITLED_WINDOW,
+		B_DOCUMENT_WINDOW,
 		B_AUTO_UPDATE_SIZE_LIMITS | B_ASYNCHRONOUS_CONTROLS)
 {
 	_InitLayout();
@@ -687,10 +687,13 @@ SettingsWindow::_InitLayout()
 		.End()
 	.End();
 
-	BLayoutBuilder::Group<>(this, B_HORIZONTAL, B_USE_SMALL_SPACING)
-		.SetInsets(B_USE_SMALL_SPACING)
-		.Add(categoryScroll)
-		.Add(rightPanel, 1.0f)
+	BLayoutBuilder::Group<>(this, B_VERTICAL, 0)
+		.SetInsets(0)
+		.AddGroup(B_HORIZONTAL, B_USE_SMALL_SPACING, 1.0f)
+			.SetInsets(B_USE_SMALL_SPACING)
+			.Add(categoryScroll)
+			.Add(rightPanel, 1.0f)
+		.End()
 	.End();
 
 	SetSizeLimits(680.0f, 1400.0f, 520.0f, 1000.0f);

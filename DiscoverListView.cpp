@@ -145,8 +145,10 @@ DiscoverRow::DiscoverRow(const std::vector<std::string>& vals,
 
 DiscoverListView::DiscoverListView(const char* name,
                                    const std::vector<ColDef>& cols,
-                                   int32 logicalTab)
-	: BColumnListView(name, B_NAVIGABLE, B_NO_BORDER, false),
+                                   int32 logicalTab,
+                                   bool showHorizontalScrollbar)
+	: BColumnListView(name, B_NAVIGABLE, B_NO_BORDER,
+		showHorizontalScrollbar),
 	  fLogicalTab(logicalTab)
 {
 	SetViewUIColor(B_LIST_BACKGROUND_COLOR);

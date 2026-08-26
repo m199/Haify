@@ -13,6 +13,7 @@
 #include <ColumnListView.h>
 #include <ColumnTypes.h>
 #include <GroupView.h>
+#include <InterfaceDefs.h>
 #include <LayoutBuilder.h>
 #include <Menu.h>
 #include <MenuItem.h>
@@ -148,7 +149,7 @@ SearchWindow::SearchWindow()
 	: BWindow(BRect(200, 150,
 		200 + kDefaultSearchWindowWidth,
 		150 + kDefaultSearchWindowHeight), B_TRANSLATE("Search"),
-		B_TITLED_WINDOW,
+		B_DOCUMENT_WINDOW,
 		B_ASYNCHRONOUS_CONTROLS | B_AUTO_UPDATE_SIZE_LIMITS)
 {
 	HaifySettings s = SettingsController::Load();
@@ -229,9 +230,10 @@ SearchWindow::_InitLayout()
 		{ B_TRANSLATE("Type"),    80, kColNone         },
 		{ B_TRANSLATE("Artist"), 160, kColOpenOnDouble },
 		{ B_TRANSLATE("Album"),  160, kColOpenOnDouble },
-	});
+	}, -1, true);
 
 	BLayoutBuilder::Group<>(this, B_VERTICAL, 0)
+		.SetInsets(0)
 		.AddGroup(B_HORIZONTAL, B_USE_SMALL_SPACING)
 			.SetInsets(B_USE_DEFAULT_SPACING, B_USE_DEFAULT_SPACING,
 				B_USE_DEFAULT_SPACING, B_USE_SMALL_SPACING)

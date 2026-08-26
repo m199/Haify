@@ -54,7 +54,8 @@ class DiscoverListView : public BColumnListView {
 public:
 						DiscoverListView(const char* name,
 						                 const std::vector<ColDef>& cols,
-						                 int32 logicalTab = -1);
+						                 int32 logicalTab = -1,
+						                 bool showHorizontalScrollbar = false);
 	virtual void		SelectionChanged();
 	virtual void		ItemInvoked();
 	virtual bool		InitiateDrag(BPoint point, bool wasSelected);

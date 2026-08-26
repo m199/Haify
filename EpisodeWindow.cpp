@@ -11,6 +11,7 @@
 #include <Catalog.h>
 #include <Font.h>
 #include <GroupView.h>
+#include <InterfaceDefs.h>
 #include <LayoutBuilder.h>
 #include <Message.h>
 #include <Messenger.h>
@@ -44,7 +45,7 @@ EpisodeJsonBool(const nlohmann::json& object, const char* key,
 
 EpisodeWindow::EpisodeWindow(const std::string& episodeId)
     : BWindow(BRect(160, 120, 720, 540), B_TRANSLATE("Episode"),
-        B_TITLED_WINDOW, B_ASYNCHRONOUS_CONTROLS | B_AUTO_UPDATE_SIZE_LIMITS),
+        B_DOCUMENT_WINDOW, B_ASYNCHRONOUS_CONTROLS | B_AUTO_UPDATE_SIZE_LIMITS),
       fEpisodeId(episodeId)
 {
     fArtwork = new ArtworkView("episodeArtwork");
@@ -72,25 +73,28 @@ EpisodeWindow::EpisodeWindow(const std::string& episodeId)
     fOpenShow = new BButton("openShow", B_TRANSLATE("Open Show"),
         new BMessage('eShw'));
 
-    BLayoutBuilder::Group<>(this, B_VERTICAL, B_USE_DEFAULT_SPACING)
-        .SetInsets(B_USE_DEFAULT_SPACING)
-        .AddGroup(B_HORIZONTAL, B_USE_DEFAULT_SPACING)
-            .Add(fArtwork)
-            .AddGroup(B_VERTICAL, B_USE_SMALL_SPACING)
-                .Add(fName)
-                .Add(fShow)
-                .AddGlue()
-                .AddGroup(B_HORIZONTAL, B_USE_SMALL_SPACING)
-                    .Add(fPlay)
-                    .Add(fQueue)
-                    .Add(fSave)
-                    .Add(fOpenShow)
+    BLayoutBuilder::Group<>(this, B_VERTICAL, 0)
+        .SetInsets(0)
+        .AddGroup(B_VERTICAL, B_USE_DEFAULT_SPACING, 1.0f)
+            .SetInsets(B_USE_DEFAULT_SPACING)
+            .AddGroup(B_HORIZONTAL, B_USE_DEFAULT_SPACING)
+                .Add(fArtwork)
+                .AddGroup(B_VERTICAL, B_USE_SMALL_SPACING)
+                    .Add(fName)
+                    .Add(fShow)
                     .AddGlue()
+                    .AddGroup(B_HORIZONTAL, B_USE_SMALL_SPACING)
+                        .Add(fPlay)
+                        .Add(fQueue)
+                        .Add(fSave)
+                        .Add(fOpenShow)
+                        .AddGlue()
+                    .End()
                 .End()
             .End()
+            .Add(new BScrollView("episodeDescriptionScroll", fDescription,
+                0, false, true), 1.0f)
         .End()
-        .Add(new BScrollView("episodeDescriptionScroll", fDescription,
-            0, false, true), 1.0f)
     .End();
 
     _Load();

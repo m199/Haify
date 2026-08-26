@@ -10,6 +10,7 @@
 #include <Application.h>
 #include <ColumnListView.h>
 #include <ColumnTypes.h>
+#include <InterfaceDefs.h>
 #include <LayoutBuilder.h>
 #include <MenuBar.h>
 #include <Menu.h>
@@ -67,7 +68,7 @@ public:
 class QueueListView : public BColumnListView {
 public:
 	QueueListView()
-		: BColumnListView("QueueList", 0, B_NO_BORDER, false) {}
+		: BColumnListView("QueueList", 0, B_NO_BORDER, true) {}
 
 	class RightClickFilter : public BMessageFilter {
 	public:
@@ -231,7 +232,7 @@ QueueWindow::QueueWindow()
 	: BWindow(BRect(300, 150,
 		300 + kDefaultQueueWindowWidth,
 		150 + kDefaultQueueWindowHeight), B_TRANSLATE("Queue"),
-		B_TITLED_WINDOW,
+		B_DOCUMENT_WINDOW,
 		B_ASYNCHRONOUS_CONTROLS | B_AUTO_UPDATE_SIZE_LIMITS)
 {
 	HaifySettings s = SettingsController::Load();
@@ -290,10 +291,11 @@ QueueWindow::_InitLayout()
 			{ B_TRANSLATE("Track"),  200, kColPlayOnDouble },
 			{ B_TRANSLATE("Artist"), 130, kColOpenOnDouble },
 			{ B_TRANSLATE("Album"),  100, kColOpenOnDouble },
-		});
+		}, -1, true);
 	fRecentList->SetSortingEnabled(false);
 
 	fTabView = new NotifyTabView();
+	fTabView->SetBorder(B_NO_BORDER);
 	fTabView->AddTab(queueTab);
 	fTabView->TabAt(0)->SetLabel(B_TRANSLATE("Queue"));
 	fTabView->AddTab(fRecentList);
@@ -301,7 +303,10 @@ QueueWindow::_InitLayout()
 
 	BLayoutBuilder::Group<>(this, B_VERTICAL, 0)
 		.Add(fMenuBar)
-		.Add(fTabView, 1)
+		.AddGroup(B_VERTICAL, 0, 1.0f)
+			.SetInsets(0)
+			.Add(fTabView, 1)
+		.End()
 	.End();
 
 	SetSizeLimits(250, 100000, 200, 100000);
