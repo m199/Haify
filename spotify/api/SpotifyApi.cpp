@@ -408,10 +408,8 @@ void SpotifyApi::PlayTrack(const std::string& trackUri,
                            JsonCallback callback)
 {
     std::string body;
-    bool supportsOffset = !contextUri.empty()
-        && contextUri.find("spotify:artist:") != 0
-        && contextUri.find("spotify:show:") != 0
-        && trackUri.find("spotify:episode:") != 0;
+    bool supportsOffset = SpotifyPlaybackContextSupportsOffset(trackUri,
+        contextUri);
     if (supportsOffset) {
         body = nlohmann::json({
             {"context_uri", contextUri},

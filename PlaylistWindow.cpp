@@ -1,5 +1,7 @@
 #include "PlaylistWindow.h"
 #include "ArtworkView.h"
+#include "DescriptionTextFormatter.h"
+#include "MediaDescriptionView.h"
 #include "TrackContextMenu.h"
 #include "TextInputDialog.h"
 #include "MediaHeaderStyle.h"
@@ -78,6 +80,73 @@ static const uint32 kMsgSaveCache = 'sCch';
 static const uint32 kMsgApplyEpisodeSearch = 'aEps';
 static const uint32 kMsgRetryEpisodeSearch = 'rEps';
 static const int32 kLikedSongsIconResource = 2015;
+static const int32 kSearchIconResource = 2016;
+static const int32 kShowCacheVersion = 2;
+
+class ResourceIconView : public BView {
+public:
+	ResourceIconView(const char* name, int32 resourceId, float size)
+		:
+		BView(name, B_WILL_DRAW),
+		fIcon(_LoadIcon(resourceId, size))
+	{
+		SetExplicitMinSize(BSize(size, size));
+		SetExplicitPreferredSize(BSize(size, size));
+		SetExplicitMaxSize(BSize(size, size));
+		SetExplicitAlignment(BAlignment(B_ALIGN_LEFT,
+			B_ALIGN_VERTICAL_CENTER));
+		SetViewUIColor(B_PANEL_BACKGROUND_COLOR);
+	}
+
+	virtual ~ResourceIconView()
+	{
+		delete fIcon;
+	}
+
+	virtual void Draw(BRect updateRect) override
+	{
+		SetHighColor(ViewColor());
+		FillRect(updateRect);
+		if (!fIcon)
+			return;
+		SetDrawingMode(B_OP_ALPHA);
+		BRect bounds = Bounds();
+		BRect iconBounds = fIcon->Bounds();
+		DrawBitmap(fIcon, BPoint(
+			(bounds.Width() - iconBounds.Width()) / 2.0f,
+			(bounds.Height() - iconBounds.Height()) / 2.0f));
+		SetDrawingMode(B_OP_COPY);
+	}
+
+private:
+	static BBitmap* _LoadIcon(int32 resourceId, float size)
+	{
+		BResources* resources = be_app ? be_app->AppResources() : nullptr;
+		if (!resources || size <= 0)
+			return nullptr;
+		size_t dataSize = 0;
+		const void* data = resources->LoadResource('VICN', resourceId,
+			&dataSize);
+		if (!data || dataSize == 0)
+			return nullptr;
+		int32 side = std::max<int32>(1, (int32)(size + 0.5f));
+		BBitmap* icon = new BBitmap(BRect(0, 0, side - 1, side - 1),
+			B_RGBA32);
+		if (icon->InitCheck() != B_OK) {
+			delete icon;
+			return nullptr;
+		}
+		memset(icon->Bits(), 0, icon->BitsLength());
+		if (BIconUtils::GetVectorIcon((const uint8*)data, dataSize,
+				icon) != B_OK) {
+			delete icon;
+			return nullptr;
+		}
+		return icon;
+	}
+
+	BBitmap* fIcon;
+};
 
 static BLocker sCacheWriterLock("Haify playlist cache writer");
 static std::map<std::string, uint64> sCacheWriteGenerations;
@@ -321,6 +390,7 @@ public:
 	std::string fTrackUri;
 	std::string fArtistUri;
 	std::string fAlbumUri;
+	std::string fDescription;
 	int32 fPlaylistPosition;
 	TrackRow(const std::string& uri, int32 playlistPosition = -1)
 		: BRow(), fTrackUri(uri), fPlaylistPosition(playlistPosition) {}
@@ -349,6 +419,13 @@ JsonString(const nlohmann::json& object, const char* key,
 	if (value == object.end() || !value->is_string())
 		return fallback;
 	return value->get<std::string>();
+}
+
+static std::string
+JsonDescription(const nlohmann::json& object)
+{
+	return JsonString(object, "html_description",
+		JsonString(object, "description"));
 }
 
 static int
@@ -471,7 +548,7 @@ AddEpisodeToMessage(BMessage* msg, const nlohmann::json& episode, int32 number)
 {
 	msg->AddInt32("number",       number);
 	msg->AddString("title", JsonString(episode, "name", "Unknown").c_str());
-	msg->AddString("description", JsonString(episode, "description").c_str());
+	msg->AddString("description", JsonDescription(episode).c_str());
 	msg->AddString("date", JsonString(episode, "release_date").c_str());
 	msg->AddString("duration",
 		FormatTrackDuration(JsonInt(episode, "duration_ms")).c_str());
@@ -689,10 +766,9 @@ public:
 			Window()->PostMessage(kMsgCheckLazyLoad);
 		TrackRow* row = (TrackRow*)CurrentSelection();
 		if (!row || !Window()) return;
-		BStringField* f = dynamic_cast<BStringField*>(row->GetField(2));
-		if (f) {
+		if (!row->fDescription.empty()) {
 			BMessage msg('epSl');
-			msg.AddString("description", f->String());
+			msg.AddString("description", row->fDescription.c_str());
 			Window()->PostMessage(&msg);
 		}
 	}
@@ -1911,8 +1987,11 @@ PlaylistWindow::MessageReceived(BMessage* message)
 		case 'epSl':
 		{
 			const char* desc;
-			if (fDescriptionView && message->FindString("description", &desc) == B_OK)
-				fDescriptionView->SetText(desc);
+			if (fDescriptionView
+					&& message->FindString("description", &desc) == B_OK) {
+				ApplyMediaDescription(fDescriptionView, desc);
+				fDescriptionView->SetLinks(MediaDescriptionLinks(desc));
+			}
 			break;
 		}
 
@@ -2103,20 +2182,20 @@ PlaylistWindow::_InitLayout(const char* playlistName)
 		dateAlbumColumn = new TrackStringColumn(B_TRANSLATE("Album"), 160, 60, 350, B_TRUNCATE_END);
 	}
 	fTrackList->AddColumn(dateAlbumColumn, 5);
-	fTrackList->AddColumn(new TrackStringColumn(B_TRANSLATE("Duration"), 60, 40, 100, B_TRUNCATE_END, B_ALIGN_RIGHT), 6);
+	fTrackList->AddColumn(new TrackStringColumn(B_TRANSLATE("Duration"), 86, 70, 120, B_TRUNCATE_END, B_ALIGN_RIGHT), 6);
 	fBpmColumn->SetVisible(false);
 	fKeyColumn->SetVisible(false);
 	if (isAlbum)
 		dateAlbumColumn->SetVisible(false);
 
 	if (isPodcast) {
-		const float podcastInfoWidth = 180.0f;
-		const float podcastSearchInfoHeight = be_plain_font->Size() * 2.6f;
+		const float podcastInfoWidth = 230.0f;
+		const float podcastSearchInfoHeight = be_plain_font->Size() * 1.35f;
 		fPlaylistName->SetExplicitMinSize(BSize(
 			podcastInfoWidth, B_SIZE_UNSET));
 		fPlaylistName->SetExplicitPreferredSize(BSize(
 			podcastInfoWidth, B_SIZE_UNSET));
-		fPlaylistName->SetExplicitMaxSize(BSize(podcastInfoWidth, 60));
+		fPlaylistName->SetExplicitMaxSize(BSize(podcastInfoWidth, 42));
 		fPlaylistInfo->SetExplicitMinSize(BSize(
 			podcastInfoWidth, B_SIZE_UNSET));
 		fPlaylistInfo->SetExplicitPreferredSize(BSize(
@@ -2141,6 +2220,9 @@ PlaylistWindow::_InitLayout(const char* playlistName)
 
 		fSearchBox = new BTextControl("search", "", "", nullptr);
 		fSearchBox->SetModificationMessage(new BMessage('srch'));
+		fSearchBox->SetExplicitMinSize(BSize(0, B_SIZE_UNSET));
+		fSearchBox->SetExplicitAlignment(BAlignment(B_ALIGN_USE_FULL_WIDTH,
+			B_ALIGN_VERTICAL_CENTER));
 		fSubscribeButton = new BButton("subBtn", B_TRANSLATE("Subscribe"),
 			new BMessage('subS'));
 		fSubscribeButton->SetExplicitMinSize(BSize(
@@ -2149,15 +2231,11 @@ PlaylistWindow::_InitLayout(const char* playlistName)
 			B_ALIGN_VERTICAL_CENTER));
 		fSubscribeButton->SetEnabled(false);
 
-		fDescriptionView = new BTextView("DescriptionView");
-		fDescriptionView->MakeEditable(false);
-		fDescriptionView->MakeSelectable(false);
-		fDescriptionView->SetWordWrap(true);
-		fDescriptionView->SetInsets(4, 4, 4, 4);
+		fDescriptionView = new MediaDescriptionView("DescriptionView");
 		fDescriptionScroll = new BScrollView("DescScroll", fDescriptionView,
 			0, false, true, B_FANCY_BORDER);
-		fDescriptionScroll->SetExplicitMinSize(BSize(B_SIZE_UNSET, 45));
-		fDescriptionScroll->SetExplicitPreferredSize(BSize(B_SIZE_UNSET, 55));
+		fDescriptionScroll->SetExplicitMinSize(BSize(B_SIZE_UNSET, 72));
+		fDescriptionScroll->SetExplicitPreferredSize(BSize(B_SIZE_UNSET, 94));
 		fDescriptionScroll->SetExplicitMaxSize(
 			BSize(B_SIZE_UNLIMITED, B_SIZE_UNLIMITED));
 	}
@@ -2200,7 +2278,11 @@ PlaylistWindow::_InitLayout(const char* playlistName)
 				.End()
 				.AddGroup(B_VERTICAL, 4, 1.0f)
 					.Add(fDescriptionScroll, 1.0f)
-					.Add(fSearchBox, 0.0f)
+					.AddGroup(B_HORIZONTAL, B_USE_SMALL_SPACING, 0.0f)
+						.Add(new ResourceIconView("searchIcon",
+							kSearchIconResource, 16.0f), 0.0f)
+						.Add(fSearchBox, 1.0f)
+					.End()
 				.End()
 			.End()
 			.Add(fTrackList, 1);
@@ -2212,11 +2294,13 @@ PlaylistWindow::_InitLayout(const char* playlistName)
 			B_ALIGN_USE_FULL_WIDTH, B_ALIGN_VERTICAL_CENTER));
 
 		BView* albumInfo = new BView("albumHeaderInfo", 0);
-		albumInfo->SetExplicitMinSize(BSize(0, B_SIZE_UNSET));
-		albumInfo->SetExplicitMaxSize(BSize(
-			B_SIZE_UNLIMITED, B_SIZE_UNLIMITED));
+		albumInfo->SetExplicitMinSize(BSize(0, artworkSize));
+		albumInfo->SetExplicitPreferredSize(BSize(B_SIZE_UNSET,
+			artworkSize));
+		albumInfo->SetExplicitMaxSize(BSize(B_SIZE_UNLIMITED,
+			artworkSize));
 		albumInfo->SetExplicitAlignment(BAlignment(
-			B_ALIGN_USE_FULL_WIDTH, B_ALIGN_TOP));
+			B_ALIGN_USE_FULL_WIDTH, B_ALIGN_USE_FULL_HEIGHT));
 		BLayoutBuilder::Group<>(albumInfo, B_VERTICAL, B_USE_SMALL_SPACING)
 			.Add(fPlaylistName, 0.0f)
 			.AddGroup(B_HORIZONTAL, 0, 0.0f)
@@ -2251,11 +2335,11 @@ PlaylistWindow::_InitLayout(const char* playlistName)
 	}
 
 	if (isPodcast)
-		SetSizeLimits(300, 100000, 180, 100000);
+		SetSizeLimits(560, 100000, 300, 100000);
 	else if (isAlbum)
-		SetSizeLimits(320, 100000, 220, 100000);
+		SetSizeLimits(420, 100000, 260, 100000);
 	else
-		SetSizeLimits(300, 100000, 180, 100000);
+		SetSizeLimits(420, 100000, 260, 100000);
 }
 
 
@@ -2984,8 +3068,7 @@ PlaylistWindow::_LoadData(bool ignoreEpisodeCache)
 				JsonString(data, "name", "Playlist").c_str());
 			metaMsg->AddString("snapshot_id", JsonString(data,
 				"snapshot_id").c_str());
-			metaMsg->AddString("description", JsonString(data,
-				"description").c_str());
+			metaMsg->AddString("description", JsonDescription(data).c_str());
 			metaMsg->AddBool("public", JsonBool(data, "public"));
 			if (data.contains("owner") && data["owner"].is_object()) {
 				std::string ownerId = JsonString(data["owner"], "account_id",
@@ -3296,9 +3379,11 @@ PlaylistWindow::_RebuildEpisodeList(const std::string& filter)
 				continue;
 		}
 		TrackRow* row = new TrackRow(ep.trackUri);
+		row->fDescription = ep.description;
 		row->SetField(new BIntegerField(ep.number),             0);
 		row->SetField(new TrackStringField(ep.title.c_str()),   1);
-		row->SetField(new TrackStringField(ep.description.c_str()), 2);
+		std::string displayDescription = FormatMediaDescription(ep.description);
+		row->SetField(new TrackStringField(displayDescription.c_str()), 2);
 		row->SetField(new TrackStringField(""),                     3);
 		row->SetField(new TrackStringField(""),                     4);
 		row->SetField(new TrackStringField(sFormatDate(ep.date).c_str()), 5);
@@ -3324,9 +3409,12 @@ PlaylistWindow::_AppendEpisodeRows(size_t firstEpisode,
 			continue;
 
 		TrackRow* row = new TrackRow(episode.trackUri);
+		row->fDescription = episode.description;
 		row->SetField(new BIntegerField(episode.number), 0);
 		row->SetField(new TrackStringField(episode.title.c_str()), 1);
-		row->SetField(new TrackStringField(episode.description.c_str()), 2);
+		std::string displayDescription = FormatMediaDescription(
+			episode.description);
+		row->SetField(new TrackStringField(displayDescription.c_str()), 2);
 		row->SetField(new TrackStringField(""), 3);
 		row->SetField(new TrackStringField(""), 4);
 		row->SetField(new TrackStringField(sFormatDate(episode.date).c_str()), 5);
@@ -3365,22 +3453,22 @@ PlaylistWindow::_UpdateEpisodeInfo()
 	int32 matches = fTrackList ? fTrackList->CountRows() : 0;
 	if (fEpisodeSearchWaitingRetry) {
 		snprintf(searchInfo, sizeof(searchInfo), B_TRANSLATE(
-			"%d matches\nRetrying search..."), (int)matches);
+			"%d matches - retrying search..."), (int)matches);
 	} else if (fEpisodeSearchPaging && fEpisodeTotal > 0) {
 		snprintf(searchInfo, sizeof(searchInfo), B_TRANSLATE(
-			"%d matches\nSearching: %d/%d"), (int)matches,
+			"%d matches - searching: %d/%d"), (int)matches,
 			(int)fEpisodeOffset, (int)fEpisodeTotal);
 	} else if (fEpisodeSearchPaging) {
 		snprintf(searchInfo, sizeof(searchInfo), B_TRANSLATE(
-			"%d matches\nSearching: %d"), (int)matches,
+			"%d matches - searching: %d"), (int)matches,
 			(int)fEpisodeOffset);
 	} else if (fEpisodeSearchFailed && fEpisodeTotal > 0) {
 		snprintf(searchInfo, sizeof(searchInfo), B_TRANSLATE(
-			"%d matches\nStopped: %d/%d"), (int)matches,
+			"%d matches - stopped: %d/%d"), (int)matches,
 			(int)fEpisodeOffset, (int)fEpisodeTotal);
 	} else {
 		snprintf(searchInfo, sizeof(searchInfo), B_TRANSLATE(
-			"%d matches\nSearched: %d"), (int)matches,
+			"%d matches - searched: %d"), (int)matches,
 			(int)fEpisodeOffset);
 	}
 	fPodcastSearchInfo->SetText(searchInfo);
@@ -3595,6 +3683,8 @@ PlaylistWindow::_LoadCache()
 		auto j = nlohmann::json::parse(content);
 		if (!j.contains("episodes") || !j["episodes"].is_array())
 			return false;
+		if (JsonInt(j, "version") < kShowCacheVersion)
+			return false;
 		fEpisodeTotal = JsonInt(j, "total");
 		fEpisodes.clear();
 		for (const auto& ep : j["episodes"]) {
@@ -3704,6 +3794,7 @@ PlaylistWindow::_WriteCacheNow()
 	if (!ShowCachePath(id, path, true)) return;
 
 	nlohmann::json j;
+	j["version"]  = kShowCacheVersion;
 	j["total"]    = fEpisodeTotal;
 	j["next_offset"] = fEpisodeOffset;
 	j["complete"] = (fEpisodeTotal <= 0 || fEpisodeOffset >= fEpisodeTotal);

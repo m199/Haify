@@ -21,6 +21,7 @@ class BTextView;
 class BView;
 class BStringColumn;
 class TrackListView;
+class MediaDescriptionView;
 
 class PlaylistWindow : public BWindow {
 public:
@@ -110,7 +111,7 @@ private:
 	bool					fIsSubscribed		= false;
 	bool					fSubscriptionKnown	= false;
 	bool					fSubscriptionPending	= false;
-	BTextView*				fDescriptionView  = nullptr;
+	MediaDescriptionView*	fDescriptionView  = nullptr;
 	BScrollView*			fDescriptionScroll= nullptr;
 	BFilePanel*				fPlaylistCoverPanel = nullptr;
 	std::string             fUri;

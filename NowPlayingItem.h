@@ -2,7 +2,12 @@
 
 #include "NowPlayingFields.h"
 
+#if __has_include(<SupportDefs.h>)
 #include <SupportDefs.h>
+#else
+#include <cstdint>
+typedef int32_t int32;
+#endif
 
 #include <nlohmann/json.hpp>
 

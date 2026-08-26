@@ -2,7 +2,9 @@
 
 #include "App.h"
 #include "ArtworkView.h"
+#include "DescriptionTextFormatter.h"
 #include "DiscoverListView.h"
+#include "MediaDescriptionView.h"
 #include "MediaHeaderStyle.h"
 #include "Messages.h"
 #include "NowPlayingFields.h"
@@ -21,11 +23,13 @@
 #include <MenuItem.h>
 #include <Messenger.h>
 #include <ScrollView.h>
+#include <SplitView.h>
 #include <String.h>
 #include <StringView.h>
 #include <TextView.h>
 #include <View.h>
 
+#include <cctype>
 #include <cstdio>
 #include <cstring>
 
@@ -62,6 +66,140 @@ AudiobookJsonBool(const nlohmann::json& object, const char* key,
 	return object[key].get<bool>();
 }
 
+static std::string
+StripLeadingAudiobookCredits(const std::string& description)
+{
+	size_t start = 0;
+	while (start < description.size()) {
+		size_t lineEnd = description.find('\n', start);
+		std::string line = description.substr(start,
+			lineEnd == std::string::npos ? std::string::npos
+				: lineEnd - start);
+		if (line.rfind("Author(s):", 0) != 0
+				&& line.rfind("Narrator(s):", 0) != 0) {
+			break;
+		}
+		start = lineEnd == std::string::npos
+			? description.size() : lineEnd + 1;
+	}
+	while (start < description.size()
+			&& (description[start] == '\n' || description[start] == '\r'
+				|| description[start] == ' ' || description[start] == '\t')) {
+		start++;
+	}
+	return description.substr(start);
+}
+
+static bool
+AudiobookNeedsSpaceAfter(char character)
+{
+	return character == '.' || character == '!' || character == '?'
+		|| character == ':' || character == ';';
+}
+
+static bool
+AudiobookCanInsertSpaceBefore(char character)
+{
+	return character != '\0' && character != ' ' && character != '\t'
+		&& character != '\n' && character != '\r' && character != '.'
+		&& character != ',' && character != ';' && character != ':'
+		&& character != '!' && character != '?' && character != ')'
+		&& character != ']' && character != '}';
+}
+
+static bool
+AudiobookAsciiLower(char character)
+{
+	return character >= 'a' && character <= 'z';
+}
+
+static bool
+AudiobookAsciiUpper(char character)
+{
+	return character >= 'A' && character <= 'Z';
+}
+
+static std::string
+NormalizeAudiobookDescriptionSpacing(const std::string& description)
+{
+	std::string normalized;
+	normalized.reserve(description.size() + 16);
+	for (size_t index = 0; index < description.size(); index++) {
+		char current = description[index];
+		normalized += current;
+		if (index + 1 < description.size()
+				&& AudiobookAsciiLower(current)
+				&& AudiobookAsciiUpper(description[index + 1])) {
+			normalized += ' ';
+			continue;
+		}
+		if (!AudiobookNeedsSpaceAfter(current) || index + 1 >= description.size())
+			continue;
+
+		char next = description[index + 1];
+		if (!AudiobookCanInsertSpaceBefore(next))
+			continue;
+		if (current == '.' && isdigit((unsigned char)next))
+			continue;
+		if (index > 0 && current == ':'
+				&& description[index - 1] == '/'
+				&& next == '/') {
+			continue;
+		}
+		normalized += ' ';
+	}
+	return normalized;
+}
+
+static int32
+WrappedTitleLineCount(const BFont& font, const std::string& text, float width)
+{
+	if (width <= 0)
+		return 1;
+
+	int32 lines = 1;
+	std::string line;
+	size_t index = 0;
+	while (index < text.size()) {
+		while (index < text.size()
+				&& (text[index] == ' ' || text[index] == '\t')) {
+			index++;
+		}
+		if (index >= text.size())
+			break;
+		if (text[index] == '\n') {
+			lines++;
+			line.clear();
+			index++;
+			continue;
+		}
+
+		size_t end = index;
+		while (end < text.size() && text[end] != ' ' && text[end] != '\t'
+				&& text[end] != '\n') {
+			end++;
+		}
+		std::string word = text.substr(index, end - index);
+		std::string candidate = line.empty() ? word : line + " " + word;
+		if (!line.empty() && font.StringWidth(candidate.c_str()) > width) {
+			lines++;
+			line = word;
+		} else {
+			line = candidate;
+		}
+		index = end;
+	}
+	return lines;
+}
+
+static float
+FontLineHeight(const BFont& font)
+{
+	font_height height;
+	font.GetHeight(&height);
+	return height.ascent + height.descent + height.leading;
+}
+
 AudiobookWindow::AudiobookWindow(const std::string& audiobookId)
 	: BWindow(BRect(170, 110, 800, 650), B_TRANSLATE("Audiobook"),
 		B_TITLED_WINDOW, B_ASYNCHRONOUS_CONTROLS),
@@ -74,7 +212,7 @@ AudiobookWindow::AudiobookWindow(const std::string& audiobookId)
 	fArtwork->SetExplicitMaxSize(BSize(artworkSize, artworkSize));
 	fArtwork->SetExplicitPreferredSize(BSize(artworkSize, artworkSize));
 	fArtwork->SetExplicitAlignment(BAlignment(B_ALIGN_LEFT,
-		B_ALIGN_VERTICAL_CENTER));
+		B_ALIGN_TOP));
 
 	fMenuBar = new BMenuBar("audiobookMenuBar");
 	BMenu* audiobookMenu = new BMenu(B_TRANSLATE("Audiobook"));
@@ -95,7 +233,8 @@ AudiobookWindow::AudiobookWindow(const std::string& audiobookId)
 	fName->SetInsets(0, 0, 0, 0);
 	fName->SetViewUIColor(B_PANEL_BACKGROUND_COLOR);
 	fName->SetExplicitMinSize(BSize(0, B_SIZE_UNSET));
-	fName->SetExplicitMaxSize(BSize(B_SIZE_UNLIMITED, 60));
+	fName->SetExplicitPreferredSize(BSize(B_SIZE_UNSET, 34));
+	fName->SetExplicitMaxSize(BSize(B_SIZE_UNLIMITED, 36));
 	fName->SetExplicitAlignment(BAlignment(B_ALIGN_USE_FULL_WIDTH, B_ALIGN_TOP));
 	fCredits = new BStringView("audiobookAuthors", "");
 	fCredits->SetExplicitMaxSize(BSize(B_SIZE_UNLIMITED, B_SIZE_UNSET));
@@ -112,33 +251,43 @@ AudiobookWindow::AudiobookWindow(const std::string& audiobookId)
 	fSave->SetExplicitAlignment(BAlignment(B_ALIGN_LEFT,
 		B_ALIGN_VERTICAL_CENTER));
 	fSave->SetEnabled(false);
-	fDescription = new BTextView("audiobookDescription");
-	fDescription->MakeEditable(false);
-	fDescription->MakeSelectable(true);
-	fDescription->SetWordWrap(true);
+	fDescription = new MediaDescriptionView("audiobookDescription");
 
 	fChapterList = new DiscoverListView("Chapters", {
 		{B_TRANSLATE("Chapter"), 390, kColPlayOnDouble},
-		{B_TRANSLATE("Duration"), 80, kColNone}
+		{B_TRANSLATE("Duration"), 90, kColNone}
 	}, -1);
+	fChapterList->SetExplicitMinSize(BSize(B_SIZE_UNSET, 96));
+	fChapterList->SetExplicitPreferredSize(BSize(B_SIZE_UNSET, 136));
 	BScrollView* descriptionScroll = new BScrollView(
 		"audiobookDescriptionScroll", fDescription, 0, false, true);
-	descriptionScroll->SetExplicitMinSize(BSize(B_SIZE_UNSET, 72));
-	descriptionScroll->SetExplicitPreferredSize(BSize(B_SIZE_UNSET, 72));
-	descriptionScroll->SetExplicitMaxSize(BSize(B_SIZE_UNLIMITED, 96));
+	descriptionScroll->SetExplicitMinSize(BSize(B_SIZE_UNSET, 120));
+	descriptionScroll->SetExplicitPreferredSize(BSize(B_SIZE_UNSET, 260));
+	descriptionScroll->SetExplicitMaxSize(BSize(B_SIZE_UNLIMITED,
+		B_SIZE_UNLIMITED));
 
 	BView* headerInfo = new BView("audiobookHeaderInfo", 0);
-	headerInfo->SetExplicitMinSize(BSize(0, B_SIZE_UNSET));
-	headerInfo->SetExplicitMaxSize(BSize(B_SIZE_UNLIMITED, B_SIZE_UNLIMITED));
+	headerInfo->SetExplicitMinSize(BSize(0, artworkSize));
+	headerInfo->SetExplicitPreferredSize(BSize(B_SIZE_UNSET, artworkSize));
+	headerInfo->SetExplicitMaxSize(BSize(B_SIZE_UNLIMITED, artworkSize));
 	headerInfo->SetExplicitAlignment(BAlignment(B_ALIGN_USE_FULL_WIDTH,
-		B_ALIGN_TOP));
+		B_ALIGN_USE_FULL_HEIGHT));
 	BLayoutBuilder::Group<>(headerInfo, B_VERTICAL, B_USE_SMALL_SPACING)
 		.Add(fName, 0.0f)
-		.Add(fCredits, 0.0f)
-		.Add(fNarrators, 0.0f)
+		.AddGroup(B_VERTICAL, 0, 0.0f)
+			.Add(fCredits, 0.0f)
+			.Add(fNarrators, 0.0f)
+		.End()
 		.AddGlue()
 		.Add(fSave, 0.0f)
 	.End();
+
+	BSplitView* contentSplit = new BSplitView(B_VERTICAL,
+		B_USE_SMALL_SPACING);
+	BLayoutBuilder::Split<>(contentSplit)
+		.Add(descriptionScroll, 1.0f)
+		.Add(fChapterList, 0.0f)
+		.SetCollapsible(false);
 
 	BLayoutBuilder::Group<>(this, B_VERTICAL, 0)
 		.Add(fMenuBar, 0.0f)
@@ -148,13 +297,19 @@ AudiobookWindow::AudiobookWindow(const std::string& audiobookId)
 				.Add(fArtwork, 0.0f)
 				.Add(headerInfo, 1.0f)
 			.End()
-			.Add(descriptionScroll, 0.0f)
-			.Add(fChapterList, 1.0f)
+			.Add(contentSplit, 1.0f)
 		.End()
 	.End();
-	SetSizeLimits(320, 100000, 280, 100000);
+	SetSizeLimits(420, 100000, 360, 100000);
 
 	_Load();
+}
+
+void
+AudiobookWindow::FrameResized(float width, float height)
+{
+	BWindow::FrameResized(width, height);
+	_ApplyTitleText();
 }
 
 void
@@ -171,8 +326,12 @@ AudiobookWindow::_Load()
 		if (!ok || !book.is_object()) return;
 		BMessage message('aDat');
 		message.AddString("name", AudiobookJsonString(book, "name", "Unknown").c_str());
-		message.AddString("description", AudiobookJsonString(book,
-			"description").c_str());
+		std::string description = AudiobookJsonString(book, "description");
+		if (description.empty())
+			description = AudiobookJsonString(book, "html_description");
+		description = StripLeadingAudiobookCredits(description);
+		description = NormalizeAudiobookDescriptionSpacing(description);
+		message.AddString("description", description.c_str());
 		message.AddString("uri", ("spotify:audiobook:" + audiobookId).c_str());
 		auto addPeople = [&message, &book](const char* source, const char* target) {
 			if (!book.contains(source) || !book[source].is_array()) return;
@@ -253,6 +412,35 @@ AudiobookWindow::_LoadArtwork(const std::string& url)
 }
 
 void
+AudiobookWindow::_ApplyTitleText()
+{
+	if (!fName || fAudiobookName.empty())
+		return;
+
+	float titleWidth = fName->Bounds().Width();
+	if (titleWidth <= 0 && fName->Parent())
+		titleWidth = fName->Parent()->Bounds().Width();
+	if (titleWidth <= 0)
+		titleWidth = 360.0f;
+
+	const float baseSize = be_plain_font->Size();
+	const float maxSize = baseSize * MediaHeaderStyle::kTitleScale;
+	const float minSize = baseSize;
+	const float maxHeight = 34.0f;
+
+	BFont titleFont(be_bold_font);
+	for (float size = maxSize; size >= minSize; size -= 1.0f) {
+		titleFont.SetSize(size);
+		int32 lines = WrappedTitleLineCount(titleFont, fAudiobookName,
+			titleWidth);
+		if (lines <= 2 && FontLineHeight(titleFont) * lines <= maxHeight)
+			break;
+	}
+	fName->SetFontAndColor(&titleFont);
+	fName->SetText(fAudiobookName.c_str());
+}
+
+void
 AudiobookWindow::_UpdateSaved(bool saved)
 {
 	fSaved = saved;
@@ -318,11 +506,15 @@ AudiobookWindow::MessageReceived(BMessage* message)
 		{
 			fAudiobookUri = message->GetString("uri", "");
 			const char* name = message->GetString("name", B_TRANSLATE("Audiobook"));
-			fName->SetText(name);
+			fAudiobookName = name;
+			_ApplyTitleText();
 			BString windowTitle(B_TRANSLATE("Audiobook: "));
 			windowTitle << name;
 			SetTitle(windowTitle.String());
-			fDescription->SetText(message->GetString("description", ""));
+			std::string description = message->GetString("description", "");
+			ApplyMediaDescription(fDescription, description);
+			fDescription->Reflow();
+			fDescription->SetLinks(MediaDescriptionLinks(description));
 			BString authors;
 			const char* person = nullptr;
 			for (int32 i = 0; message->FindString("author", i, &person) == B_OK; i++) {

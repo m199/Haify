@@ -1,11 +1,11 @@
 NAME = Haify
 TYPE = APP
 APP_MIME_SIG = application/x-vnd.Haify
-SRCS = App.cpp PlayerWindow.cpp NowPlayingItem.cpp PlaylistWindow.cpp DiscoverWindow.cpp ArtistWindow.cpp EpisodeWindow.cpp AudiobookWindow.cpp QueueWindow.cpp SearchWindow.cpp SettingsWindow.cpp \
+SRCS = App.cpp PlayerWindow.cpp NowPlayingItem.cpp NowPlayingItemMapper.cpp PlaylistWindow.cpp DiscoverWindow.cpp ArtistWindow.cpp EpisodeWindow.cpp AudiobookWindow.cpp QueueWindow.cpp SearchWindow.cpp SettingsWindow.cpp \
 	DeskbarReplicantView.cpp \
 	ArtworkReplicantView.cpp ArtworkWindow.cpp \
 	PlayerBarView.cpp PlaybackSeekBarView.cpp IconButtonView.cpp ClickableLabelView.cpp \
-	ArtworkView.cpp DiscoverListView.cpp TrackContextMenu.cpp TextInputDialog.cpp \
+	ArtworkView.cpp MediaDescriptionView.cpp DescriptionTextFormatter.cpp DiscoverListView.cpp TrackContextMenu.cpp TextInputDialog.cpp \
 	network/HttpClient.cpp network/OAuthCallbackServer.cpp network/ImageCache.cpp \
 	spotify/auth/SpotifyAuth.cpp spotify/api/SpotifyApi.cpp spotify/SpotifyCapabilities.cpp \
 	settings/SettingsController.cpp
