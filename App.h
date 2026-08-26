@@ -65,6 +65,8 @@ private:
 								bool registerOAuth = false);
 	void					_StopLibrespot();
 	void					_ScheduleLibrespotTransfer(bigtime_t delay);
+	void					_SchedulePlaybackPollAfterLibrespotTransfer(
+								bigtime_t delay);
 	void					_TryTransferPlaybackToLibrespot();
 	void					_TransferPlaybackToLibrespotDevice(
 								const char* deviceId);
@@ -76,6 +78,7 @@ private:
 	PlayerWindow*			fPlayerWindow;
 	ArtworkWindow*			fArtworkWindow;
 	BMessageRunner*			fLibrespotTransferTimer = nullptr;
+	BMessageRunner*			fLibrespotPlaybackPollTimer = nullptr;
 	BMessageRunner*			fTokenRefreshTimer = nullptr;
 	OAuthCallbackServer*	fOAuthSrv;
 	SpotifyApi*				fApi;

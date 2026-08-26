@@ -33,6 +33,10 @@ private:
 	void					_ApplyPlaybackMessage(BMessage* message);
 	void					_PlayUri(BMessage* message);
 	void					_ApplyOptimisticPlay(BMessage* message);
+	void					_ResolveAudiobookContextForPlayback(
+								const std::string& trackUri,
+								const std::string& parentKind,
+								const std::string& openUri);
 	void					_FillReplicantStateMessage(BMessage& message,
 								int32 progressMs) const;
 	void					_ReadLibrespotEvent();
@@ -64,6 +68,7 @@ private:
 	bool					fQueueRequestPending = false;
 	bool					fPlaybackRequestPending = false;
 	bool					fHasPlaybackState = false;
+	bigtime_t				fStartupEmptyPlaybackRetryUntilUs = 0;
 	int32					fPlaybackPollFailures = 0;
 	bool					fShuffleOn     = false;
 	int32					fProgressMs    = 0;
@@ -96,6 +101,9 @@ private:
 	std::string				fLastLibrespotPlaybackEventId;
 	std::string				fOptimisticSourceTrackUri;
 	bigtime_t				fOptimisticUntilUs = 0;
+	bool					fAudiobookContextRequestPending = false;
+	std::string				fAudiobookContextRequestTrackUri;
+	std::string				fLastAudiobookContextLookupTrackUri;
 	bool					fHasPendingLibrespotTrack = false;
 	BMessage				fPendingLibrespotTrack;
 	BMessage				fPredictedNext;

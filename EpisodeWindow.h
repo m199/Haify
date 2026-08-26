@@ -23,6 +23,7 @@ private:
 
     std::string fEpisodeId;
     std::string fEpisodeUri;
+    std::string fShowName;
     std::string fShowUri;
     bool fSaved = false;
 

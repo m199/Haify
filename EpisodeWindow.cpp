@@ -3,6 +3,7 @@
 #include "App.h"
 #include "ArtworkView.h"
 #include "Messages.h"
+#include "NowPlayingFields.h"
 #include "spotify/api/SpotifyApi.h"
 
 #include <Application.h>
@@ -172,9 +173,10 @@ void EpisodeWindow::MessageReceived(BMessage* message)
         case 'eDat':
         {
             fEpisodeUri = message->GetString("uri", "");
+            fShowName = message->GetString("show", "");
             fShowUri = message->GetString("show_uri", "");
             fName->SetText(message->GetString("name", "Unknown"));
-            fShow->SetText(message->GetString("show", ""));
+            fShow->SetText(fShowName.c_str());
             bool playable = message->GetBool("playable", true);
             BString description(message->GetString("description", ""));
             const char* restriction = message->GetString("restriction", "");
@@ -198,6 +200,22 @@ void EpisodeWindow::MessageReceived(BMessage* message)
             if (!fEpisodeUri.empty()) {
                 BMessage play('play');
                 play.AddString("uri", fEpisodeUri.c_str());
+                play.AddString("title", fName->Text());
+                if (!fShowName.empty())
+                    play.AddString("artist", fShowName.c_str());
+                if (!fShowUri.empty()) {
+                    play.AddString("context_uri", fShowUri.c_str());
+                    play.AddString(kNowPlayingPrimaryOpenUriField,
+                        fShowUri.c_str());
+                    play.AddString(kNowPlayingParentUriField,
+                        fShowUri.c_str());
+                    play.AddString(kNowPlayingParentKindField, "show");
+                    if (fShowUri.find("spotify:show:") == 0) {
+                        play.AddString(kNowPlayingShowIdField,
+                            fShowUri.substr(13).c_str());
+                    }
+                }
+                play.AddString(kNowPlayingItemKindField, "episode");
                 be_app->PostMessage(&play);
             }
             break;

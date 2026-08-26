@@ -39,6 +39,7 @@ public:
     void    SetVolume(int32 volume);
     void    SetShuffle(bool on);
     void    SetRepeat(const char* mode);
+    void    SetPlaybackOptionsEnabled(bool enabled);
     void    SetSeekBarColor(bool useSystemColor, rgb_color color);
 
     void    SetTarget(BMessenger target);
@@ -103,6 +104,7 @@ private:
     bool                    fRegistered     = false;
     bool                    fHaifyAvailable = true;
     bool                    fShuffleOn      = false;
+    bool                    fPlaybackOptionsEnabled = true;
     bool                    fUseSystemSeekBarColor = false;
     rgb_color               fSeekBarColor = { 150, 150, 252, 255 };
     bool                    fUseAutomaticReplicantColor = true;

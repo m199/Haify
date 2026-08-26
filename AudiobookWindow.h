@@ -25,6 +25,7 @@ private:
 	void _LoadArtwork(const std::string& url);
 	void _UpdateSaved(bool saved);
 	void _UpdateSavedControls();
+	std::string _NextPlayableChapterUri(const std::string& currentUri) const;
 
 	std::string fAudiobookId;
 	std::string fAudiobookUri;

@@ -273,6 +273,32 @@ AudiobookWindow::_UpdateSavedControls()
 	fSaveMenuItem->SetEnabled(enabled);
 }
 
+std::string
+AudiobookWindow::_NextPlayableChapterUri(const std::string& currentUri) const
+{
+	if (!fChapterList || currentUri.empty())
+		return "";
+
+	for (int32 index = 0; index < fChapterList->CountRows(); index++) {
+		DiscoverRow* row = dynamic_cast<DiscoverRow*>(
+			fChapterList->RowAt(index));
+		if (!row || row->fUris.empty() || row->fUris[0] != currentUri)
+			continue;
+
+		for (int32 next = index + 1; next < fChapterList->CountRows();
+				next++) {
+			DiscoverRow* nextRow = dynamic_cast<DiscoverRow*>(
+				fChapterList->RowAt(next));
+			if (nextRow && !nextRow->fUris.empty()
+					&& !nextRow->fUris[0].empty()) {
+				return nextRow->fUris[0];
+			}
+		}
+		break;
+	}
+	return "";
+}
+
 void
 AudiobookWindow::MessageReceived(BMessage* message)
 {
@@ -387,7 +413,7 @@ AudiobookWindow::MessageReceived(BMessage* message)
 				play.AddString("uri", uri);
 				play.AddString("title", message->GetString("title", ""));
 				play.AddString("artist", fName->Text());
-				play.AddString(kNowPlayingItemKindField, "episode");
+				play.AddString(kNowPlayingItemKindField, "chapter");
 				play.AddString(kNowPlayingPrimaryOpenUriField,
 					audiobookUri.c_str());
 				play.AddString(kNowPlayingParentUriField,
@@ -395,6 +421,9 @@ AudiobookWindow::MessageReceived(BMessage* message)
 				play.AddString(kNowPlayingParentKindField, "audiobook");
 				play.AddString(kNowPlayingAudiobookIdField,
 					fAudiobookId.c_str());
+				std::string nextUri = _NextPlayableChapterUri(uri);
+				if (!nextUri.empty())
+					play.AddString("next_queue_uri", nextUri.c_str());
 				be_app->PostMessage(&play);
 			}
 			break;

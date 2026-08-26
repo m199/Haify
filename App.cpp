@@ -14,6 +14,7 @@
 
 #include "Config.h"
 #include "SettingsController.h"
+#include "UiLogic.h"
 #include "spotify/auth/SpotifyAuth.h"
 #include "spotify/api/SpotifyApi.h"
 #include "network/ImageCache.h"
@@ -46,7 +47,9 @@
 static const uint32 kMsgTransferLibrespotPlayback = 'tlbp';
 static const uint32 kMsgLibrespotDevicePollResult = 'ldpr';
 static const uint32 kMsgLibrespotPlaybackDecision = 'lpbd';
+static const uint32 kMsgLibrespotPlaybackTransferred = 'lbpt';
 static const uint32 kMsgRefreshAccessToken = 'rfrt';
+static const bigtime_t kLibrespotPlaybackPollDelay = 1500000LL;
 
 bool gIsDebug = false;
 
@@ -669,6 +672,8 @@ App::MessageReceived(BMessage* message)
 		}
 
 		case 'poll':
+			delete fLibrespotPlaybackPollTimer;
+			fLibrespotPlaybackPollTimer = nullptr;
 			if (fPlayerWindow)
 				fPlayerWindow->PostMessage(message);
 			break;
@@ -755,6 +760,37 @@ App::MessageReceived(BMessage* message)
 				BMessage play('play');
 				play.AddString("uri", uriStr.c_str());
 				PostMessage(&play);
+			} else if (uriStr.find("spotify:show:") == 0
+					&& !message->GetBool("skip_audiobook_resolution", false)
+					&& fCapabilities.AudiobooksEnabled() && fApi) {
+				std::string id = SpotifyItemIdForUri(uriStr);
+				std::string t = title ? title : "";
+				if (id.empty()) {
+					BMessage retry('open');
+					retry.AddString("uri", uriStr.c_str());
+					retry.AddString("title", t.c_str());
+					retry.AddBool("skip_audiobook_resolution", true);
+					PostMessage(&retry);
+					break;
+				}
+				BMessenger app(this);
+				fApi->GetAudiobook(id, [app, uriStr, id, t](bool ok,
+						const nlohmann::json& book) {
+					BMessage resolved('open');
+					if (ok && book.is_object()) {
+						std::string audiobookUri;
+						if (book.contains("uri") && book["uri"].is_string())
+							audiobookUri = book["uri"].get<std::string>();
+						if (audiobookUri.find("spotify:audiobook:") != 0)
+							audiobookUri = "spotify:audiobook:" + id;
+						resolved.AddString("uri", audiobookUri.c_str());
+					} else {
+						resolved.AddString("uri", uriStr.c_str());
+						resolved.AddBool("skip_audiobook_resolution", true);
+					}
+					resolved.AddString("title", t.c_str());
+					app.SendMessage(&resolved);
+				});
 			} else if (uriStr == "spotify:collection"
 					|| uriStr.find("spotify:album:") == 0
 					|| uriStr.find("spotify:playlist:") == 0
@@ -1022,10 +1058,22 @@ App::MessageReceived(BMessage* message)
 			const char* deviceId = message->GetString("device_id", "");
 			if (message->GetBool("transfer", false) && GetApi()
 					&& fLibrespotPid > 0 && deviceId && deviceId[0]) {
-				fApi->TransferPlayback(deviceId, nullptr);
+				BMessenger app(this);
+				fApi->TransferPlayback(deviceId,
+					[app](bool ok, const nlohmann::json&) {
+					if (!ok)
+						return;
+					BMessage transferred(kMsgLibrespotPlaybackTransferred);
+					app.SendMessage(&transferred);
+				});
 			}
 			break;
 		}
+
+		case kMsgLibrespotPlaybackTransferred:
+			_SchedulePlaybackPollAfterLibrespotTransfer(
+				kLibrespotPlaybackPollDelay);
+			break;
 
 		default:
 			BApplication::MessageReceived(message);
@@ -1246,6 +1294,8 @@ App::QuitRequested()
 	});
 	delete fTokenRefreshTimer;
 	fTokenRefreshTimer = nullptr;
+	delete fLibrespotPlaybackPollTimer;
+	fLibrespotPlaybackPollTimer = nullptr;
 	delete fOAuthSrv;
 	fOAuthSrv = nullptr;
 	_StopLibrespot();
@@ -1381,6 +1431,22 @@ App::_ScheduleLibrespotTransfer(bigtime_t delay)
 
 
 void
+App::_SchedulePlaybackPollAfterLibrespotTransfer(bigtime_t delay)
+{
+	delete fLibrespotPlaybackPollTimer;
+	fLibrespotPlaybackPollTimer = nullptr;
+
+	BMessage message('poll');
+	if (delay <= 0) {
+		PostMessage(&message);
+		return;
+	}
+	fLibrespotPlaybackPollTimer = new BMessageRunner(BMessenger(this),
+		&message, delay, 1);
+}
+
+
+void
 App::_TryTransferPlaybackToLibrespot()
 {
 	delete fLibrespotTransferTimer;
@@ -1428,7 +1494,14 @@ App::_TransferPlaybackToLibrespotDevice(const char* deviceId)
 		return;
 
 	if (fLibrespotTransferMode == kLibrespotTransferAlways) {
-		api->TransferPlayback(deviceId, nullptr);
+		BMessenger app(this);
+		api->TransferPlayback(deviceId,
+			[app](bool ok, const nlohmann::json&) {
+			if (!ok)
+				return;
+			BMessage transferred(kMsgLibrespotPlaybackTransferred);
+			app.SendMessage(&transferred);
+		});
 		return;
 	}
 
@@ -1520,6 +1593,8 @@ App::_StopLibrespot()
 {
 	delete fLibrespotTransferTimer;
 	fLibrespotTransferTimer = nullptr;
+	delete fLibrespotPlaybackPollTimer;
+	fLibrespotPlaybackPollTimer = nullptr;
 	fLibrespotTransferAttempts = 0;
 
 	_ReapLibrespot(false);

@@ -8,6 +8,7 @@
 
 class BButton;
 class BFilePanel;
+class BMessage;
 class BRow;
 class BGroupView;
 class BMenuBar;
@@ -53,6 +54,7 @@ private:
 								const std::string& filter);
 	void					_UpdateEpisodeInfo();
 	void					_RenumberEpisodes();
+	void					_AddPodcastNowPlayingContext(BMessage& play) const;
 	std::string				_AlbumId() const;
 	std::string				_PlaylistId() const;
 	void					_UpdateAlbumSavedState();

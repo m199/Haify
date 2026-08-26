@@ -4,6 +4,7 @@
 #include "NowPlayingFields.h"
 #include "PlaybackSeekBarView.h"
 #include "SettingsController.h"
+#include "UiLogic.h"
 #include <Message.h>
 #include <MessageRunner.h>
 #include <Dragger.h>
@@ -327,6 +328,11 @@ public:
         fArtistId = artistId ? artistId : "";
     }
 
+    void SetOpenUri(const char* openUri)
+    {
+        fOpenUri = openUri ? openUri : "";
+    }
+
     void Draw(BRect updateRect) override
     {
         if (!fTransparentBackground) {
@@ -438,17 +444,37 @@ public:
         }
 
         BView* parent = Parent();
-        if (parent && fTitleFrame.Contains(where) && !fAlbumId.empty()) {
-            BMessage msg(MSG_SHOW_ALBUM);
-            msg.AddString("id", fAlbumId.c_str());
-            BMessenger(parent).SendMessage(&msg);
-            return;
+        if (parent && fTitleFrame.Contains(where)) {
+            NowPlayingTitleClickAction action =
+                ResolveNowPlayingTitleClickAction(fAlbumId, fOpenUri);
+            if (action == kNowPlayingTitleClickShowAlbum) {
+                BMessage msg(MSG_SHOW_ALBUM);
+                msg.AddString("id", fAlbumId.c_str());
+                BMessenger(parent).SendMessage(&msg);
+                return;
+            }
+            if (action == kNowPlayingTitleClickOpenUri) {
+                BMessage msg('open');
+                msg.AddString("uri", fOpenUri.c_str());
+                BMessenger(parent).SendMessage(&msg);
+                return;
+            }
         }
-        if (parent && fArtistFrame.Contains(where) && !fArtistId.empty()) {
-            BMessage msg(MSG_SHOW_ARTIST);
-            msg.AddString("id", fArtistId.c_str());
-            BMessenger(parent).SendMessage(&msg);
-            return;
+        if (parent && fArtistFrame.Contains(where)) {
+            NowPlayingSubtitleClickAction action =
+                ResolveNowPlayingSubtitleClickAction(fArtistId, fOpenUri);
+            if (action == kNowPlayingSubtitleClickShowArtist) {
+                BMessage msg(MSG_SHOW_ARTIST);
+                msg.AddString("id", fArtistId.c_str());
+                BMessenger(parent).SendMessage(&msg);
+                return;
+            }
+            if (action == kNowPlayingSubtitleClickOpenUri) {
+                BMessage msg('open');
+                msg.AddString("uri", fOpenUri.c_str());
+                BMessenger(parent).SendMessage(&msg);
+                return;
+            }
         }
 
         BView::MouseDown(where);
@@ -456,8 +482,13 @@ public:
 
     void MouseMoved(BPoint where, uint32 transit, const BMessage*) override
     {
-        bool link = (fTitleFrame.Contains(where) && !fAlbumId.empty())
-            || (fArtistFrame.Contains(where) && !fArtistId.empty());
+        bool titleLink = fTitleFrame.Contains(where)
+            && ResolveNowPlayingTitleClickAction(fAlbumId, fOpenUri)
+                != kNowPlayingTitleClickIgnore;
+        bool subtitleLink = fArtistFrame.Contains(where)
+            && ResolveNowPlayingSubtitleClickAction(fArtistId, fOpenUri)
+                != kNowPlayingSubtitleClickIgnore;
+        bool link = titleLink || subtitleLink;
         if (transit == B_ENTERED_VIEW || transit == B_INSIDE_VIEW) {
             BCursor cursor(link ? B_CURSOR_ID_FOLLOW_LINK
                 : B_CURSOR_ID_SYSTEM_DEFAULT);
@@ -493,6 +524,7 @@ private:
     std::string fArtist;
     std::string fAlbumId;
     std::string fArtistId;
+    std::string fOpenUri;
     BRect fTitleFrame;
     BRect fArtistFrame;
 };
@@ -1205,6 +1237,9 @@ void PlayerBarView::MessageReceived(BMessage* msg) {
             if (vol >= 0) SetVolume(vol);
             SetShuffle(msg->GetBool("shuffle_state", false));
             SetRepeat(msg->GetString("repeat_state", "off"));
+            SetPlaybackOptionsEnabled(
+                strcmp(msg->GetString(kNowPlayingParentKindField, ""),
+                    "audiobook") != 0);
 
             break;
         }
@@ -1246,6 +1281,7 @@ void PlayerBarView::MessageReceived(BMessage* msg) {
         case MSG_OPEN_SEARCH:
         case MSG_OPEN_SETTINGS:
         case MSG_QUIT_APP:
+        case 'open':
             _ForwardMessage(msg);
             break;
 
@@ -1289,6 +1325,8 @@ void PlayerBarView::MessageReceived(BMessage* msg) {
 
         case MSG_TOGGLE_SHUFFLE:
         {
+            if (!fPlaybackOptionsEnabled)
+                break;
             if (fIsReplicant && !_UpdateReplicantAvailability()) {
                 _ForwardMessage(msg);
                 break;
@@ -1311,6 +1349,8 @@ void PlayerBarView::MessageReceived(BMessage* msg) {
 
         case MSG_TOGGLE_REPEAT:
         {
+            if (!fPlaybackOptionsEnabled)
+                break;
             if (fIsReplicant && !_UpdateReplicantAvailability()) {
                 _ForwardMessage(msg);
                 break;
@@ -1428,6 +1468,8 @@ void PlayerBarView::SetTrackUri(const char* trackUri) {
 
 void PlayerBarView::SetOpenUri(const char* uri) {
     fCurrentOpenUri = uri ? uri : "";
+    if (fTrackInfoView)
+        fTrackInfoView->SetOpenUri(uri);
 }
 
 void PlayerBarView::SetTrackIds(const char* albumId, const char* artistId) {
@@ -1495,6 +1537,14 @@ void PlayerBarView::SetRepeat(const char* mode) {
         else
             fRepeatButton->SetLabel(fRepeatState == "track" ? "1" : "R");
     }
+}
+
+void PlayerBarView::SetPlaybackOptionsEnabled(bool enabled) {
+    fPlaybackOptionsEnabled = enabled;
+    if (fShuffleButton)
+        fShuffleButton->SetEnabled(enabled);
+    if (fRepeatButton)
+        fRepeatButton->SetEnabled(enabled);
 }
 
 void PlayerBarView::SetSeekBarColor(bool useSystemColor, rgb_color color)
