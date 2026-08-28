@@ -630,11 +630,15 @@ void SpotifyApi::GetArtistTopTracks(const std::string& artistId, JsonCallback ca
     std::string path = "/artists/" + artistId
         + "/top-tracks?market=from_token";
     Get(path, [this, artistId, callback](bool ok, const nlohmann::json& data) {
-        if (ok && data.contains("tracks") && data["tracks"].is_array()) {
+        if (ok && data.contains("tracks") && data["tracks"].is_array()
+                && !data["tracks"].empty()) {
             if (callback)
                 callback(true, data);
             return;
         }
+        if (ok)
+            _EraseCache("/artists/" + artistId
+                + "/top-tracks?market=from_token");
 
         int status = data.is_object() ? data.value("status", 0) : 0;
         if (!ok && status != 403 && status != 404 && status != 410) {
