@@ -8,6 +8,7 @@
 #include "MediaHeaderStyle.h"
 #include "Messages.h"
 #include "NowPlayingFields.h"
+#include "spotify/SpotifyUri.h"
 #include "spotify/api/SpotifyApi.h"
 
 #include <Alert.h>
@@ -32,7 +33,6 @@
 
 #include <cctype>
 #include <cstdio>
-#include <cstring>
 
 #undef B_TRANSLATION_CONTEXT
 #define B_TRANSLATION_CONTEXT "AudiobookWindow"
@@ -323,7 +323,7 @@ AudiobookWindow::_Load()
 		return;
 	BMessenger self(this);
 	std::string audiobookId = fAudiobookId;
-	api->GetAudiobook(fAudiobookId, [self, audiobookId](bool ok,
+	api->Content().GetAudiobook(fAudiobookId, [self, audiobookId](bool ok,
 			const nlohmann::json& book) {
 		if (!ok || !book.is_object()) return;
 		BMessage message('aDat');
@@ -334,7 +334,9 @@ AudiobookWindow::_Load()
 		description = StripLeadingAudiobookCredits(description);
 		description = NormalizeAudiobookDescriptionSpacing(description);
 		message.AddString("description", description.c_str());
-		message.AddString("uri", ("spotify:audiobook:" + audiobookId).c_str());
+		std::string audiobookUri = SpotifyUriForItemKind(
+			kSpotifyItemAudiobook, audiobookId);
+		message.AddString("uri", audiobookUri.c_str());
 		auto addPeople = [&message, &book](const char* source, const char* target) {
 			if (!book.contains(source) || !book[source].is_array()) return;
 			for (const auto& person : book[source]) {
@@ -351,7 +353,7 @@ AudiobookWindow::_Load()
 				AudiobookJsonString(book["images"][0], "url").c_str());
 		self.SendMessage(&message);
 	});
-	api->CheckSavedAudiobook(fAudiobookId,
+	api->Library().CheckSavedAudiobook(fAudiobookId,
 		[self](bool ok, const nlohmann::json& data) {
 			BMessage message('aSts');
 			bool valid = ok && data.is_array() && !data.empty()
@@ -373,7 +375,7 @@ AudiobookWindow::_LoadChapters(int32 offset)
 	if (!api) return;
 	fLoadingChapters = true;
 	BMessenger self(this);
-	api->GetAudiobookChapters(fAudiobookId, offset, 50,
+	api->Content().GetAudiobookChapters(fAudiobookId, offset, 50,
 		[self, offset](bool ok, const nlohmann::json& data) {
 			BMessage message('aChp');
 			message.AddBool("ok", ok);
@@ -384,7 +386,8 @@ AudiobookWindow::_LoadChapters(int32 offset)
 					std::string chapterId = AudiobookJsonString(chapter, "id");
 					std::string chapterUri = AudiobookJsonString(chapter, "uri");
 					if (chapterUri.empty() && !chapterId.empty())
-						chapterUri = "spotify:episode:" + chapterId;
+						chapterUri = SpotifyUriForItemKind(
+							kSpotifyItemEpisode, chapterId);
 					message.AddString("uri", chapterUri.c_str());
 					message.AddString("title",
 						AudiobookJsonString(chapter, "name", "Unknown").c_str());
@@ -497,7 +500,8 @@ AudiobookWindow::MessageReceived(BMessage* message)
 		{
 			std::string uri = message->GetString("uri", "");
 			std::string operation = message->GetString("operation", "");
-			if (uri == "spotify:audiobook:" + fAudiobookId
+			if (uri == SpotifyUriForItemKind(kSpotifyItemAudiobook,
+					fAudiobookId)
 					&& (operation == "add" || operation == "remove")) {
 				_UpdateSaved(operation == "add");
 			}
@@ -550,8 +554,9 @@ AudiobookWindow::MessageReceived(BMessage* message)
 				if (message->GetBool("changed", false)) {
 					BMessage changed(MSG_LIBRARY_CHANGED);
 					changed.AddString("operation", fSaved ? "add" : "remove");
-					changed.AddString("uri",
-						("spotify:audiobook:" + fAudiobookId).c_str());
+					std::string audiobookUri = SpotifyUriForItemKind(
+						kSpotifyItemAudiobook, fAudiobookId);
+					changed.AddString("uri", audiobookUri.c_str());
 					be_app->PostMessage(&changed);
 				}
 			} else {
@@ -602,7 +607,8 @@ AudiobookWindow::MessageReceived(BMessage* message)
 			const char* uri = message->GetString("uri", "");
 			if (*uri) {
 				std::string audiobookUri = fAudiobookUri.empty()
-					? "spotify:audiobook:" + fAudiobookId : fAudiobookUri;
+					? SpotifyUriForItemKind(kSpotifyItemAudiobook,
+						fAudiobookId) : fAudiobookUri;
 				BMessage play('play');
 				play.AddString("uri", uri);
 				play.AddString("title", message->GetString("title", ""));
@@ -625,12 +631,14 @@ AudiobookWindow::MessageReceived(BMessage* message)
 		case 'rClk':
 		{
 			const char* uri = message->GetString("uri", "");
-			if (strncmp(uri, "spotify:episode:", 16) != 0) break;
+			std::string chapterUri = uri ? uri : "";
+			if (SpotifyItemKindForUri(chapterUri) != kSpotifyItemEpisode)
+				break;
 			App* app = dynamic_cast<App*>(be_app);
 			SpotifyApi* api = app ? app->GetApi() : nullptr;
 			if (!api) break;
 			BMessenger self(this);
-			api->GetChapter(std::string(uri).substr(16),
+			api->Content().GetChapter(SpotifyItemIdForUri(chapterUri),
 				[self](bool ok, const nlohmann::json& chapter) {
 					if (!ok || !chapter.is_object()) return;
 					BMessage detail('cDtl');
@@ -667,8 +675,8 @@ AudiobookWindow::MessageReceived(BMessage* message)
 				state.AddBool("show_error", !ok);
 				self.SendMessage(&state);
 			};
-			if (target) api->SaveAudiobook(fAudiobookId, done);
-			else api->RemoveSavedAudiobook(fAudiobookId, done);
+			if (target) api->Library().SaveAudiobook(fAudiobookId, done);
+			else api->Library().RemoveSavedAudiobook(fAudiobookId, done);
 			break;
 		}
 		case MSG_SPOTIFY_CAPABILITIES_CHANGED:

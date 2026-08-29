@@ -11,7 +11,9 @@
 #include "HaifyDebug.h"
 #include "App.h"
 #include "UiLogic.h"
+#include "spotify/SpotifyUri.h"
 #include "spotify/api/SpotifyApi.h"
+#include "spotify/api/SpotifyResponse.h"
 
 #include <Alert.h>
 #include <Alignment.h>
@@ -582,6 +584,44 @@ AddUnavailableEpisodeToMessage(BMessage* msg, int32 number)
 }
 
 
+static void
+SendPageLoadFailure(const BMessenger& messenger, int32 searchGeneration,
+	const nlohmann::json& data)
+{
+	BMessage failed('pLdF');
+	failed.AddInt32("search_generation", searchGeneration);
+	failed.AddInt32("status", SpotifyResponseStatus(data));
+	failed.AddInt32("retry_after", SpotifyResponseRetryAfter(data));
+	messenger.SendMessage(&failed);
+}
+
+
+static BMessage*
+CreateTrackPageMessage(int32 offset, const nlohmann::json& data)
+{
+	BMessage* msg = new BMessage('pLdt');
+	msg->AddBool("append", offset > 0);
+	msg->AddInt32("total", JsonInt(data, "total", -1));
+	int32 pageCount = (int32)data["items"].size();
+	msg->AddInt32("page_count", pageCount);
+	msg->AddInt32("next_offset", offset + pageCount);
+	return msg;
+}
+
+
+static BMessage*
+CreateEpisodePageMessage(int32 offset, const nlohmann::json& data)
+{
+	BMessage* msg = new BMessage('pEpL');
+	msg->AddInt32("append", offset > 0 ? 1 : 0);
+	msg->AddInt32("total", (int32)JsonInt(data, "total"));
+	int32 pageCount = (int32)data["items"].size();
+	msg->AddInt32("page_count", pageCount);
+	msg->AddInt32("next_offset", offset + pageCount);
+	return msg;
+}
+
+
 class TrackListView : public BColumnListView {
 public:
 	TrackListView(const char* name, uint32 flags, border_style border, bool showHorizontalScrollbar)
@@ -751,12 +791,13 @@ public:
 		if (dragMessage && dragMessage->what == 'drag') {
 			bool canDrop = false;
 			PlaylistWindow* win = (PlaylistWindow*)Window();
-			if (win && win->GetUri().find("spotify:playlist:") == 0) {
-				std::string id = win->GetUri().substr(17);
+			if (win && SpotifyItemKindForUri(win->GetUri())
+					== kSpotifyItemPlaylist) {
+				std::string id = SpotifyItemIdForUri(win->GetUri());
 				App* app = (App*)be_app;
 				SpotifyApi* api = app->GetApi();
 				if (api) {
-					auto playlists = api->GetCachedPlaylists();
+					auto playlists = api->Playlists().GetCachedPlaylists();
 					for (const auto& pl : playlists) {
 						if (pl.first == id) {
 							canDrop = true;
@@ -800,14 +841,20 @@ public:
 		if (col == 1 && !row->fTrackUri.empty()) {
 			Window()->PostMessage(new BMessage(MSG_TRACK_INVOKED));
 		} else if (col == 2 && !row->fArtistUri.empty()) {
-			std::string id = row->fArtistUri;
-			if (id.find("spotify:artist:") == 0) id = id.substr(15);
+			std::string id = SpotifyItemKindForUri(row->fArtistUri)
+				== kSpotifyItemArtist
+				? SpotifyItemIdForUri(row->fArtistUri) : row->fArtistUri;
+			if (id.empty())
+				return;
 			BMessage msg(MSG_SHOW_ARTIST);
 			msg.AddString("id", id.c_str());
 			be_app->PostMessage(&msg);
 		} else if (col == 5 && !row->fAlbumUri.empty()) {
-			std::string id = row->fAlbumUri;
-			if (id.find("spotify:album:") == 0) id = id.substr(14);
+			std::string id = SpotifyItemKindForUri(row->fAlbumUri)
+				== kSpotifyItemAlbum
+				? SpotifyItemIdForUri(row->fAlbumUri) : row->fAlbumUri;
+			if (id.empty())
+				return;
 			BMessage msg(MSG_SHOW_ALBUM);
 			msg.AddString("id", id.c_str());
 			be_app->PostMessage(&msg);
@@ -840,6 +887,38 @@ TrackVerticalScrollBar(TrackListView* list)
 }
 
 
+static const char*
+PlaylistWindowTitlePrefix(const std::string& uri)
+{
+	switch (SpotifyItemKindForUri(uri)) {
+		case kSpotifyItemPlaylist: return "Playlist: ";
+		case kSpotifyItemAlbum: return "Album: ";
+		case kSpotifyItemShow: return "Podcast: ";
+		case kSpotifyItemArtist: return "Artist: ";
+		default: return "";
+	}
+}
+
+
+static const char*
+PlaylistWindowContentType(const std::string& uri)
+{
+	if (uri == "spotify:collection")
+		return B_TRANSLATE("Liked Songs");
+	return SpotifyItemKindForUri(uri) == kSpotifyItemAlbum
+		? "Album" : SpotifyItemKindForUri(uri) == kSpotifyItemShow
+		? "Podcast" : "Playlist";
+}
+
+
+static const char*
+PlaylistWindowCountLabel(const std::string& uri)
+{
+	return SpotifyItemKindForUri(uri) == kSpotifyItemShow
+		? "Episodes" : "Songs";
+}
+
+
 
 PlaylistWindow::PlaylistWindow(const char* playlistName, const char* uri, const char* coverUrl)
 	: BWindow(BRect(200, 200,
@@ -854,13 +933,8 @@ PlaylistWindow::PlaylistWindow(const char* playlistName, const char* uri, const 
 		ResizeTo(s.playlistWindowW, s.playlistWindowH);
 	}
 
-	std::string titlePrefix;
-	if (fUri.find("spotify:playlist:") == 0) titlePrefix = "Playlist: ";
-	else if (fUri.find("spotify:album:") == 0) titlePrefix = "Album: ";
-	else if (fUri.find("spotify:show:")   == 0) titlePrefix = "Podcast: ";
-	else if (fUri.find("spotify:artist:") == 0) titlePrefix = "Artist: ";
-
-	SetTitle((titlePrefix + playlistName).c_str());
+	SetTitle((std::string(PlaylistWindowTitlePrefix(fUri))
+		+ playlistName).c_str());
 
 	_InitMenu();
 	_InitLayout(playlistName);
@@ -880,359 +954,85 @@ PlaylistWindow::MessageReceived(BMessage* message)
 	switch (message->what) {
 		case 'plRn':
 		{
-			if (fUri.find("spotify:playlist:") != 0) break;
-			std::string id = fUri.substr(17);
-			const char* idFromMsg = message->GetString("id", "");
-			if (*idFromMsg) id = idFromMsg;
-			std::string currentName = Title();
-
-			const std::string prefix = "Playlist: ";
-			if (currentName.find(prefix) == 0)
-				currentName = currentName.substr(prefix.size());
-			BMessage confirm('plRc');
-			confirm.AddString("id", id.c_str());
-			TextInputDialog* dlg = new TextInputDialog(
-				B_TRANSLATE("Rename Playlist"),
-				B_TRANSLATE("Name:"), currentName.c_str(),
-				BMessenger(this), confirm);
-			dlg->Show();
+			_ShowRenamePlaylistDialog(message);
 			break;
 		}
 
 		case 'plRc':
 		{
-			const char* name = message->GetString("name", "");
-			const char* id   = message->GetString("id",   "");
-			if (!*name || !*id) break;
-			App* app = (App*)be_app;
-			SpotifyApi* api = app->GetApi();
-			if (!api) break;
-			BMessenger self(this);
-			std::string sid = id, sname = name;
-			api->RenamePlaylist(sid, sname, [self, sid, sname](bool ok,
-					const nlohmann::json&) {
-				if (ok) {
-					BMessage msg('uTtl');
-					msg.AddString("title", sname.c_str());
-					self.SendMessage(&msg);
-
-					BMessage changed(MSG_PLAYLISTS_CHANGED);
-					changed.AddString("operation", "rename");
-					changed.AddString("id", sid.c_str());
-					changed.AddString("uri",
-						("spotify:playlist:" + sid).c_str());
-					changed.AddString("name", sname.c_str());
-					be_app->PostMessage(&changed);
-				}
-			});
+			_RenamePlaylist(message);
 			break;
 		}
 
 		case 'tply':
 		{
-			const char* tUri = message->GetString("trackUri", "");
-			if (!*tUri)
-				break;
-			BMessage play('play');
-			play.AddString("uri", tUri);
-			play.AddString("context_uri", fUri.c_str());
-			bool podcast = fUri.find("spotify:show:") == 0;
-			for (int32 i = 0; i < fTrackList->CountRows(); i++) {
-				TrackRow* row = (TrackRow*)fTrackList->RowAt(i);
-				if (!row || row->fTrackUri != tUri)
-					continue;
-				BStringField* title = dynamic_cast<BStringField*>(row->GetField(1));
-				BStringField* artist = dynamic_cast<BStringField*>(row->GetField(2));
-				if (title)
-					play.AddString("title", title->String());
-				if (!podcast && artist)
-					play.AddString("artist", artist->String());
-				break;
-			}
-			_AddPodcastNowPlayingContext(play);
-			be_app->PostMessage(&play);
+			_PlayTrackFromMessage(message);
 			break;
 		}
 
 		case 'remL':
 		{
-			const char* tUri = message->GetString("trackUri", "");
-			if (!*tUri) break;
-
-			for (int32 i = 0; i < fTrackList->CountRows(); i++) {
-				TrackRow* r = (TrackRow*)fTrackList->RowAt(i);
-				if (r && r->fTrackUri == tUri) {
-					fTrackList->RemoveRow(r);
-					delete r;
-					break;
-				}
-			}
-			App* app = (App*)be_app;
-			SpotifyApi* api = app->GetApi();
-			if (api) {
-				api->RemoveLibraryItems({tUri}, nullptr);
-				_DeleteCache();
-			}
+			_RemoveTrackFromLibrary(message);
 			break;
 		}
 
 		case 'iCmR':
 		{
-			App* app = dynamic_cast<App*>(be_app);
-			ShowPlayableItemContextMenu(message->GetString("uri", ""),
-				message->GetString("context_uri", ""),
-				message->GetPoint("screen_point", BPoint()), BMessenger(this),
-				app ? app->GetApi() : nullptr,
-				message->GetBool("library_only", false), true,
-				message->GetBool("saved", false));
+			_ShowPlayableContextMenu(message);
 			break;
 		}
 
 		case MSG_PLAY_PAUSE:
 		{
-			if (!fUri.empty()) {
-				BMessage play('play');
-				play.AddString("uri", fUri.c_str());
-				be_app->PostMessage(&play);
-			}
+			_PlayContextUri();
 			break;
 		}
 
 		case MSG_TRACK_INVOKED:
 		{
-			TrackRow* row = (TrackRow*)fTrackList->CurrentSelection();
-			if (row && !row->fTrackUri.empty()) {
-				BMessage play('play');
-				play.AddString("uri", row->fTrackUri.c_str());
-				play.AddString("context_uri", fUri.c_str());
-				bool podcast = fUri.find("spotify:show:") == 0;
-				BStringField* title = dynamic_cast<BStringField*>(row->GetField(1));
-				BStringField* artist = dynamic_cast<BStringField*>(row->GetField(2));
-				if (title)
-					play.AddString("title", title->String());
-				if (!podcast && artist)
-					play.AddString("artist", artist->String());
-				_AddPodcastNowPlayingContext(play);
-				be_app->PostMessage(&play);
-				SetPlayingTrack(row->fTrackUri.c_str());
-			}
+			_PlayCurrentTrack();
 			break;
 		}
 
 		case 'likT':
 		{
-			const char* trackUri;
-			if (message->FindString("trackUri", &trackUri) == B_OK) {
-				App* app = (App*)be_app;
-				SpotifyApi* api = app->GetApi();
-				if (api) {
-					std::string uriStr = trackUri;
-					if (uriStr.find("spotify:track:") == 0
-							|| uriStr.find("spotify:episode:") == 0) {
-						api->SaveLibraryItems({uriStr}, [uriStr](bool ok,
-								const nlohmann::json&) {
-							if (!ok || uriStr.find("spotify:episode:") != 0)
-								return;
-							BMessage changed(MSG_LIBRARY_CHANGED);
-							changed.AddString("operation", "add");
-							changed.AddString("uri", uriStr.c_str());
-							be_app->PostMessage(&changed);
-						});
-						_DeleteCache();
-					}
-				}
-			}
+			_SavePlayableItemToLibrary(message);
 			break;
 		}
 
 		case 'addP':
 		{
-			const char* trackUri;
-			const char* playlistId;
-			if (message->FindString("trackUri", &trackUri) == B_OK && message->FindString("playlistId", &playlistId) == B_OK) {
-				App* app = (App*)be_app;
-				SpotifyApi* api = app->GetApi();
-				if (api) {
-					api->AddTrackToPlaylist(playlistId, trackUri, nullptr);
-					BPath path;
-					if (PlaylistCachePath(playlistId, path, false))
-						unlink(path.Path());
-				}
-			}
+			_AddMessageTrackToPlaylist(message);
 			break;
 		}
 
 		case 'remT':
 		{
-			const char* trackUri;
-			if (message->FindString("trackUri", &trackUri) == B_OK) {
-				DEBUG_PRINT("PlaylistWindow: received 'remT' for %s\n", trackUri);
-				if (fUri.find("spotify:playlist:") == 0 && fPlaylistOwned) {
-					App* app = (App*)be_app;
-					SpotifyApi* api = app->GetApi();
-					if (api && !fTrackRemovalPending && !fTrackReorderPending
-							&& !fPlaylistClearPending) {
-						std::vector<std::pair<std::string, int>> items;
-						fPendingTrackRemovals.clear();
-						for (BRow* selected = fTrackList->CurrentSelection(); selected;
-								selected = fTrackList->CurrentSelection(selected)) {
-							TrackRow* row = dynamic_cast<TrackRow*>(selected);
-							if (row && !row->fTrackUri.empty()
-									&& row->fPlaylistPosition >= 0) {
-								items.push_back({row->fTrackUri,
-									row->fPlaylistPosition});
-								int32 listIndex = fTrackList->IndexOf(row);
-								if (listIndex >= 0) {
-									fPendingTrackRemovals.push_back({row, listIndex,
-										row->fPlaylistPosition, true});
-								}
-							}
-						}
-						if (items.empty() || fPendingTrackRemovals.empty())
-							break;
-						std::vector<std::string> knownPlaylistUris;
-						bool hasCompleteSnapshot = PlaylistHasCompleteSnapshot(
-							fPlaylistSnapshotId, fPageTotal,
-							fTrackList->CountRows(), fPageOffset);
-						if (hasCompleteSnapshot) {
-							for (int32 index = 0; index < fTrackList->CountRows(); index++) {
-								TrackRow* row = dynamic_cast<TrackRow*>(
-									fTrackList->RowAt(index));
-								if (!row || row->fTrackUri.empty()) {
-									knownPlaylistUris.clear();
-									break;
-								}
-								knownPlaylistUris.push_back(row->fTrackUri);
-							}
-						}
-						std::sort(fPendingTrackRemovals.begin(),
-							fPendingTrackRemovals.end(),
-							[](const PendingTrackRemoval& left,
-									const PendingTrackRemoval& right) {
-								return left.listIndex < right.listIndex;
-							});
-						for (auto pending = fPendingTrackRemovals.rbegin();
-								pending != fPendingTrackRemovals.rend(); ++pending)
-							fTrackList->RemoveRow(pending->row);
-						fTrackRemovalPending = true;
-						_UpdatePlaylistTrackInfo();
-						_UpdatePlaylistMenuState();
-						BMessenger self(this);
-						auto completion = [self](bool ok,
-								const nlohmann::json& data) {
-								BMessage result('rTrR');
-								result.AddBool("ok", ok);
-								result.AddInt32("status",
-									SpotifyApi::ResponseStatus(data));
-								result.AddBool("partial_update",
-									JsonBool(data, "partial_update"));
-								self.SendMessage(&result);
-							};
-						if (!knownPlaylistUris.empty()) {
-							api->RemovePlaylistItemsFromKnownSnapshot(
-								fUri.substr(17), items, fPlaylistSnapshotId,
-								knownPlaylistUris, completion);
-						} else {
-							api->RemovePlaylistItemsAtPositions(fUri.substr(17), items,
-								fPlaylistSnapshotId, completion);
-						}
-					}
-				} else {
-					DEBUG_PRINT("PlaylistWindow: 'remT' failed because fUri is not a playlist: %s\n", fUri.c_str());
-				}
-			} else {
-				DEBUG_PRINT("PlaylistWindow: 'remT' received but no trackUri found\n");
-			}
+			_RemoveSelectedTracksFromPlaylist(message);
 			break;
 		}
 
 		case 'rTrR':
 		{
-			bool ok = message->GetBool("ok", false);
-			bool needsReload = !ok && (message->GetInt32("status", -1) == 409
-				|| message->GetBool("partial_update", false));
-			_FinishTrackRemoval(ok);
-			if (ok) {
-				_RefreshPlaylistSnapshot();
-			} else if (needsReload) {
-				PostMessage('pSnC');
-			} else {
-				BAlert* alert = new BAlert("", B_TRANSLATE(
-					"Spotify could not remove the selected songs."),
-					B_TRANSLATE("OK"), nullptr, nullptr, B_WIDTH_AS_USUAL,
-					B_WARNING_ALERT);
-				alert->Go();
-			}
+			_ApplyTrackRemovalResult(message);
 			break;
 		}
 
 		case 'pMvR':
 		{
-			bool ok = message->GetBool("ok", false);
-			bool conflict = !ok && message->GetInt32("status", -1) == 409;
-			_FinishTrackReorder(ok, message->GetString("snapshot_id", ""));
-			if (ok) {
-				if (fPlaylistSnapshotId.empty())
-					_RefreshPlaylistSnapshot();
-			} else if (conflict) {
-				PostMessage('pSnC');
-			} else {
-				BAlert* alert = new BAlert("", B_TRANSLATE(
-					"Spotify could not move the selected songs."),
-					B_TRANSLATE("OK"), nullptr, nullptr, B_WIDTH_AS_USUAL,
-					B_WARNING_ALERT);
-				alert->Go();
-			}
+			_ApplyTrackReorderResult(message);
 			break;
 		}
 
 		case 'pClR':
 		{
-			bool ok = message->GetBool("ok", false);
-			_FinishClearPlaylist(ok,
-				message->GetString("snapshot_id", ""));
-			if (!ok) {
-				BAlert* alert = new BAlert("", B_TRANSLATE(
-					"Spotify could not clear the playlist."),
-					B_TRANSLATE("OK"), nullptr, nullptr, B_WIDTH_AS_USUAL,
-					B_WARNING_ALERT);
-				alert->Go();
-			}
+			_ApplyClearPlaylistResult(message);
 			break;
 		}
 
 		case 'pAdR':
 		{
-			BRow* pendingRow = nullptr;
-			if (message->FindPointer("row", (void**)&pendingRow) != B_OK
-					|| !pendingRow)
-				break;
-			bool fullyLoaded = message->GetBool("fully_loaded", false);
-			if (message->GetBool("ok", false)) {
-				fPlaylistSnapshotId = message->GetString("snapshot_id", "");
-				fCachedPlaylistSnapshotId = fPlaylistSnapshotId;
-				if (fullyLoaded)
-					fPageOffset++;
-				_DeleteCache();
-				if (!fPlaylistSnapshotId.empty())
-					_SaveCache();
-				else
-					_RefreshPlaylistSnapshot();
-			} else {
-				bool stillVisible = fTrackList->IndexOf(pendingRow) >= 0;
-				if (stillVisible) {
-					fTrackList->RemoveRow(pendingRow);
-					delete pendingRow;
-					fPageTotal = std::max((int32)0, fPageTotal - 1);
-				}
-				BAlert* alert = new BAlert("", B_TRANSLATE(
-					"Spotify could not add the song to the playlist."),
-					B_TRANSLATE("OK"), nullptr, nullptr, B_WIDTH_AS_USUAL,
-					B_WARNING_ALERT);
-				alert->Go();
-			}
-			fPageHasMore = fPageOffset < fPageTotal;
-			_UpdatePlaylistTrackInfo();
+			_ApplyPlaylistAddResult(message);
 			break;
 		}
 
@@ -1253,7 +1053,7 @@ PlaylistWindow::MessageReceived(BMessage* message)
 			break;
 
 		case 'rfEp':
-			if (fUri.find("spotify:show:") == 0) {
+			if (SpotifyItemKindForUri(fUri) == kSpotifyItemShow) {
 				_DeleteCache();
 				_LoadData(true);
 			}
@@ -1272,115 +1072,13 @@ PlaylistWindow::MessageReceived(BMessage* message)
 
 		case 'pLdF':
 		{
-			fPageLoading = false;
-			int32 searchGeneration = message->GetInt32(
-				"search_generation", -1);
-			if (fEpisodeSearchPaging && searchGeneration >= 0
-					&& searchGeneration == fEpisodeSearchGeneration) {
-				int32 status = message->GetInt32("status", -1);
-				int32 retryAfter = message->GetInt32("retry_after", -1);
-				bool temporary = status < 0 || status == 408 || status == 425
-					|| status == 429 || status >= 500;
-				if (temporary && fEpisodeSearchRetryCount < 3) {
-					fEpisodeSearchRetryCount++;
-					fEpisodeSearchWaitingRetry = true;
-					bigtime_t delay = status == 429 && retryAfter > 0
-						? (bigtime_t)retryAfter * 1000000LL : 2000000LL;
-					delete fEpisodeSearchRetryRunner;
-					BMessage retry(kMsgRetryEpisodeSearch);
-					retry.AddInt32("search_generation",
-						fEpisodeSearchGeneration);
-					fEpisodeSearchRetryRunner = new BMessageRunner(
-						BMessenger(this), &retry, delay, 1);
-				} else {
-					fEpisodeSearchPaging = false;
-					fEpisodeSearchWaitingRetry = false;
-					fEpisodeSearchFailed = true;
-				}
-				_UpdateEpisodeInfo();
-			} else if (fEpisodeSearchPaging
-					&& !fEpisodeSearchFilter.empty()) {
-				_CheckLazyLoad();
-			}
+			_ApplyPageLoadFailure(message);
 			break;
 		}
 
 		case 'drpT':
 		{
-			const char* trackUri = message->GetString("trackUri", "");
-			if (!trackUri || !trackUri[0])
-				trackUri = message->GetString("uri", "");
-			const char* sourcePlaylist = message->GetString("sourcePlaylist", "");
-			int32 sourceIndex = message->GetInt32("sourceIndex", -1);
-			std::string type = message->GetString("itemType", "");
-			bool mutationPending = fTrackRemovalPending || fTrackReorderPending
-				|| fPlaylistClearPending;
-			PlaylistDropAction action = ResolvePlaylistDropAction(fUri,
-				sourcePlaylist, sourceIndex, type, trackUri, fPlaylistOwned,
-				mutationPending);
-			if (action == kPlaylistDropReorder) {
-				BPoint point = message->DropPoint();
-				fTrackList->ConvertFromScreen(&point);
-				BRow* targetRow = fTrackList->RowAt(point);
-				int32 targetIndex = fTrackList->CountRows();
-				for (int32 i = 0; i < fTrackList->CountRows(); i++) {
-					if (fTrackList->RowAt(i) == targetRow) {
-						targetIndex = i;
-						break;
-					}
-				}
-				if (targetIndex != sourceIndex) {
-					int32 insertBefore = ResolvePlaylistDropInsertBefore(
-						sourceIndex, targetIndex, fTrackList->CountRows());
-					_BeginTrackReorder(sourceIndex, 1, insertBefore);
-				}
-				break;
-			}
-			if (action == kPlaylistDropAddPlayableItem) {
-				DEBUG_PRINT("PlaylistWindow: Drop received for track %s on %s\n", trackUri, fUri.c_str());
-				const char* title    = message->GetString("title",    "");
-				const char* artist   = message->GetString("artist",   "");
-				const char* album    = message->GetString("album",    "");
-				const char* duration = message->GetString("duration", "");
-				bool fullyLoaded = fPageOffset >= fPageTotal;
-				int32 playlistPosition = std::max(fPageTotal,
-					(int32)fTrackList->CountRows());
-				int32 nextNum = playlistPosition + 1;
-				TrackRow* row = new TrackRow(trackUri, playlistPosition);
-				row->SetField(new BIntegerField(nextNum), 0);
-				row->SetField(new TrackStringField(title),    1);
-				row->SetField(new TrackStringField(artist),   2);
-				row->SetField(new TrackStringField(""),       3);
-				row->SetField(new TrackStringField(""),       4);
-				row->SetField(new TrackStringField(album),    5);
-				row->SetField(new TrackStringField(duration), 6);
-				row->SetPlaying(!fCurrentPlayingTrackUri.empty()
-					&& row->fTrackUri == fCurrentPlayingTrackUri);
-				fTrackList->AddRow(row);
-				fPageTotal = playlistPosition + 1;
-
-				App* app = (App*)be_app;
-				SpotifyApi* api = app->GetApi();
-				if (api) {
-					DEBUG_PRINT("PlaylistWindow: Adding track to playlist\n");
-					BMessenger self(this);
-					api->AddTrackToPlaylist(fUri.substr(17), trackUri,
-						[self, row, fullyLoaded](bool ok,
-								const nlohmann::json& data) {
-						BMessage result('pAdR');
-						result.AddBool("ok", ok);
-						result.AddBool("fully_loaded", fullyLoaded);
-						result.AddPointer("row", row);
-						nlohmann::json body = MutationBody(data);
-						result.AddString("snapshot_id",
-							JsonString(body, "snapshot_id").c_str());
-						self.SendMessage(&result);
-					});
-					_DeleteCache();
-				}
-			} else {
-				DEBUG_PRINT("PlaylistWindow: Drop received without playable track uri\n");
-			}
+			_HandleTrackDrop(message);
 			break;
 		}
 
@@ -1396,68 +1094,7 @@ PlaylistWindow::MessageReceived(BMessage* message)
 
 		case 'pLdt':
 		{
-			fPageLoading = false;
-			bool append = message->GetBool("append", false);
-			BScrollBar* scrollBar = TrackVerticalScrollBar(fTrackList);
-			float scrollValue = scrollBar ? scrollBar->Value() : 0.0f;
-			if (!append)
-				fTrackList->Clear();
-			int32 number;
-			const char *title, *artist, *artistUri, *bpm, *key, *album, *albumUri, *duration, *trackUri;
-			for (int i = 0; message->FindInt32("number", i, &number) == B_OK; i++) {
-				title     = message->FindString("title",     i);
-				artist    = message->FindString("artist",    i);
-				artistUri = message->FindString("artistUri", i);
-				bpm       = message->FindString("bpm",       i);
-				key       = message->FindString("key",       i);
-				album     = message->FindString("album",     i);
-				albumUri  = message->FindString("albumUri",  i);
-				duration  = message->FindString("duration",  i);
-				trackUri  = message->FindString("trackUri",  i);
-
-				TrackRow* row = new TrackRow(trackUri ? trackUri : "", number - 1);
-				row->fArtistUri = artistUri ? artistUri : "";
-				row->fAlbumUri  = albumUri  ? albumUri  : "";
-				row->SetField(new BIntegerField(number), 0);
-				row->SetField(new TrackStringField(title ? title : ""), 1);
-				row->SetField(new TrackStringField(artist ? artist : ""), 2);
-				row->SetField(new TrackStringField(bpm ? bpm : ""), 3);
-				row->SetField(new TrackStringField(key ? key : ""), 4);
-				row->SetField(new TrackStringField(album ? album : ""), 5);
-				row->SetField(new TrackStringField(duration ? duration : ""), 6);
-				row->SetPlaying(!fCurrentPlayingTrackUri.empty()
-					&& row->fTrackUri == fCurrentPlayingTrackUri);
-				fTrackList->AddRow(row);
-			}
-			int32 total = message->GetInt32("total", -1);
-			if (total >= 0)
-				fPageTotal = total;
-			fPageOffset = message->GetInt32("next_offset",
-				(int32)fTrackList->CountRows());
-			int32 pageCount = message->GetInt32("page_count", 0);
-			fPageHasMore = pageCount > 0
-				&& (fPageTotal <= 0 || fPageOffset < fPageTotal);
-			char info[64];
-			const char* typeStr =
-				(fUri == "spotify:collection")       ? B_TRANSLATE("Liked Songs") :
-				(fUri.find("spotify:album:")  == 0)  ? "Album"   :
-				(fUri.find("spotify:show:")   == 0)  ? "Podcast" : "Playlist";
-			const char* countLabel =
-				(fUri.find("spotify:show:") == 0) ? "Episodes" : "Songs";
-			if (total > fTrackList->CountRows())
-				snprintf(info, sizeof(info), "%s \xC2\xB7 %ld/%ld %s", typeStr,
-					(long)fTrackList->CountRows(), (long)total, countLabel);
-			else
-				snprintf(info, sizeof(info), "%s \xC2\xB7 %ld %s", typeStr,
-					(long)fTrackList->CountRows(), countLabel);
-			fPlaylistInfo->SetText(info);
-			if (append && scrollBar)
-				scrollBar->SetValue(scrollValue);
-			if (fUri == "spotify:collection"
-					|| (fUri.find("spotify:playlist:") == 0
-						&& !fPlaylistSnapshotId.empty()))
-				_SaveCache();
-			_CheckLazyLoad();
+			_ApplyTrackPage(message);
 			break;
 		}
 
@@ -1465,13 +1102,8 @@ PlaylistWindow::MessageReceived(BMessage* message)
 		{
 			const char* title;
 			if (message->FindString("title", &title) == B_OK) {
-				std::string titlePrefix;
-				if (fUri.find("spotify:playlist:") == 0) titlePrefix = "Playlist: ";
-				else if (fUri.find("spotify:album:") == 0) titlePrefix = "Album: ";
-				else if (fUri.find("spotify:show:")   == 0) titlePrefix = "Podcast: ";
-				else if (fUri.find("spotify:artist:") == 0) titlePrefix = "Artist: ";
-
-				SetTitle((titlePrefix + title).c_str());
+				SetTitle((std::string(PlaylistWindowTitlePrefix(fUri))
+					+ title).c_str());
 				fPlaylistName->SetText(title);
 			}
 			break;
@@ -1479,62 +1111,12 @@ PlaylistWindow::MessageReceived(BMessage* message)
 
 		case 'plMt':
 		{
-			const char* title = message->GetString("title", "");
-			if (title && title[0]) {
-				SetTitle((std::string("Playlist: ") + title).c_str());
-				fPlaylistName->SetText(title);
-			}
-
-			const char* coverUrl = message->GetString("cover_url", "");
-			if (coverUrl && coverUrl[0]) {
-				BMessage covMsg('uCov');
-				covMsg.AddString("url", coverUrl);
-				PostMessage(&covMsg);
-			}
-
-			std::string snapshot = message->GetString("snapshot_id", "");
-			fPlaylistDescription = message->GetString("description", "");
-			fPlaylistOwnerId = message->GetString("owner_id", "");
-			fPlaylistPublic = message->GetBool("public", false);
-			fPlaylistOwned = !fCurrentUserId.empty()
-				&& (fCurrentUserId == fPlaylistOwnerId
-					|| fCurrentUserLegacyId == fPlaylistOwnerId);
-			_UpdatePlaylistMenuState();
-			int32 total = message->GetInt32("total", -1);
-			fPlaylistSnapshotId = snapshot;
-
-			if (ShouldReloadPlaylistRowsForSnapshot(fCachedPlaylistSnapshotId,
-					snapshot)) {
-				_DeleteCache();
-				fCachedPlaylistSnapshotId.clear();
-				// Keep the cached rows visible until the first fresh page arrives.
-				// The non-append page handler swaps them in one UI transaction.
-				fPageLoading = false;
-				fPageOffset = 0;
-				fPageTotal = total >= 0 ? total : 0;
-				fPageHasMore = total != 0;
-				_LoadNextPage();
-				break;
-			}
-
-			PlaylistMetadataPageState pageState =
-				ResolvePlaylistMetadataPageState(total, fPageTotal,
-					fTrackList->CountRows(), fPageOffset);
-			fPageTotal = pageState.total;
-			fPageHasMore = pageState.hasMore;
-			if (fTrackList && fTrackList->CountRows() > 0)
-				_SaveCache();
-			_CheckLazyLoad();
+			_ApplyPlaylistMetadata(message);
 			break;
 		}
 
 		case 'plUs':
-			fCurrentUserId = message->GetString("user_id", "");
-			fCurrentUserLegacyId = message->GetString("legacy_user_id", "");
-			fPlaylistOwned = !fCurrentUserId.empty()
-				&& (fCurrentUserId == fPlaylistOwnerId
-					|| fCurrentUserLegacyId == fPlaylistOwnerId);
-			_UpdatePlaylistMenuState();
+			_ApplyPlaylistUserState(message);
 			break;
 
 		case kMsgEditPlaylist:
@@ -1543,52 +1125,12 @@ PlaylistWindow::MessageReceived(BMessage* message)
 
 		case kMsgPlaylistDetails:
 		{
-			if (!fPlaylistOwned) break;
-			std::string name = message->GetString("name", "");
-			std::string description = message->GetString("description", "");
-			bool isPublic = message->GetBool("public", false);
-			App* app = dynamic_cast<App*>(be_app);
-			SpotifyApi* api = app ? app->GetApi() : nullptr;
-			if (!api || name.empty()) break;
-			BMessenger self(this);
-			api->UpdatePlaylistDetails(_PlaylistId(), name, description, isPublic,
-				[self, name, description, isPublic](bool ok,
-					const nlohmann::json& data) {
-					BMessage result('pEdR');
-					result.AddBool("ok", ok);
-					result.AddString("name", name.c_str());
-					result.AddString("description", description.c_str());
-					result.AddBool("public", isPublic);
-					result.AddString("error",
-						SpotifyApi::ResponseErrorReason(data).c_str());
-					self.SendMessage(&result);
-				});
+			_UpdatePlaylistDetails(message);
 			break;
 		}
 
 		case 'pEdR':
-			if (message->GetBool("ok", false)) {
-				std::string name = message->GetString("name", "");
-				fPlaylistDescription = message->GetString("description", "");
-				fPlaylistPublic = message->GetBool("public", false);
-				fPlaylistName->SetText(name.c_str());
-				SetTitle((std::string("Playlist: ") + name).c_str());
-				std::string id = _PlaylistId();
-				if (!id.empty()) {
-					BMessage changed(MSG_PLAYLISTS_CHANGED);
-					changed.AddString("operation", "rename");
-					changed.AddString("id", id.c_str());
-					changed.AddString("uri", fUri.c_str());
-					changed.AddString("name", name.c_str());
-					be_app->PostMessage(&changed);
-				}
-			} else {
-				BAlert* alert = new BAlert("", B_TRANSLATE(
-					"Spotify could not update the playlist details."),
-					B_TRANSLATE("OK"), nullptr, nullptr, B_WIDTH_AS_USUAL,
-					B_WARNING_ALERT);
-				alert->Go();
-			}
+			_ApplyPlaylistEditResult(message);
 			break;
 
 		case kMsgChoosePlaylistCover:
@@ -1604,26 +1146,7 @@ PlaylistWindow::MessageReceived(BMessage* message)
 		}
 
 		case 'pCvR':
-			if (message->GetBool("ok", false)) {
-				App* app = dynamic_cast<App*>(be_app);
-				SpotifyApi* api = app ? app->GetApi() : nullptr;
-				if (api) {
-					BMessenger self(this);
-					api->GetPlaylistImages(_PlaylistId(), [self](bool ok,
-							const nlohmann::json& images) {
-						if (!ok || !images.is_array() || images.empty()) return;
-						BMessage cover('uCov');
-						cover.AddString("url", JsonString(images[0], "url").c_str());
-						self.SendMessage(&cover);
-					});
-				}
-			} else {
-				BAlert* alert = new BAlert("", B_TRANSLATE(
-					"Spotify could not upload the playlist cover."),
-					B_TRANSLATE("OK"), nullptr, nullptr, B_WIDTH_AS_USUAL,
-					B_WARNING_ALERT);
-				alert->Go();
-			}
+			_ApplyPlaylistCoverUploadResult(message);
 			break;
 
 		case kMsgClearPlaylist:
@@ -1678,50 +1201,13 @@ PlaylistWindow::MessageReceived(BMessage* message)
 
 		case MSG_LIBRARY_CHANGED:
 		{
-			std::string uri = message->GetString("uri", "");
-			std::string operation = message->GetString("operation", "");
-			if (uri != fUri || (operation != "add" && operation != "remove"))
-				break;
-			bool saved = operation == "add";
-			if (fUri.find("spotify:album:") == 0) {
-				fAlbumSaved = saved;
-				fAlbumSavedKnown = true;
-				fAlbumSavePending = false;
-				_UpdateAlbumMenuItem();
-			} else if (fUri.find("spotify:show:") == 0) {
-				fIsSubscribed = saved;
-				fSubscriptionKnown = true;
-				fSubscriptionPending = false;
-				if (fSubscribeButton) {
-					fSubscribeButton->SetLabel(fIsSubscribed
-						? B_TRANSLATE("Unsubscribe") : B_TRANSLATE("Subscribe"));
-					fSubscribeButton->SetEnabled(true);
-				}
-			}
+			_ApplyLibraryChange(message);
 			break;
 		}
 
 		case kMsgAlbumSavedState:
 		{
-			bool ok = message->GetBool("ok", true);
-			if (ok) {
-				fAlbumSaved = message->GetBool("saved", false);
-				fAlbumSavedKnown = true;
-				if (message->GetBool("changed", false)) {
-					BMessage changed(MSG_LIBRARY_CHANGED);
-					changed.AddString("operation",
-						fAlbumSaved ? "add" : "remove");
-					changed.AddString("uri", fUri.c_str());
-					be_app->PostMessage(&changed);
-				}
-			} else if (message->GetBool("show_error", false)) {
-				BAlert* alert = new BAlert(B_TRANSLATE("Album"),
-					B_TRANSLATE("Saved Albums could not be updated."),
-					B_TRANSLATE("OK"));
-				alert->Go();
-			}
-			fAlbumSavePending = false;
-			_UpdateAlbumMenuItem();
+			_ApplyAlbumSavedState(message);
 			break;
 		}
 
@@ -1747,15 +1233,7 @@ PlaylistWindow::MessageReceived(BMessage* message)
 
 		case kMsgPlaylistDeleted:
 		{
-			std::string id = _PlaylistId();
-			if (!id.empty()) {
-				BMessage changed(MSG_PLAYLISTS_CHANGED);
-				changed.AddString("operation", "remove");
-				changed.AddString("id", id.c_str());
-				changed.AddString("uri", fUri.c_str());
-				be_app->PostMessage(&changed);
-			}
-			PostMessage(B_QUIT_REQUESTED);
+			_NotifyPlaylistDeleted();
 			break;
 		}
 
@@ -1767,246 +1245,47 @@ PlaylistWindow::MessageReceived(BMessage* message)
 
 		case 'pEpL':
 		{
-			fPageLoading = false;
-			fEpisodeSearchRetryCount = 0;
-			fEpisodeSearchWaitingRetry = false;
-			fEpisodeSearchFailed = false;
-			int32 append      = message->GetInt32("append",      0);
-			BScrollBar* scrollBar = TrackVerticalScrollBar(fTrackList);
-			float scrollValue = scrollBar ? scrollBar->Value() : 0.0f;
-			fEpisodeTotal     = message->GetInt32("total",        0);
-			fEpisodeOffset    = message->GetInt32("next_offset",  0);
-			fPageTotal        = fEpisodeTotal;
-			fPageOffset       = fEpisodeOffset;
-			int32 pageCount   = message->GetInt32("page_count", 0);
-			fPageHasMore      = pageCount > 0
-				&& (fEpisodeTotal <= 0 || fEpisodeOffset < fEpisodeTotal);
-
-			if (!append) {
-				fEpisodes.clear();
-			}
-			size_t firstNewEpisode = fEpisodes.size();
-
-			const char *title, *description, *date, *duration, *trackUri;
-			int32 number;
-			for (int i = 0; message->FindInt32("number", i, &number) == B_OK; i++) {
-				title       = message->FindString("title",       i);
-				description = message->FindString("description", i);
-				date        = message->FindString("date",        i);
-				duration    = message->FindString("duration",    i);
-				trackUri    = message->FindString("trackUri",    i);
-				std::string uri = trackUri ? trackUri : "";
-				std::string titleStr = title ? title : "";
-				std::string dateStr = date ? date : "";
-				std::string durationStr = duration ? duration : "";
-				if (_HasEpisode(uri, titleStr, dateStr, durationStr))
-					continue;
-				fEpisodes.push_back({number,
-					titleStr,
-					description ? description : "",
-					dateStr,
-					durationStr,
-					uri,
-					LowercaseSearchText(titleStr,
-						description ? description : "")});
-			}
-			_RenumberEpisodes();
-
-			if (append)
-				_AppendEpisodeRows(firstNewEpisode, fEpisodeSearchFilter);
-			else
-				_RebuildEpisodeList(fEpisodeSearchFilter);
-			if (append && scrollBar)
-				scrollBar->SetValue(scrollValue);
-			if (!fPageHasMore)
-				fEpisodeSearchPaging = false;
-
-			_UpdateEpisodeInfo();
-
-			_SaveCache();
-			_CheckLazyLoad();
+			_ApplyEpisodePage(message);
 			break;
 		}
 
 		case 'pEpR':
 		{
-			bool ok = message->GetBool("ok", false);
-			if (!ok) {
-				fPodcastHeadRefreshing = false;
-				fPendingPodcastHeadEpisodes.clear();
-				break;
-			}
-
-			fEpisodeTotal = message->GetInt32("total", fEpisodeTotal);
-			int32 offset = message->GetInt32("offset", 0);
-			int32 pageCount = message->GetInt32("page_count", 0);
-			int32 nextOffset = message->GetInt32("next_offset",
-				offset + pageCount);
-
-			bool reachedKnownEpisode = false;
-			const char *title, *description, *date, *duration, *trackUri;
-			int32 number;
-			for (int i = 0; message->FindInt32("number", i, &number) == B_OK; i++) {
-				title       = message->FindString("title",       i);
-				description = message->FindString("description", i);
-				date        = message->FindString("date",        i);
-				duration    = message->FindString("duration",    i);
-				trackUri    = message->FindString("trackUri",    i);
-				std::string uri = trackUri ? trackUri : "";
-				std::string titleStr = title ? title : "";
-				std::string dateStr = date ? date : "";
-				std::string durationStr = duration ? duration : "";
-				if (_HasEpisode(uri, titleStr, dateStr, durationStr)) {
-					reachedKnownEpisode = true;
-					break;
-				}
-				fPendingPodcastHeadEpisodes.push_back({number,
-					titleStr,
-					description ? description : "",
-					dateStr,
-					durationStr,
-					uri,
-					LowercaseSearchText(titleStr,
-						description ? description : "")});
-			}
-
-			if (!reachedKnownEpisode && pageCount > 0
-					&& (fEpisodeTotal <= 0 || nextOffset < fEpisodeTotal)) {
-				_RefreshPodcastHead(nextOffset);
-				break;
-			}
-
-			_FinishPodcastHeadRefresh();
+			_ApplyPodcastHeadPage(message);
 			break;
 		}
 
 		case 'subU':
 		{
-			bool ok = message->GetBool("ok", true);
-			if (ok) {
-				fIsSubscribed = message->GetBool("following", false);
-				fSubscriptionKnown = true;
-				if (message->GetBool("changed", false)) {
-					BMessage changed(MSG_LIBRARY_CHANGED);
-					changed.AddString("operation",
-						fIsSubscribed ? "add" : "remove");
-					changed.AddString("uri", fUri.c_str());
-					be_app->PostMessage(&changed);
-				}
-			} else if (message->GetBool("show_error", false)) {
-				BAlert* alert = new BAlert(B_TRANSLATE("Podcast"),
-					B_TRANSLATE("The podcast subscription could not be updated."),
-					B_TRANSLATE("OK"));
-				alert->Go();
-			}
-			fSubscriptionPending = false;
-			if (fSubscribeButton) {
-				fSubscribeButton->SetLabel(fIsSubscribed
-					? B_TRANSLATE("Unsubscribe")
-					: B_TRANSLATE("Subscribe"));
-				fSubscribeButton->SetEnabled(fSubscriptionKnown);
-			}
+			_ApplySubscriptionState(message);
 			break;
 		}
 
 		case 'subS':
 		{
-			if (fUri.find("spotify:show:") != 0 || !fSubscriptionKnown
-					|| fSubscriptionPending) break;
-			App* app = (App*)be_app;
-			SpotifyApi* api = app->GetApi();
-			if (!api) break;
-			std::string id = fUri.substr(13);
-			bool target = !fIsSubscribed;
-			fSubscriptionPending = true;
-			if (fSubscribeButton) fSubscribeButton->SetEnabled(false);
-			BMessenger self(this);
-			if (!target) {
-				api->UnfollowShow(id, [self, target](bool ok, const nlohmann::json&) {
-					BMessage msg('subU');
-					msg.AddBool("ok", ok);
-					msg.AddBool("following", target);
-					msg.AddBool("changed", ok);
-					msg.AddBool("show_error", !ok);
-					self.SendMessage(&msg);
-				});
-			} else {
-				api->FollowShow(id, [self, target](bool ok, const nlohmann::json&) {
-					BMessage msg('subU');
-					msg.AddBool("ok", ok);
-					msg.AddBool("following", target);
-					msg.AddBool("changed", ok);
-					msg.AddBool("show_error", !ok);
-					self.SendMessage(&msg);
-				});
-			}
+			_TogglePodcastSubscription();
 			break;
 		}
 
 		case 'srch':
-			if (fSearchBox) {
-				fEpisodeSearchGeneration++;
-				fEpisodeSearchPaging = false;
-				fEpisodeSearchWaitingRetry = false;
-				fEpisodeSearchFailed = false;
-				fEpisodeSearchRetryCount = 0;
-				_UpdateEpisodeInfo();
-				delete fEpisodeSearchRetryRunner;
-				fEpisodeSearchRetryRunner = nullptr;
-				delete fEpisodeSearchRunner;
-				BMessage apply(kMsgApplyEpisodeSearch);
-				apply.AddInt32("search_generation",
-					fEpisodeSearchGeneration);
-				fEpisodeSearchRunner = new BMessageRunner(BMessenger(this),
-					&apply, 200000LL, 1);
-			}
+			_ScheduleEpisodeSearch();
 			break;
 
 		case kMsgApplyEpisodeSearch:
 		{
-			int32 searchGeneration = message->GetInt32(
-				"search_generation", -1);
-			if (searchGeneration != fEpisodeSearchGeneration)
-				break;
-			delete fEpisodeSearchRunner;
-			fEpisodeSearchRunner = nullptr;
-			if (fSearchBox) {
-				fEpisodeSearchFilter = fSearchBox->Text();
-				fEpisodeSearchPaging = !fEpisodeSearchFilter.empty()
-					&& fPageHasMore;
-				fEpisodeSearchFailed = false;
-				_RebuildEpisodeList(fEpisodeSearchFilter);
-				_UpdateEpisodeInfo();
-				_CheckLazyLoad();
-			}
+			_ApplyEpisodeSearch(message);
 			break;
 		}
 
 		case kMsgRetryEpisodeSearch:
 		{
-			int32 searchGeneration = message->GetInt32(
-				"search_generation", -1);
-			if (searchGeneration != fEpisodeSearchGeneration)
-				break;
-			delete fEpisodeSearchRetryRunner;
-			fEpisodeSearchRetryRunner = nullptr;
-			if (fEpisodeSearchPaging
-					&& !fEpisodeSearchFilter.empty()) {
-				fEpisodeSearchWaitingRetry = false;
-				_UpdateEpisodeInfo();
-				_LoadNextPage();
-			}
+			_RetryEpisodeSearch(message);
 			break;
 		}
 
 		case 'epSl':
 		{
-			const char* desc;
-			if (fDescriptionView
-					&& message->FindString("description", &desc) == B_OK) {
-				ApplyMediaDescription(fDescriptionView, desc);
-				fDescriptionView->SetLinks(MediaDescriptionLinks(desc));
-			}
+			_ApplyEpisodeSelection(message);
 			break;
 		}
 
@@ -2018,11 +1297,1064 @@ PlaylistWindow::MessageReceived(BMessage* message)
 
 
 void
+PlaylistWindow::_ShowRenamePlaylistDialog(BMessage* message)
+{
+	if (SpotifyItemKindForUri(fUri) != kSpotifyItemPlaylist)
+		return;
+	std::string id = SpotifyItemIdForUri(fUri);
+	const char* idFromMsg = message->GetString("id", "");
+	if (*idFromMsg)
+		id = idFromMsg;
+	std::string currentName = Title();
+
+	const std::string prefix = "Playlist: ";
+	if (currentName.find(prefix) == 0)
+		currentName = currentName.substr(prefix.size());
+	BMessage confirm('plRc');
+	confirm.AddString("id", id.c_str());
+	TextInputDialog* dialog = new TextInputDialog(
+		B_TRANSLATE("Rename Playlist"), B_TRANSLATE("Name:"),
+		currentName.c_str(), BMessenger(this), confirm);
+	dialog->Show();
+}
+
+
+void
+PlaylistWindow::_RenamePlaylist(BMessage* message)
+{
+	const char* name = message->GetString("name", "");
+	const char* id = message->GetString("id", "");
+	if (!*name || !*id)
+		return;
+	App* app = (App*)be_app;
+	SpotifyApi* api = app->GetApi();
+	if (!api)
+		return;
+	BMessenger self(this);
+	std::string sid = id;
+	std::string sname = name;
+	api->Playlists().RenamePlaylist(sid, sname,
+		[self, sid, sname](bool ok, const nlohmann::json&) {
+		if (!ok)
+			return;
+		BMessage msg('uTtl');
+		msg.AddString("title", sname.c_str());
+		self.SendMessage(&msg);
+
+		BMessage changed(MSG_PLAYLISTS_CHANGED);
+		changed.AddString("operation", "rename");
+		changed.AddString("id", sid.c_str());
+		std::string playlistUri = SpotifyUriForItemKind(
+			kSpotifyItemPlaylist, sid);
+		changed.AddString("uri", playlistUri.c_str());
+		changed.AddString("name", sname.c_str());
+		be_app->PostMessage(&changed);
+	});
+}
+
+
+void
+PlaylistWindow::_PlayTrackFromMessage(BMessage* message)
+{
+	const char* trackUri = message->GetString("trackUri", "");
+	if (!*trackUri)
+		return;
+	BMessage play('play');
+	play.AddString("uri", trackUri);
+	play.AddString("context_uri", fUri.c_str());
+	bool podcast = SpotifyItemKindForUri(fUri) == kSpotifyItemShow;
+	for (int32 i = 0; i < fTrackList->CountRows(); i++) {
+		TrackRow* row = (TrackRow*)fTrackList->RowAt(i);
+		if (!row || row->fTrackUri != trackUri)
+			continue;
+		BStringField* title = dynamic_cast<BStringField*>(row->GetField(1));
+		BStringField* artist = dynamic_cast<BStringField*>(row->GetField(2));
+		if (title)
+			play.AddString("title", title->String());
+		if (!podcast && artist)
+			play.AddString("artist", artist->String());
+		break;
+	}
+	_AddPodcastNowPlayingContext(play);
+	be_app->PostMessage(&play);
+}
+
+
+void
+PlaylistWindow::_PlayCurrentTrack()
+{
+	TrackRow* row = (TrackRow*)fTrackList->CurrentSelection();
+	if (!row || row->fTrackUri.empty())
+		return;
+
+	BMessage play('play');
+	play.AddString("uri", row->fTrackUri.c_str());
+	play.AddString("context_uri", fUri.c_str());
+	bool podcast = SpotifyItemKindForUri(fUri) == kSpotifyItemShow;
+	BStringField* title = dynamic_cast<BStringField*>(row->GetField(1));
+	BStringField* artist = dynamic_cast<BStringField*>(row->GetField(2));
+	if (title)
+		play.AddString("title", title->String());
+	if (!podcast && artist)
+		play.AddString("artist", artist->String());
+	_AddPodcastNowPlayingContext(play);
+	be_app->PostMessage(&play);
+	SetPlayingTrack(row->fTrackUri.c_str());
+}
+
+
+void
+PlaylistWindow::_RemoveTrackFromLibrary(BMessage* message)
+{
+	const char* trackUri = message->GetString("trackUri", "");
+	if (!*trackUri)
+		return;
+
+	for (int32 i = 0; i < fTrackList->CountRows(); i++) {
+		TrackRow* row = (TrackRow*)fTrackList->RowAt(i);
+		if (row && row->fTrackUri == trackUri) {
+			fTrackList->RemoveRow(row);
+			delete row;
+			break;
+		}
+	}
+	App* app = (App*)be_app;
+	SpotifyApi* api = app->GetApi();
+	if (!api)
+		return;
+	api->Library().RemoveLibraryItems({trackUri}, nullptr);
+	_DeleteCache();
+}
+
+
+void
+PlaylistWindow::_SavePlayableItemToLibrary(BMessage* message)
+{
+	const char* trackUri;
+	if (message->FindString("trackUri", &trackUri) != B_OK)
+		return;
+	App* app = (App*)be_app;
+	SpotifyApi* api = app->GetApi();
+	if (!api)
+		return;
+	std::string uri = trackUri;
+	if (!SpotifyItemIsPlayable(SpotifyItemKindForUri(uri)))
+		return;
+	api->Library().SaveLibraryItems({uri}, [uri](bool ok,
+			const nlohmann::json&) {
+		if (!ok || SpotifyItemKindForUri(uri) != kSpotifyItemEpisode)
+			return;
+		BMessage changed(MSG_LIBRARY_CHANGED);
+		changed.AddString("operation", "add");
+		changed.AddString("uri", uri.c_str());
+		be_app->PostMessage(&changed);
+	});
+	_DeleteCache();
+}
+
+
+void
+PlaylistWindow::_AddMessageTrackToPlaylist(BMessage* message)
+{
+	const char* trackUri;
+	const char* playlistId;
+	if (message->FindString("trackUri", &trackUri) != B_OK
+			|| message->FindString("playlistId", &playlistId) != B_OK) {
+		return;
+	}
+	App* app = (App*)be_app;
+	SpotifyApi* api = app->GetApi();
+	if (!api)
+		return;
+	api->Playlists().AddTrackToPlaylist(playlistId, trackUri, nullptr);
+	BPath path;
+	if (PlaylistCachePath(playlistId, path, false))
+		unlink(path.Path());
+}
+
+
+void
+PlaylistWindow::_RemoveSelectedTracksFromPlaylist(BMessage* message)
+{
+	const char* trackUri;
+	if (message->FindString("trackUri", &trackUri) != B_OK) {
+		DEBUG_PRINT("PlaylistWindow: 'remT' received but no trackUri found\n");
+		return;
+	}
+	DEBUG_PRINT("PlaylistWindow: received 'remT' for %s\n", trackUri);
+	if (SpotifyItemKindForUri(fUri) != kSpotifyItemPlaylist || !fPlaylistOwned) {
+		DEBUG_PRINT("PlaylistWindow: 'remT' failed because fUri is not a playlist: %s\n",
+			fUri.c_str());
+		return;
+	}
+	App* app = (App*)be_app;
+	SpotifyApi* api = app->GetApi();
+	if (!api || fTrackRemovalPending || fTrackReorderPending
+			|| fPlaylistClearPending) {
+		return;
+	}
+
+	std::vector<std::pair<std::string, int>> items;
+	if (!_CollectPendingTrackRemovals(items))
+		return;
+
+	std::vector<std::string> knownPlaylistUris = _KnownPlaylistUrisForRemoval();
+	_RemovePendingTrackRows();
+	fTrackRemovalPending = true;
+	_UpdatePlaylistTrackInfo();
+	_UpdatePlaylistMenuState();
+
+	BMessenger self(this);
+	auto completion = [self](bool ok, const nlohmann::json& data) {
+		BMessage result('rTrR');
+		result.AddBool("ok", ok);
+		result.AddInt32("status", SpotifyResponseStatus(data));
+		result.AddBool("partial_update", JsonBool(data, "partial_update"));
+		self.SendMessage(&result);
+	};
+	std::string playlistId = SpotifyItemIdForUri(fUri);
+	if (!knownPlaylistUris.empty()) {
+		api->Playlists().RemovePlaylistItemsFromKnownSnapshot(
+			playlistId, items, fPlaylistSnapshotId, knownPlaylistUris,
+			completion);
+	} else {
+		api->Playlists().RemovePlaylistItemsAtPositions(
+			playlistId, items, fPlaylistSnapshotId, completion);
+	}
+}
+
+
+bool
+PlaylistWindow::_CollectPendingTrackRemovals(
+	std::vector<std::pair<std::string, int>>& items)
+{
+	items.clear();
+	fPendingTrackRemovals.clear();
+	for (BRow* selected = fTrackList->CurrentSelection(); selected;
+			selected = fTrackList->CurrentSelection(selected)) {
+		TrackRow* row = dynamic_cast<TrackRow*>(selected);
+		if (!row || row->fTrackUri.empty() || row->fPlaylistPosition < 0)
+			continue;
+		int32 listIndex = fTrackList->IndexOf(row);
+		if (listIndex < 0)
+			continue;
+		items.push_back({row->fTrackUri, row->fPlaylistPosition});
+		fPendingTrackRemovals.push_back({row, listIndex,
+			row->fPlaylistPosition, true});
+	}
+	return !items.empty() && !fPendingTrackRemovals.empty();
+}
+
+
+std::vector<std::string>
+PlaylistWindow::_KnownPlaylistUrisForRemoval() const
+{
+	std::vector<std::string> uris;
+	if (!PlaylistHasCompleteSnapshot(fPlaylistSnapshotId, fPageTotal,
+			fTrackList->CountRows(), fPageOffset)) {
+		return uris;
+	}
+	for (int32 index = 0; index < fTrackList->CountRows(); index++) {
+		TrackRow* row = dynamic_cast<TrackRow*>(fTrackList->RowAt(index));
+		if (!row || row->fTrackUri.empty())
+			return {};
+		uris.push_back(row->fTrackUri);
+	}
+	return uris;
+}
+
+
+void
+PlaylistWindow::_RemovePendingTrackRows()
+{
+	std::sort(fPendingTrackRemovals.begin(), fPendingTrackRemovals.end(),
+		[](const PendingTrackRemoval& left,
+				const PendingTrackRemoval& right) {
+			return left.listIndex < right.listIndex;
+		});
+	for (auto pending = fPendingTrackRemovals.rbegin();
+			pending != fPendingTrackRemovals.rend(); ++pending) {
+		fTrackList->RemoveRow(pending->row);
+	}
+}
+
+
+void
+PlaylistWindow::_HandleTrackDrop(BMessage* message)
+{
+	const char* trackUri = message->GetString("trackUri", "");
+	if (!trackUri || !trackUri[0])
+		trackUri = message->GetString("uri", "");
+	const char* sourcePlaylist = message->GetString("sourcePlaylist", "");
+	int32 sourceIndex = message->GetInt32("sourceIndex", -1);
+	std::string type = message->GetString("itemType", "");
+	bool mutationPending = fTrackRemovalPending || fTrackReorderPending
+		|| fPlaylistClearPending;
+	PlaylistDropAction action = ResolvePlaylistDropAction(fUri,
+		sourcePlaylist, sourceIndex, type, trackUri, fPlaylistOwned,
+		mutationPending);
+	if (action == kPlaylistDropReorder) {
+		_HandleTrackReorderDrop(message, sourceIndex);
+		return;
+	}
+	if (action == kPlaylistDropAddPlayableItem) {
+		_AddDroppedPlayableItem(message, trackUri);
+		return;
+	}
+	DEBUG_PRINT("PlaylistWindow: Drop received without playable track uri\n");
+}
+
+
+void
+PlaylistWindow::_HandleTrackReorderDrop(BMessage* message, int32 sourceIndex)
+{
+	BPoint point = message->DropPoint();
+	fTrackList->ConvertFromScreen(&point);
+	BRow* targetRow = fTrackList->RowAt(point);
+	int32 targetIndex = fTrackList->CountRows();
+	for (int32 i = 0; i < fTrackList->CountRows(); i++) {
+		if (fTrackList->RowAt(i) == targetRow) {
+			targetIndex = i;
+			break;
+		}
+	}
+	if (targetIndex == sourceIndex)
+		return;
+	int32 insertBefore = ResolvePlaylistDropInsertBefore(
+		sourceIndex, targetIndex, fTrackList->CountRows());
+	_BeginTrackReorder(sourceIndex, 1, insertBefore);
+}
+
+
+void
+PlaylistWindow::_AddDroppedPlayableItem(BMessage* message, const char* trackUri)
+{
+	DEBUG_PRINT("PlaylistWindow: Drop received for track %s on %s\n",
+		trackUri, fUri.c_str());
+	const char* title = message->GetString("title", "");
+	const char* artist = message->GetString("artist", "");
+	const char* album = message->GetString("album", "");
+	const char* duration = message->GetString("duration", "");
+	bool fullyLoaded = fPageOffset >= fPageTotal;
+	int32 playlistPosition = std::max(fPageTotal,
+		(int32)fTrackList->CountRows());
+	int32 nextNum = playlistPosition + 1;
+	TrackRow* row = new TrackRow(trackUri, playlistPosition);
+	row->SetField(new BIntegerField(nextNum), 0);
+	row->SetField(new TrackStringField(title), 1);
+	row->SetField(new TrackStringField(artist), 2);
+	row->SetField(new TrackStringField(""), 3);
+	row->SetField(new TrackStringField(""), 4);
+	row->SetField(new TrackStringField(album), 5);
+	row->SetField(new TrackStringField(duration), 6);
+	row->SetPlaying(!fCurrentPlayingTrackUri.empty()
+		&& row->fTrackUri == fCurrentPlayingTrackUri);
+	fTrackList->AddRow(row);
+	fPageTotal = playlistPosition + 1;
+
+	App* app = (App*)be_app;
+	SpotifyApi* api = app->GetApi();
+	if (!api)
+		return;
+
+	DEBUG_PRINT("PlaylistWindow: Adding track to playlist\n");
+	BMessenger self(this);
+	api->Playlists().AddTrackToPlaylist(_PlaylistId(), trackUri,
+		[self, row, fullyLoaded](bool ok, const nlohmann::json& data) {
+		BMessage result('pAdR');
+		result.AddBool("ok", ok);
+		result.AddBool("fully_loaded", fullyLoaded);
+		result.AddPointer("row", row);
+		nlohmann::json body = MutationBody(data);
+		result.AddString("snapshot_id",
+			JsonString(body, "snapshot_id").c_str());
+		self.SendMessage(&result);
+	});
+	_DeleteCache();
+}
+
+
+void
+PlaylistWindow::_ApplyPageLoadFailure(BMessage* message)
+{
+	fPageLoading = false;
+	int32 searchGeneration = message->GetInt32("search_generation", -1);
+	if (fEpisodeSearchPaging && searchGeneration >= 0
+			&& searchGeneration == fEpisodeSearchGeneration) {
+		int32 status = message->GetInt32("status", -1);
+		int32 retryAfter = message->GetInt32("retry_after", -1);
+		bool temporary = status < 0 || status == 408 || status == 425
+			|| status == 429 || status >= 500;
+		if (temporary && fEpisodeSearchRetryCount < 3) {
+			fEpisodeSearchRetryCount++;
+			fEpisodeSearchWaitingRetry = true;
+			bigtime_t delay = status == 429 && retryAfter > 0
+				? (bigtime_t)retryAfter * 1000000LL : 2000000LL;
+			delete fEpisodeSearchRetryRunner;
+			BMessage retry(kMsgRetryEpisodeSearch);
+			retry.AddInt32("search_generation", fEpisodeSearchGeneration);
+			fEpisodeSearchRetryRunner = new BMessageRunner(BMessenger(this),
+				&retry, delay, 1);
+		} else {
+			fEpisodeSearchPaging = false;
+			fEpisodeSearchWaitingRetry = false;
+			fEpisodeSearchFailed = true;
+		}
+		_UpdateEpisodeInfo();
+	} else if (fEpisodeSearchPaging && !fEpisodeSearchFilter.empty()) {
+		_CheckLazyLoad();
+	}
+}
+
+
+void
+PlaylistWindow::_ApplyPlaylistMetadata(BMessage* message)
+{
+	const char* title = message->GetString("title", "");
+	if (title && title[0]) {
+		SetTitle((std::string("Playlist: ") + title).c_str());
+		fPlaylistName->SetText(title);
+	}
+
+	const char* coverUrl = message->GetString("cover_url", "");
+	if (coverUrl && coverUrl[0]) {
+		BMessage cover('uCov');
+		cover.AddString("url", coverUrl);
+		PostMessage(&cover);
+	}
+
+	std::string snapshot = message->GetString("snapshot_id", "");
+	fPlaylistDescription = message->GetString("description", "");
+	fPlaylistOwnerId = message->GetString("owner_id", "");
+	fPlaylistPublic = message->GetBool("public", false);
+	fPlaylistOwned = !fCurrentUserId.empty()
+		&& (fCurrentUserId == fPlaylistOwnerId
+			|| fCurrentUserLegacyId == fPlaylistOwnerId);
+	_UpdatePlaylistMenuState();
+	int32 total = message->GetInt32("total", -1);
+	fPlaylistSnapshotId = snapshot;
+
+	if (ShouldReloadPlaylistRowsForSnapshot(fCachedPlaylistSnapshotId,
+			snapshot)) {
+		_DeleteCache();
+		fCachedPlaylistSnapshotId.clear();
+		fPageLoading = false;
+		fPageOffset = 0;
+		fPageTotal = total >= 0 ? total : 0;
+		fPageHasMore = total != 0;
+		_LoadNextPage();
+		return;
+	}
+
+	PlaylistMetadataPageState pageState = ResolvePlaylistMetadataPageState(
+		total, fPageTotal, fTrackList->CountRows(), fPageOffset);
+	fPageTotal = pageState.total;
+	fPageHasMore = pageState.hasMore;
+	if (fTrackList && fTrackList->CountRows() > 0)
+		_SaveCache();
+	_CheckLazyLoad();
+}
+
+
+void
+PlaylistWindow::_ApplyPlaylistEditResult(BMessage* message)
+{
+	if (!message->GetBool("ok", false)) {
+		BAlert* alert = new BAlert("", B_TRANSLATE(
+			"Spotify could not update the playlist details."),
+			B_TRANSLATE("OK"), nullptr, nullptr, B_WIDTH_AS_USUAL,
+			B_WARNING_ALERT);
+		alert->Go();
+		return;
+	}
+
+	std::string name = message->GetString("name", "");
+	fPlaylistDescription = message->GetString("description", "");
+	fPlaylistPublic = message->GetBool("public", false);
+	fPlaylistName->SetText(name.c_str());
+	SetTitle((std::string("Playlist: ") + name).c_str());
+	std::string id = _PlaylistId();
+	if (id.empty())
+		return;
+	BMessage changed(MSG_PLAYLISTS_CHANGED);
+	changed.AddString("operation", "rename");
+	changed.AddString("id", id.c_str());
+	changed.AddString("uri", fUri.c_str());
+	changed.AddString("name", name.c_str());
+	be_app->PostMessage(&changed);
+}
+
+
+void
+PlaylistWindow::_ApplyLibraryChange(BMessage* message)
+{
+	std::string uri = message->GetString("uri", "");
+	std::string operation = message->GetString("operation", "");
+	if (uri != fUri || (operation != "add" && operation != "remove"))
+		return;
+	bool saved = operation == "add";
+	SpotifyItemKind kind = SpotifyItemKindForUri(fUri);
+	if (kind == kSpotifyItemAlbum) {
+		fAlbumSaved = saved;
+		fAlbumSavedKnown = true;
+		fAlbumSavePending = false;
+		_UpdateAlbumMenuItem();
+	} else if (kind == kSpotifyItemShow) {
+		fIsSubscribed = saved;
+		fSubscriptionKnown = true;
+		fSubscriptionPending = false;
+		if (fSubscribeButton) {
+			fSubscribeButton->SetLabel(fIsSubscribed
+				? B_TRANSLATE("Unsubscribe") : B_TRANSLATE("Subscribe"));
+			fSubscribeButton->SetEnabled(true);
+		}
+	}
+}
+
+
+void
+PlaylistWindow::_ApplyAlbumSavedState(BMessage* message)
+{
+	bool ok = message->GetBool("ok", true);
+	if (ok) {
+		fAlbumSaved = message->GetBool("saved", false);
+		fAlbumSavedKnown = true;
+		if (message->GetBool("changed", false)) {
+			BMessage changed(MSG_LIBRARY_CHANGED);
+			changed.AddString("operation", fAlbumSaved ? "add" : "remove");
+			changed.AddString("uri", fUri.c_str());
+			be_app->PostMessage(&changed);
+		}
+	} else if (message->GetBool("show_error", false)) {
+		BAlert* alert = new BAlert(B_TRANSLATE("Album"),
+			B_TRANSLATE("Saved Albums could not be updated."),
+			B_TRANSLATE("OK"));
+		alert->Go();
+	}
+	fAlbumSavePending = false;
+	_UpdateAlbumMenuItem();
+}
+
+
+void
+PlaylistWindow::_ApplySubscriptionState(BMessage* message)
+{
+	bool ok = message->GetBool("ok", true);
+	if (ok) {
+		fIsSubscribed = message->GetBool("following", false);
+		fSubscriptionKnown = true;
+		if (message->GetBool("changed", false)) {
+			BMessage changed(MSG_LIBRARY_CHANGED);
+			changed.AddString("operation",
+				fIsSubscribed ? "add" : "remove");
+			changed.AddString("uri", fUri.c_str());
+			be_app->PostMessage(&changed);
+		}
+	} else if (message->GetBool("show_error", false)) {
+		BAlert* alert = new BAlert(B_TRANSLATE("Podcast"),
+			B_TRANSLATE("The podcast subscription could not be updated."),
+			B_TRANSLATE("OK"));
+		alert->Go();
+	}
+	fSubscriptionPending = false;
+	if (fSubscribeButton) {
+		fSubscribeButton->SetLabel(fIsSubscribed
+			? B_TRANSLATE("Unsubscribe") : B_TRANSLATE("Subscribe"));
+		fSubscribeButton->SetEnabled(fSubscriptionKnown);
+	}
+}
+
+
+void
+PlaylistWindow::_ApplyTrackPage(BMessage* message)
+{
+	fPageLoading = false;
+	bool append = message->GetBool("append", false);
+	BScrollBar* scrollBar = TrackVerticalScrollBar(fTrackList);
+	float scrollValue = scrollBar ? scrollBar->Value() : 0.0f;
+	if (!append)
+		fTrackList->Clear();
+
+	_AddTrackPageRows(message);
+
+	int32 total = message->GetInt32("total", -1);
+	if (total >= 0)
+		fPageTotal = total;
+	fPageOffset = message->GetInt32("next_offset",
+		(int32)fTrackList->CountRows());
+	int32 pageCount = message->GetInt32("page_count", 0);
+	fPageHasMore = pageCount > 0
+		&& (fPageTotal <= 0 || fPageOffset < fPageTotal);
+	_UpdatePlaylistTrackInfo();
+	if (append && scrollBar)
+		scrollBar->SetValue(scrollValue);
+	if (fUri == "spotify:collection"
+			|| (SpotifyItemKindForUri(fUri) == kSpotifyItemPlaylist
+				&& !fPlaylistSnapshotId.empty()))
+		_SaveCache();
+	_CheckLazyLoad();
+}
+
+
+void
+PlaylistWindow::_AddTrackPageRows(BMessage* message)
+{
+	int32 number;
+	const char *title, *artist, *artistUri, *bpm, *key, *album, *albumUri,
+		*duration, *trackUri;
+	for (int i = 0; message->FindInt32("number", i, &number) == B_OK; i++) {
+		title = message->FindString("title", i);
+		artist = message->FindString("artist", i);
+		artistUri = message->FindString("artistUri", i);
+		bpm = message->FindString("bpm", i);
+		key = message->FindString("key", i);
+		album = message->FindString("album", i);
+		albumUri = message->FindString("albumUri", i);
+		duration = message->FindString("duration", i);
+		trackUri = message->FindString("trackUri", i);
+
+		TrackRow* row = new TrackRow(trackUri ? trackUri : "", number - 1);
+		row->fArtistUri = artistUri ? artistUri : "";
+		row->fAlbumUri = albumUri ? albumUri : "";
+		row->SetField(new BIntegerField(number), 0);
+		row->SetField(new TrackStringField(title ? title : ""), 1);
+		row->SetField(new TrackStringField(artist ? artist : ""), 2);
+		row->SetField(new TrackStringField(bpm ? bpm : ""), 3);
+		row->SetField(new TrackStringField(key ? key : ""), 4);
+		row->SetField(new TrackStringField(album ? album : ""), 5);
+		row->SetField(new TrackStringField(duration ? duration : ""), 6);
+		row->SetPlaying(!fCurrentPlayingTrackUri.empty()
+			&& row->fTrackUri == fCurrentPlayingTrackUri);
+		fTrackList->AddRow(row);
+	}
+}
+
+
+void
+PlaylistWindow::_ShowPlayableContextMenu(BMessage* message)
+{
+	App* app = dynamic_cast<App*>(be_app);
+	ShowPlayableItemContextMenu(message->GetString("uri", ""),
+		message->GetString("context_uri", ""),
+		message->GetPoint("screen_point", BPoint()), BMessenger(this),
+		app ? app->GetApi() : nullptr,
+		message->GetBool("library_only", false), true,
+		message->GetBool("saved", false));
+}
+
+
+void
+PlaylistWindow::_PlayContextUri()
+{
+	if (fUri.empty())
+		return;
+	BMessage play('play');
+	play.AddString("uri", fUri.c_str());
+	be_app->PostMessage(&play);
+}
+
+
+void
+PlaylistWindow::_ApplyTrackRemovalResult(BMessage* message)
+{
+	bool ok = message->GetBool("ok", false);
+	bool needsReload = !ok && (message->GetInt32("status", -1) == 409
+		|| message->GetBool("partial_update", false));
+	_FinishTrackRemoval(ok);
+	if (ok) {
+		_RefreshPlaylistSnapshot();
+	} else if (needsReload) {
+		PostMessage('pSnC');
+	} else {
+		BAlert* alert = new BAlert("", B_TRANSLATE(
+			"Spotify could not remove the selected songs."),
+			B_TRANSLATE("OK"), nullptr, nullptr, B_WIDTH_AS_USUAL,
+			B_WARNING_ALERT);
+		alert->Go();
+	}
+}
+
+
+void
+PlaylistWindow::_ApplyTrackReorderResult(BMessage* message)
+{
+	bool ok = message->GetBool("ok", false);
+	bool conflict = !ok && message->GetInt32("status", -1) == 409;
+	_FinishTrackReorder(ok, message->GetString("snapshot_id", ""));
+	if (ok) {
+		if (fPlaylistSnapshotId.empty())
+			_RefreshPlaylistSnapshot();
+	} else if (conflict) {
+		PostMessage('pSnC');
+	} else {
+		BAlert* alert = new BAlert("", B_TRANSLATE(
+			"Spotify could not move the selected songs."),
+			B_TRANSLATE("OK"), nullptr, nullptr, B_WIDTH_AS_USUAL,
+			B_WARNING_ALERT);
+		alert->Go();
+	}
+}
+
+
+void
+PlaylistWindow::_ApplyClearPlaylistResult(BMessage* message)
+{
+	bool ok = message->GetBool("ok", false);
+	_FinishClearPlaylist(ok, message->GetString("snapshot_id", ""));
+	if (!ok) {
+		BAlert* alert = new BAlert("", B_TRANSLATE(
+			"Spotify could not clear the playlist."),
+			B_TRANSLATE("OK"), nullptr, nullptr, B_WIDTH_AS_USUAL,
+			B_WARNING_ALERT);
+		alert->Go();
+	}
+}
+
+
+void
+PlaylistWindow::_ApplyPlaylistAddResult(BMessage* message)
+{
+	BRow* pendingRow = nullptr;
+	if (message->FindPointer("row", (void**)&pendingRow) != B_OK
+			|| !pendingRow)
+		return;
+	bool fullyLoaded = message->GetBool("fully_loaded", false);
+	if (message->GetBool("ok", false)) {
+		fPlaylistSnapshotId = message->GetString("snapshot_id", "");
+		fCachedPlaylistSnapshotId = fPlaylistSnapshotId;
+		if (fullyLoaded)
+			fPageOffset++;
+		_DeleteCache();
+		if (!fPlaylistSnapshotId.empty())
+			_SaveCache();
+		else
+			_RefreshPlaylistSnapshot();
+	} else {
+		bool stillVisible = fTrackList->IndexOf(pendingRow) >= 0;
+		if (stillVisible) {
+			fTrackList->RemoveRow(pendingRow);
+			delete pendingRow;
+			fPageTotal = std::max((int32)0, fPageTotal - 1);
+		}
+		BAlert* alert = new BAlert("", B_TRANSLATE(
+			"Spotify could not add the song to the playlist."),
+			B_TRANSLATE("OK"), nullptr, nullptr, B_WIDTH_AS_USUAL,
+			B_WARNING_ALERT);
+		alert->Go();
+	}
+	fPageHasMore = fPageOffset < fPageTotal;
+	_UpdatePlaylistTrackInfo();
+}
+
+
+void
+PlaylistWindow::_ApplyPlaylistUserState(BMessage* message)
+{
+	fCurrentUserId = message->GetString("user_id", "");
+	fCurrentUserLegacyId = message->GetString("legacy_user_id", "");
+	fPlaylistOwned = !fCurrentUserId.empty()
+		&& (fCurrentUserId == fPlaylistOwnerId
+			|| fCurrentUserLegacyId == fPlaylistOwnerId);
+	_UpdatePlaylistMenuState();
+}
+
+
+void
+PlaylistWindow::_UpdatePlaylistDetails(BMessage* message)
+{
+	if (!fPlaylistOwned)
+		return;
+	std::string name = message->GetString("name", "");
+	std::string description = message->GetString("description", "");
+	bool isPublic = message->GetBool("public", false);
+	App* app = dynamic_cast<App*>(be_app);
+	SpotifyApi* api = app ? app->GetApi() : nullptr;
+	if (!api || name.empty())
+		return;
+	BMessenger self(this);
+	api->Playlists().UpdatePlaylistDetails(_PlaylistId(), name, description,
+		isPublic, [self, name, description, isPublic](bool ok,
+				const nlohmann::json& data) {
+		BMessage result('pEdR');
+		result.AddBool("ok", ok);
+		result.AddString("name", name.c_str());
+		result.AddString("description", description.c_str());
+		result.AddBool("public", isPublic);
+		result.AddString("error", SpotifyResponseErrorReason(data).c_str());
+		self.SendMessage(&result);
+	});
+}
+
+
+void
+PlaylistWindow::_ApplyPlaylistCoverUploadResult(BMessage* message)
+{
+	if (message->GetBool("ok", false)) {
+		App* app = dynamic_cast<App*>(be_app);
+		SpotifyApi* api = app ? app->GetApi() : nullptr;
+		if (api) {
+			BMessenger self(this);
+			api->Playlists().GetPlaylistImages(_PlaylistId(),
+				[self](bool ok, const nlohmann::json& images) {
+				if (!ok || !images.is_array() || images.empty())
+					return;
+				BMessage cover('uCov');
+				cover.AddString("url", JsonString(images[0], "url").c_str());
+				self.SendMessage(&cover);
+			});
+		}
+	} else {
+		BAlert* alert = new BAlert("", B_TRANSLATE(
+			"Spotify could not upload the playlist cover."),
+			B_TRANSLATE("OK"), nullptr, nullptr, B_WIDTH_AS_USUAL,
+			B_WARNING_ALERT);
+		alert->Go();
+	}
+}
+
+
+void
+PlaylistWindow::_NotifyPlaylistDeleted()
+{
+	std::string id = _PlaylistId();
+	if (!id.empty()) {
+		BMessage changed(MSG_PLAYLISTS_CHANGED);
+		changed.AddString("operation", "remove");
+		changed.AddString("id", id.c_str());
+		changed.AddString("uri", fUri.c_str());
+		be_app->PostMessage(&changed);
+	}
+	PostMessage(B_QUIT_REQUESTED);
+}
+
+
+void
+PlaylistWindow::_ApplyEpisodePage(BMessage* message)
+{
+	fPageLoading = false;
+	fEpisodeSearchRetryCount = 0;
+	fEpisodeSearchWaitingRetry = false;
+	fEpisodeSearchFailed = false;
+	int32 append = message->GetInt32("append", 0);
+	BScrollBar* scrollBar = TrackVerticalScrollBar(fTrackList);
+	float scrollValue = scrollBar ? scrollBar->Value() : 0.0f;
+	fEpisodeTotal = message->GetInt32("total", 0);
+	fEpisodeOffset = message->GetInt32("next_offset", 0);
+	fPageTotal = fEpisodeTotal;
+	fPageOffset = fEpisodeOffset;
+	int32 pageCount = message->GetInt32("page_count", 0);
+	fPageHasMore = pageCount > 0
+		&& (fEpisodeTotal <= 0 || fEpisodeOffset < fEpisodeTotal);
+
+	if (!append)
+		fEpisodes.clear();
+	size_t firstNewEpisode = _AppendEpisodePageItems(message);
+	_RenumberEpisodes();
+
+	if (append)
+		_AppendEpisodeRows(firstNewEpisode, fEpisodeSearchFilter);
+	else
+		_RebuildEpisodeList(fEpisodeSearchFilter);
+	if (append && scrollBar)
+		scrollBar->SetValue(scrollValue);
+	if (!fPageHasMore)
+		fEpisodeSearchPaging = false;
+
+	_UpdateEpisodeInfo();
+
+	_SaveCache();
+	_CheckLazyLoad();
+}
+
+
+size_t
+PlaylistWindow::_AppendEpisodePageItems(BMessage* message)
+{
+	size_t firstNewEpisode = fEpisodes.size();
+	const char *title, *description, *date, *duration, *trackUri;
+	int32 number;
+	for (int i = 0; message->FindInt32("number", i, &number) == B_OK; i++) {
+		title = message->FindString("title", i);
+		description = message->FindString("description", i);
+		date = message->FindString("date", i);
+		duration = message->FindString("duration", i);
+		trackUri = message->FindString("trackUri", i);
+		std::string uri = trackUri ? trackUri : "";
+		std::string titleStr = title ? title : "";
+		std::string dateStr = date ? date : "";
+		std::string durationStr = duration ? duration : "";
+		if (_HasEpisode(uri, titleStr, dateStr, durationStr))
+			continue;
+		fEpisodes.push_back({number, titleStr, description ? description : "",
+			dateStr, durationStr, uri,
+			LowercaseSearchText(titleStr, description ? description : "")});
+	}
+	return firstNewEpisode;
+}
+
+
+void
+PlaylistWindow::_ApplyPodcastHeadPage(BMessage* message)
+{
+	bool ok = message->GetBool("ok", false);
+	if (!ok) {
+		fPodcastHeadRefreshing = false;
+		fPendingPodcastHeadEpisodes.clear();
+		return;
+	}
+
+	fEpisodeTotal = message->GetInt32("total", fEpisodeTotal);
+	int32 offset = message->GetInt32("offset", 0);
+	int32 pageCount = message->GetInt32("page_count", 0);
+	int32 nextOffset = message->GetInt32("next_offset", offset + pageCount);
+
+	bool reachedKnownEpisode = false;
+	const char *title, *description, *date, *duration, *trackUri;
+	int32 number;
+	for (int i = 0; message->FindInt32("number", i, &number) == B_OK; i++) {
+		title = message->FindString("title", i);
+		description = message->FindString("description", i);
+		date = message->FindString("date", i);
+		duration = message->FindString("duration", i);
+		trackUri = message->FindString("trackUri", i);
+		std::string uri = trackUri ? trackUri : "";
+		std::string titleStr = title ? title : "";
+		std::string dateStr = date ? date : "";
+		std::string durationStr = duration ? duration : "";
+		if (_HasEpisode(uri, titleStr, dateStr, durationStr)) {
+			reachedKnownEpisode = true;
+			break;
+		}
+		fPendingPodcastHeadEpisodes.push_back({number, titleStr,
+			description ? description : "", dateStr, durationStr, uri,
+			LowercaseSearchText(titleStr, description ? description : "")});
+	}
+
+	if (!reachedKnownEpisode && pageCount > 0
+			&& (fEpisodeTotal <= 0 || nextOffset < fEpisodeTotal)) {
+		_RefreshPodcastHead(nextOffset);
+		return;
+	}
+
+	_FinishPodcastHeadRefresh();
+}
+
+
+void
+PlaylistWindow::_TogglePodcastSubscription()
+{
+	if (SpotifyItemKindForUri(fUri) != kSpotifyItemShow
+			|| !fSubscriptionKnown || fSubscriptionPending)
+		return;
+	App* app = (App*)be_app;
+	SpotifyApi* api = app->GetApi();
+	if (!api)
+		return;
+	std::string id = SpotifyItemIdForUri(fUri);
+	bool target = !fIsSubscribed;
+	fSubscriptionPending = true;
+	if (fSubscribeButton)
+		fSubscribeButton->SetEnabled(false);
+	BMessenger self(this);
+	if (!target) {
+		api->Library().UnfollowShow(id, [self, target](bool ok,
+				const nlohmann::json&) {
+			BMessage msg('subU');
+			msg.AddBool("ok", ok);
+			msg.AddBool("following", target);
+			msg.AddBool("changed", ok);
+			msg.AddBool("show_error", !ok);
+			self.SendMessage(&msg);
+		});
+	} else {
+		api->Library().FollowShow(id, [self, target](bool ok,
+				const nlohmann::json&) {
+			BMessage msg('subU');
+			msg.AddBool("ok", ok);
+			msg.AddBool("following", target);
+			msg.AddBool("changed", ok);
+			msg.AddBool("show_error", !ok);
+			self.SendMessage(&msg);
+		});
+	}
+}
+
+
+void
+PlaylistWindow::_ScheduleEpisodeSearch()
+{
+	if (!fSearchBox)
+		return;
+	fEpisodeSearchGeneration++;
+	fEpisodeSearchPaging = false;
+	fEpisodeSearchWaitingRetry = false;
+	fEpisodeSearchFailed = false;
+	fEpisodeSearchRetryCount = 0;
+	_UpdateEpisodeInfo();
+	delete fEpisodeSearchRetryRunner;
+	fEpisodeSearchRetryRunner = nullptr;
+	delete fEpisodeSearchRunner;
+	BMessage apply(kMsgApplyEpisodeSearch);
+	apply.AddInt32("search_generation", fEpisodeSearchGeneration);
+	fEpisodeSearchRunner = new BMessageRunner(BMessenger(this), &apply,
+		200000LL, 1);
+}
+
+
+void
+PlaylistWindow::_ApplyEpisodeSearch(BMessage* message)
+{
+	int32 searchGeneration = message->GetInt32("search_generation", -1);
+	if (searchGeneration != fEpisodeSearchGeneration)
+		return;
+	delete fEpisodeSearchRunner;
+	fEpisodeSearchRunner = nullptr;
+	if (fSearchBox) {
+		fEpisodeSearchFilter = fSearchBox->Text();
+		fEpisodeSearchPaging = !fEpisodeSearchFilter.empty() && fPageHasMore;
+		fEpisodeSearchFailed = false;
+		_RebuildEpisodeList(fEpisodeSearchFilter);
+		_UpdateEpisodeInfo();
+		_CheckLazyLoad();
+	}
+}
+
+
+void
+PlaylistWindow::_RetryEpisodeSearch(BMessage* message)
+{
+	int32 searchGeneration = message->GetInt32("search_generation", -1);
+	if (searchGeneration != fEpisodeSearchGeneration)
+		return;
+	delete fEpisodeSearchRetryRunner;
+	fEpisodeSearchRetryRunner = nullptr;
+	if (fEpisodeSearchPaging && !fEpisodeSearchFilter.empty()) {
+		fEpisodeSearchWaitingRetry = false;
+		_UpdateEpisodeInfo();
+		_LoadNextPage();
+	}
+}
+
+
+void
+PlaylistWindow::_ApplyEpisodeSelection(BMessage* message)
+{
+	const char* desc;
+	if (fDescriptionView
+			&& message->FindString("description", &desc) == B_OK) {
+		ApplyMediaDescription(fDescriptionView, desc);
+		fDescriptionView->SetLinks(MediaDescriptionLinks(desc));
+	}
+}
+
+
+void
 PlaylistWindow::_InitMenu()
 {
 	fMenuBar = new BMenuBar("MenuBar");
 
-	if (fUri.find("spotify:album:") == 0) {
+	SpotifyItemKind kind = SpotifyItemKindForUri(fUri);
+	if (kind == kSpotifyItemAlbum) {
 		BMenu* albumMenu = new BMenu(B_TRANSLATE("Album"));
 		fAlbumSaveItem = new BMenuItem(B_TRANSLATE("Add to Saved Albums"),
 			new BMessage(kMsgToggleAlbumSaved));
@@ -2032,7 +2364,7 @@ PlaylistWindow::_InitMenu()
 			new BMessage(kMsgReloadArtwork)));
 		fMenuBar->AddItem(albumMenu);
 		_UpdateAlbumMenuItem();
-	} else if (fUri.find("spotify:playlist:") == 0) {
+	} else if (kind == kSpotifyItemPlaylist) {
 		BMenu* playlistMenu = new BMenu(B_TRANSLATE("Playlist"));
 		fPlaylistEditItem = new BMenuItem(
 			B_TRANSLATE("Edit Details" B_UTF8_ELLIPSIS),
@@ -2056,14 +2388,14 @@ PlaylistWindow::_InitMenu()
 		playlistMenu->AddItem(fPlaylistDeleteItem);
 		fMenuBar->AddItem(playlistMenu);
 		_UpdatePlaylistMenuState();
-	} else if (fUri.find("spotify:show:") != 0) {
+	} else if (kind != kSpotifyItemShow) {
 		BMenu* fileMenu = new BMenu(B_TRANSLATE("File"));
 		fileMenu->AddItem(new BMenuItem(B_TRANSLATE("Close Window"),
 			new BMessage(B_QUIT_REQUESTED), 'W'));
 		fMenuBar->AddItem(fileMenu);
 	}
 
-	if (fUri.find("spotify:show:") == 0) {
+	if (kind == kSpotifyItemShow) {
 		BMenu* episodeMenu = new BMenu(B_TRANSLATE("Episodes"));
 		episodeMenu->AddItem(new BMenuItem(B_TRANSLATE("Refresh Episodes"),
 			new BMessage('rfEp')));
@@ -2134,8 +2466,9 @@ private:
 void
 PlaylistWindow::_InitLayout(const char* playlistName)
 {
-	bool isPodcast = (fUri.find("spotify:show:") == 0);
-	bool isAlbum = (fUri.find("spotify:album:") == 0);
+	SpotifyItemKind kind = SpotifyItemKindForUri(fUri);
+	bool isPodcast = kind == kSpotifyItemShow;
+	bool isAlbum = kind == kSpotifyItemAlbum;
 	bool isLikedSongs = (fUri == "spotify:collection");
 	float artworkSize = MediaHeaderStyle::kArtworkSize;
 
@@ -2271,7 +2604,7 @@ PlaylistWindow::_InitLayout(const char* playlistName)
 		fCoverView->AddFilter(new HeaderContextFilter(this, kMsgShowAlbumMenu));
 		fPlaylistName->AddFilter(new HeaderContextFilter(this, kMsgShowAlbumMenu));
 		_UpdateAlbumSavedState();
-	} else if (fUri.find("spotify:playlist:") == 0) {
+	} else if (kind == kSpotifyItemPlaylist) {
 		fCoverView->AddFilter(new HeaderContextFilter(this,
 			kMsgShowPlaylistMenu));
 		fPlaylistName->AddFilter(new HeaderContextFilter(this,
@@ -2388,17 +2721,17 @@ PlaylistWindow::ShowContextMenu(BView*, BPoint where, BPoint screenWhere)
 std::string
 PlaylistWindow::_AlbumId() const
 {
-	if (fUri.find("spotify:album:") != 0)
+	if (SpotifyItemKindForUri(fUri) != kSpotifyItemAlbum)
 		return "";
-	return fUri.substr(14);
+	return SpotifyItemIdForUri(fUri);
 }
 
 std::string
 PlaylistWindow::_PlaylistId() const
 {
-	if (fUri.find("spotify:playlist:") != 0)
+	if (SpotifyItemKindForUri(fUri) != kSpotifyItemPlaylist)
 		return "";
-	return fUri.substr(17);
+	return SpotifyItemIdForUri(fUri);
 }
 
 void
@@ -2432,7 +2765,8 @@ PlaylistWindow::_UpdateAlbumSavedState()
 		return;
 
 	BMessenger self(this);
-	api->CheckSavedAlbums(albumId, [self](bool ok, const nlohmann::json& data) {
+	api->Library().CheckSavedAlbums(albumId, [self](bool ok,
+			const nlohmann::json& data) {
 		BMessage state(kMsgAlbumSavedState);
 		bool valid = ok && data.is_array() && !data.empty()
 			&& data[0].is_boolean();
@@ -2583,7 +2917,7 @@ PlaylistWindow::_UploadPlaylistCover(const entry_ref& ref)
 	SpotifyApi* api = app ? app->GetApi() : nullptr;
 	if (!api) return;
 	BMessenger self(this);
-	api->UploadPlaylistImage(_PlaylistId(), encoded,
+	api->Playlists().UploadPlaylistImage(_PlaylistId(), encoded,
 		[self](bool ok, const nlohmann::json&) {
 			BMessage result('pCvR');
 			result.AddBool("ok", ok);
@@ -2634,7 +2968,7 @@ PlaylistWindow::_ClearPlaylist()
 	_UpdatePlaylistTrackInfo();
 	_UpdatePlaylistMenuState();
 	BMessenger self(this);
-	api->ReplacePlaylistItems(_PlaylistId(), {},
+	api->Playlists().ReplacePlaylistItems(_PlaylistId(), {},
 		[self](bool ok, const nlohmann::json& data) {
 			BMessage result('pClR');
 			result.AddBool("ok", ok);
@@ -2686,53 +3020,10 @@ PlaylistWindow::_FinishTrackRemoval(bool success)
 	if (!fTrackRemovalPending)
 		return;
 
-	if (success) {
-		std::vector<int32> removedPositions;
-		for (const PendingTrackRemoval& pending : fPendingTrackRemovals)
-			removedPositions.push_back(pending.playlistPosition);
-		std::sort(removedPositions.begin(), removedPositions.end());
-
-		for (const PendingTrackRemoval& pending : fPendingTrackRemovals)
-			delete pending.row;
-
-		for (int32 i = 0; fTrackList && i < fTrackList->CountRows(); i++) {
-			TrackRow* row = dynamic_cast<TrackRow*>(fTrackList->RowAt(i));
-			if (!row || row->fPlaylistPosition < 0)
-				continue;
-			int32 shift = (int32)std::count_if(removedPositions.begin(),
-				removedPositions.end(), [row](int32 removedPosition) {
-					return removedPosition < row->fPlaylistPosition;
-				});
-			row->fPlaylistPosition -= shift;
-			if (BIntegerField* number = dynamic_cast<BIntegerField*>(
-					row->GetField(0)))
-				number->SetValue(row->fPlaylistPosition + 1);
-			fTrackList->UpdateRow(row);
-		}
-
-		int32 removedBeforeOffset = (int32)std::count_if(
-			removedPositions.begin(), removedPositions.end(),
-			[this](int32 removedPosition) {
-				return removedPosition < fPageOffset;
-			});
-		fPageOffset = std::max((int32)0, fPageOffset - removedBeforeOffset);
-		if (fPageTotal > 0)
-			fPageTotal = std::max((int32)0,
-				fPageTotal - (int32)removedPositions.size());
-		else if (fTrackList)
-			fPageTotal = fTrackList->CountRows();
-		fPageHasMore = fPageOffset < fPageTotal;
-		fPlaylistSnapshotId.clear();
-		fCachedPlaylistSnapshotId.clear();
-		_DeleteCache();
-	} else if (fTrackList) {
-		for (const PendingTrackRemoval& pending : fPendingTrackRemovals)
-			fTrackList->AddRow(pending.row, pending.listIndex);
-		for (const PendingTrackRemoval& pending : fPendingTrackRemovals) {
-			if (pending.selected)
-				fTrackList->AddToSelection(pending.row);
-		}
-	}
+	if (success)
+		_ApplyFinishedTrackRemoval();
+	else
+		_RollbackFinishedTrackRemoval();
 
 	fPendingTrackRemovals.clear();
 	fTrackRemovalPending = false;
@@ -2740,6 +3031,73 @@ PlaylistWindow::_FinishTrackRemoval(bool success)
 	_UpdatePlaylistMenuState();
 	if (success)
 		_CheckLazyLoad();
+}
+
+
+void
+PlaylistWindow::_ApplyFinishedTrackRemoval()
+{
+	std::vector<int32> removedPositions = _RemovedPlaylistPositions();
+
+	for (const PendingTrackRemoval& pending : fPendingTrackRemovals)
+		delete pending.row;
+
+	for (int32 i = 0; fTrackList && i < fTrackList->CountRows(); i++) {
+		TrackRow* row = dynamic_cast<TrackRow*>(fTrackList->RowAt(i));
+		if (!row || row->fPlaylistPosition < 0)
+			continue;
+		int32 shift = (int32)std::count_if(removedPositions.begin(),
+			removedPositions.end(), [row](int32 removedPosition) {
+				return removedPosition < row->fPlaylistPosition;
+			});
+		row->fPlaylistPosition -= shift;
+		if (BIntegerField* number = dynamic_cast<BIntegerField*>(
+				row->GetField(0)))
+			number->SetValue(row->fPlaylistPosition + 1);
+		fTrackList->UpdateRow(row);
+	}
+
+	int32 removedBeforeOffset = (int32)std::count_if(
+		removedPositions.begin(), removedPositions.end(),
+		[this](int32 removedPosition) {
+			return removedPosition < fPageOffset;
+		});
+	fPageOffset = std::max((int32)0, fPageOffset - removedBeforeOffset);
+	if (fPageTotal > 0)
+		fPageTotal = std::max((int32)0,
+			fPageTotal - (int32)removedPositions.size());
+	else if (fTrackList)
+		fPageTotal = fTrackList->CountRows();
+	fPageHasMore = fPageOffset < fPageTotal;
+	fPlaylistSnapshotId.clear();
+	fCachedPlaylistSnapshotId.clear();
+	_DeleteCache();
+}
+
+
+void
+PlaylistWindow::_RollbackFinishedTrackRemoval()
+{
+	if (!fTrackList)
+		return;
+
+	for (const PendingTrackRemoval& pending : fPendingTrackRemovals)
+		fTrackList->AddRow(pending.row, pending.listIndex);
+	for (const PendingTrackRemoval& pending : fPendingTrackRemovals) {
+		if (pending.selected)
+			fTrackList->AddToSelection(pending.row);
+	}
+}
+
+
+std::vector<int32>
+PlaylistWindow::_RemovedPlaylistPositions() const
+{
+	std::vector<int32> removedPositions;
+	for (const PendingTrackRemoval& pending : fPendingTrackRemovals)
+		removedPositions.push_back(pending.playlistPosition);
+	std::sort(removedPositions.begin(), removedPositions.end());
+	return removedPositions;
 }
 
 
@@ -2752,9 +3110,10 @@ PlaylistWindow::_RefreshPlaylistSnapshot()
 	if (playlistId.empty() || !api)
 		return;
 
-	api->InvalidatePlaylist(playlistId);
+	api->Playlists().InvalidatePlaylist(playlistId);
 	BMessenger self(this);
-	api->GetPlaylist(playlistId, [self](bool ok, const nlohmann::json& data) {
+	api->Playlists().GetPlaylist(playlistId, [self](bool ok,
+			const nlohmann::json& data) {
 		BMessage metadata('pRmM');
 		metadata.AddBool("ok", ok);
 		if (ok) {
@@ -2810,12 +3169,10 @@ void
 PlaylistWindow::_BeginTrackReorder(int32 sourceIndex, int32 rangeLength,
 	int32 insertBefore)
 {
-	if (!fPlaylistOwned || !fTrackList || fPageLoading || fTrackRemovalPending
-			|| fTrackReorderPending || fPlaylistClearPending || _PlaylistId().empty()
-			|| sourceIndex < 0 || rangeLength < 1
-			|| sourceIndex + rangeLength > fTrackList->CountRows()) {
+	std::string playlistId = _PlaylistId();
+	if (!_CanBeginTrackReorder(playlistId, sourceIndex, rangeLength))
 		return;
-	}
+
 	PlaylistReorderPlan plan = ResolvePlaylistReorderPlan(sourceIndex,
 		rangeLength, insertBefore, fTrackList->CountRows());
 	if (!plan.shouldMove)
@@ -2828,49 +3185,85 @@ PlaylistWindow::_BeginTrackReorder(int32 sourceIndex, int32 rangeLength,
 	if (!api)
 		return;
 
-	fPendingTrackReorder = PendingTrackReorder();
-	fPendingTrackReorder.sourceIndex = sourceIndex;
-	fPendingTrackReorder.targetIndex = targetIndex;
-	for (int32 offset = 0; offset < rangeLength; offset++) {
-		BRow* row = fTrackList->RowAt(sourceIndex + offset);
-		if (!row)
-			return;
-		bool selected = false;
-		for (BRow* current = fTrackList->CurrentSelection(); current;
-				current = fTrackList->CurrentSelection(current)) {
-			if (current == row) {
-				selected = true;
-				break;
-			}
-		}
-		fPendingTrackReorder.rows.push_back(row);
-		fPendingTrackReorder.selected.push_back(selected);
-	}
-	for (auto row = fPendingTrackReorder.rows.rbegin();
-			row != fPendingTrackReorder.rows.rend(); ++row) {
-		fTrackList->RemoveRow(*row);
-	}
-	for (int32 i = 0; i < (int32)fPendingTrackReorder.rows.size(); i++) {
-		fTrackList->AddRow(fPendingTrackReorder.rows[i], targetIndex + i);
-		if (fPendingTrackReorder.selected[i])
-			fTrackList->AddToSelection(fPendingTrackReorder.rows[i]);
-	}
-	_RenumberPlaylistRows();
+	if (!_BuildPendingTrackReorder(sourceIndex, rangeLength, targetIndex))
+		return;
+	_ApplyPendingTrackReorder();
 	fTrackReorderPending = true;
 	_UpdatePlaylistMenuState();
 
 	BMessenger self(this);
-	api->ReorderPlaylistItems(_PlaylistId(), sourceIndex, insertBefore,
+	api->Playlists().ReorderPlaylistItems(playlistId, sourceIndex, insertBefore,
 		rangeLength, fPlaylistSnapshotId,
 		[self](bool ok, const nlohmann::json& data) {
 			BMessage result('pMvR');
 			result.AddBool("ok", ok);
-			result.AddInt32("status", SpotifyApi::ResponseStatus(data));
+			result.AddInt32("status", SpotifyResponseStatus(data));
 			nlohmann::json body = MutationBody(data);
 			result.AddString("snapshot_id",
 				JsonString(body, "snapshot_id").c_str());
 			self.SendMessage(&result);
 		});
+}
+
+
+bool
+PlaylistWindow::_CanBeginTrackReorder(const std::string& playlistId,
+	int32 sourceIndex, int32 rangeLength) const
+{
+	return fPlaylistOwned && fTrackList && !fPageLoading
+		&& !fTrackRemovalPending && !fTrackReorderPending
+		&& !fPlaylistClearPending && !playlistId.empty()
+		&& sourceIndex >= 0 && rangeLength >= 1
+		&& sourceIndex + rangeLength <= fTrackList->CountRows();
+}
+
+
+bool
+PlaylistWindow::_BuildPendingTrackReorder(int32 sourceIndex,
+	int32 rangeLength, int32 targetIndex)
+{
+	fPendingTrackReorder = PendingTrackReorder();
+	fPendingTrackReorder.sourceIndex = sourceIndex;
+	fPendingTrackReorder.targetIndex = targetIndex;
+	for (int32 offset = 0; offset < rangeLength; offset++) {
+		BRow* row = fTrackList->RowAt(sourceIndex + offset);
+		if (!row) {
+			fPendingTrackReorder = PendingTrackReorder();
+			return false;
+		}
+		fPendingTrackReorder.rows.push_back(row);
+		fPendingTrackReorder.selected.push_back(_IsRowSelected(row));
+	}
+	return true;
+}
+
+
+bool
+PlaylistWindow::_IsRowSelected(BRow* row) const
+{
+	for (BRow* current = fTrackList->CurrentSelection(); current;
+			current = fTrackList->CurrentSelection(current)) {
+		if (current == row)
+			return true;
+	}
+	return false;
+}
+
+
+void
+PlaylistWindow::_ApplyPendingTrackReorder()
+{
+	for (auto row = fPendingTrackReorder.rows.rbegin();
+			row != fPendingTrackReorder.rows.rend(); ++row) {
+		fTrackList->RemoveRow(*row);
+	}
+	for (int32 i = 0; i < (int32)fPendingTrackReorder.rows.size(); i++) {
+		fTrackList->AddRow(fPendingTrackReorder.rows[i],
+			fPendingTrackReorder.targetIndex + i);
+		if (fPendingTrackReorder.selected[i])
+			fTrackList->AddToSelection(fPendingTrackReorder.rows[i]);
+	}
+	_RenumberPlaylistRows();
 }
 
 
@@ -2911,12 +3304,37 @@ PlaylistWindow::_FinishTrackReorder(bool success,
 void
 PlaylistWindow::_MoveSelectedItem(int32 delta)
 {
-	if (!fPlaylistOwned || !fTrackList || fTrackRemovalPending
-			|| fTrackReorderPending || fPlaylistClearPending || delta == 0)
+	if (!_CanMoveSelectedItems(delta))
 		return;
 	int32 source = fTrackList->CountRows();
 	int32 last = -1;
 	int32 selectedCount = 0;
+	if (!_SelectedRowSpan(source, last, selectedCount))
+		return;
+	if (last - source + 1 != selectedCount) {
+		_ShowContiguousSelectionAlert();
+		return;
+	}
+	if ((delta < 0 && source == 0)
+			|| (delta > 0 && last + 1 >= fTrackList->CountRows()))
+		return;
+	int32 insertBefore = delta > 0 ? last + 2 : source - 1;
+	_BeginTrackReorder(source, selectedCount, insertBefore);
+}
+
+
+bool
+PlaylistWindow::_CanMoveSelectedItems(int32 delta) const
+{
+	return fPlaylistOwned && fTrackList && !fTrackRemovalPending
+		&& !fTrackReorderPending && !fPlaylistClearPending && delta != 0;
+}
+
+
+bool
+PlaylistWindow::_SelectedRowSpan(int32& source, int32& last,
+	int32& selectedCount) const
+{
 	for (BRow* selected = fTrackList->CurrentSelection(); selected;
 			selected = fTrackList->CurrentSelection(selected)) {
 		for (int32 i = 0; i < fTrackList->CountRows(); i++) {
@@ -2928,20 +3346,18 @@ PlaylistWindow::_MoveSelectedItem(int32 delta)
 			}
 		}
 	}
-	if (selectedCount <= 0) return;
-	if (last - source + 1 != selectedCount) {
-		BAlert* alert = new BAlert("", B_TRANSLATE(
-			"Only a contiguous selection can be moved together."),
-			B_TRANSLATE("OK"), nullptr, nullptr, B_WIDTH_AS_USUAL,
-			B_INFO_ALERT);
-		alert->Go();
-		return;
-	}
-	if ((delta < 0 && source == 0)
-			|| (delta > 0 && last + 1 >= fTrackList->CountRows()))
-		return;
-	int32 insertBefore = delta > 0 ? last + 2 : source - 1;
-	_BeginTrackReorder(source, selectedCount, insertBefore);
+	return selectedCount > 0;
+}
+
+
+void
+PlaylistWindow::_ShowContiguousSelectionAlert() const
+{
+	BAlert* alert = new BAlert("", B_TRANSLATE(
+		"Only a contiguous selection can be moved together."),
+		B_TRANSLATE("OK"), nullptr, nullptr, B_WIDTH_AS_USUAL,
+		B_INFO_ALERT);
+	alert->Go();
 }
 
 void
@@ -2975,7 +3391,8 @@ PlaylistWindow::_DeletePlaylist()
 		fPlaylistDeleteItem->SetEnabled(false);
 
 	BMessenger self(this);
-	api->UnfollowPlaylist(playlistId, [self](bool ok, const nlohmann::json&) {
+	api->Playlists().UnfollowPlaylist(playlistId, [self](bool ok,
+			const nlohmann::json&) {
 		self.SendMessage(ok ? kMsgPlaylistDeleted : kMsgPlaylistDeleteFailed);
 	});
 }
@@ -3006,9 +3423,9 @@ PlaylistWindow::_ToggleAlbumSaved()
 	};
 
 	if (remove)
-		api->RemoveSavedAlbum(albumId, callback);
+		api->Library().RemoveSavedAlbum(albumId, callback);
 	else
-		api->SaveAlbum(albumId, callback);
+		api->Library().SaveAlbum(albumId, callback);
 }
 
 void
@@ -3034,7 +3451,7 @@ PlaylistWindow::SetPlayingTrack(const char* trackUri)
 void
 PlaylistWindow::_AddPodcastNowPlayingContext(BMessage& play) const
 {
-	if (fUri.find("spotify:show:") != 0)
+	if (SpotifyItemKindForUri(fUri) != kSpotifyItemShow)
 		return;
 
 	const char* showName = fPlaylistName ? fPlaylistName->Text() : "";
@@ -3044,7 +3461,7 @@ PlaylistWindow::_AddPodcastNowPlayingContext(BMessage& play) const
 	play.AddString(kNowPlayingPrimaryOpenUriField, fUri.c_str());
 	play.AddString(kNowPlayingParentUriField, fUri.c_str());
 	play.AddString(kNowPlayingParentKindField, "show");
-	play.AddString(kNowPlayingShowIdField, fUri.substr(13).c_str());
+	play.AddString(kNowPlayingShowIdField, SpotifyItemIdForUri(fUri).c_str());
 }
 
 void
@@ -3076,127 +3493,168 @@ PlaylistWindow::_LoadData(bool ignoreEpisodeCache)
 	if (fTrackList)
 		fTrackList->Clear();
 
-	BMessenger messenger(this);
 	bool loadFirstPage = true;
 
+	SpotifyItemKind kind = SpotifyItemKindForUri(fUri);
 	if (fUri == "spotify:collection") {
-		if (_LoadCache())
-			loadFirstPage = false;
-		else
-			api->InvalidateCachePrefix("/me/tracks");
-	} else if (fUri.find("spotify:playlist:") == 0) {
-		std::string id = fUri.substr(17);
-		if (_LoadCache())
-			loadFirstPage = false;
-		api->InvalidatePlaylist(id);
-		api->GetPlaylist(id, [messenger](bool ok, const nlohmann::json& data) {
-			if (!ok) return;
-			BMessage* metaMsg = new BMessage('plMt');
-			metaMsg->AddString("title",
-				JsonString(data, "name", "Playlist").c_str());
-			metaMsg->AddString("snapshot_id", JsonString(data,
-				"snapshot_id").c_str());
-			metaMsg->AddString("description", JsonDescription(data).c_str());
-			metaMsg->AddBool("public", JsonBool(data, "public"));
-			if (data.contains("owner") && data["owner"].is_object()) {
-				std::string ownerId = JsonString(data["owner"], "account_id",
-					JsonString(data["owner"], "id"));
-				metaMsg->AddString("owner_id", ownerId.c_str());
-			}
-			if (data.contains("tracks") && data["tracks"].is_object())
-				metaMsg->AddInt32("total",
-					(int32)JsonInt(data["tracks"], "total"));
-			else if (data.contains("items") && data["items"].is_object())
-				metaMsg->AddInt32("total",
-					(int32)JsonInt(data["items"], "total"));
-			if (data.contains("images") && data["images"].is_array()
-			        && !data["images"].empty()) {
-				std::string url = JsonString(data["images"][0], "url");
-				if (!url.empty())
-					metaMsg->AddString("cover_url", url.c_str());
-			}
-			messenger.SendMessage(metaMsg);
-			delete metaMsg;
-		});
-		api->GetCurrentUserProfile([messenger](bool ok,
-				const nlohmann::json& profile) {
-			if (!ok || !profile.is_object()) return;
-			BMessage user('plUs');
-			std::string legacyId = JsonString(profile, "id");
-			user.AddString("user_id", JsonString(profile, "account_id",
-				legacyId).c_str());
-			user.AddString("legacy_user_id", legacyId.c_str());
-			messenger.SendMessage(&user);
-		});
-	} else if (fUri.find("spotify:album:") == 0) {
-		std::string id = fUri.substr(14);
-		api->GetAlbum(id, [messenger](bool ok, const nlohmann::json& albumData) {
-			std::string albumName = "Album";
-			if (ok) {
-				albumName = JsonString(albumData, "name", "Album");
-				BMessage* titleMsg = new BMessage('uTtl');
-				titleMsg->AddString("title", albumName.c_str());
-				messenger.SendMessage(titleMsg);
-				delete titleMsg;
-
-				std::string coverUrl;
-				if (albumData.contains("images") && albumData["images"].is_array()
-				        && !albumData["images"].empty()) {
-					coverUrl = JsonString(albumData["images"][0], "url");
-				}
-				BMessage* covMsg = new BMessage('uCov');
-				covMsg->AddString("url", coverUrl.c_str());
-				messenger.SendMessage(covMsg);
-				delete covMsg;
-			}
-		});
-	} else if (fUri.find("spotify:show:") == 0) {
-		std::string id = fUri.substr(13);
-		if (ignoreEpisodeCache)
-			api->InvalidateShowEpisodes(id);
-
-
-		api->CheckFollowingShow(id, [messenger](bool ok, const nlohmann::json& data) {
-			bool valid = ok && data.is_array() && !data.empty()
-				&& data[0].is_boolean();
-			BMessage* subMsg = new BMessage('subU');
-			subMsg->AddBool("ok", valid);
-			if (valid)
-				subMsg->AddBool("following", data[0].get<bool>());
-			messenger.SendMessage(subMsg);
-			delete subMsg;
-		});
-
-		api->GetShow(id, [messenger](bool ok, const nlohmann::json& data) {
-			if (!ok) return;
-			BMessage* titleMsg = new BMessage('uTtl');
-			titleMsg->AddString("title",
-				JsonString(data, "name", "Podcast").c_str());
-			messenger.SendMessage(titleMsg);
-			delete titleMsg;
-			std::string url;
-			if (data.contains("images") && data["images"].is_array()
-			        && !data["images"].empty()) {
-				url = JsonString(data["images"][0], "url");
-			}
-			BMessage* covMsg = new BMessage('uCov');
-			covMsg->AddString("url", url.c_str());
-			messenger.SendMessage(covMsg);
-			delete covMsg;
-		});
-
-		if (!ignoreEpisodeCache && _LoadCache()) {
-			_RebuildEpisodeList(fEpisodeSearchFilter);
-			_UpdateEpisodeInfo();
-			if (!fCurrentPlayingTrackUri.empty())
-				SetPlayingTrack(fCurrentPlayingTrackUri.c_str());
-			loadFirstPage = false;
-			_RefreshPodcastHead(0);
-		}
+		loadFirstPage = _PrepareCollectionLoad(*api);
+	} else if (kind == kSpotifyItemPlaylist) {
+		loadFirstPage = _PreparePlaylistLoad(*api, SpotifyItemIdForUri(fUri));
+	} else if (kind == kSpotifyItemAlbum) {
+		loadFirstPage = _PrepareAlbumLoad(*api, SpotifyItemIdForUri(fUri));
+	} else if (kind == kSpotifyItemShow) {
+		loadFirstPage = _PrepareShowLoad(*api, SpotifyItemIdForUri(fUri),
+			ignoreEpisodeCache);
 	}
 
 	if (loadFirstPage)
 		_LoadNextPage();
+}
+
+
+bool
+PlaylistWindow::_PrepareCollectionLoad(SpotifyApi& api)
+{
+	if (_LoadCache())
+		return false;
+
+	api.Library().InvalidateSavedTracks();
+	return true;
+}
+
+
+bool
+PlaylistWindow::_PreparePlaylistLoad(SpotifyApi& api,
+	const std::string& playlistId)
+{
+	bool loadFirstPage = !_LoadCache();
+	BMessenger messenger(this);
+
+	api.Playlists().InvalidatePlaylist(playlistId);
+	api.Playlists().GetPlaylist(playlistId, [messenger](bool ok,
+			const nlohmann::json& data) {
+		if (!ok) return;
+		BMessage* metaMsg = new BMessage('plMt');
+		metaMsg->AddString("title",
+			JsonString(data, "name", "Playlist").c_str());
+		metaMsg->AddString("snapshot_id", JsonString(data,
+			"snapshot_id").c_str());
+		metaMsg->AddString("description", JsonDescription(data).c_str());
+		metaMsg->AddBool("public", JsonBool(data, "public"));
+		if (data.contains("owner") && data["owner"].is_object()) {
+			std::string ownerId = JsonString(data["owner"], "account_id",
+				JsonString(data["owner"], "id"));
+			metaMsg->AddString("owner_id", ownerId.c_str());
+		}
+		if (data.contains("tracks") && data["tracks"].is_object())
+			metaMsg->AddInt32("total",
+				(int32)JsonInt(data["tracks"], "total"));
+		else if (data.contains("items") && data["items"].is_object())
+			metaMsg->AddInt32("total",
+				(int32)JsonInt(data["items"], "total"));
+		if (data.contains("images") && data["images"].is_array()
+		        && !data["images"].empty()) {
+			std::string url = JsonString(data["images"][0], "url");
+			if (!url.empty())
+				metaMsg->AddString("cover_url", url.c_str());
+		}
+		messenger.SendMessage(metaMsg);
+		delete metaMsg;
+	});
+	api.Profile().GetCurrentUserProfile([messenger](bool ok,
+		const nlohmann::json& profile) {
+		if (!ok || !profile.is_object()) return;
+		BMessage user('plUs');
+		std::string legacyId = JsonString(profile, "id");
+		user.AddString("user_id", JsonString(profile, "account_id",
+			legacyId).c_str());
+		user.AddString("legacy_user_id", legacyId.c_str());
+		messenger.SendMessage(&user);
+	});
+
+	return loadFirstPage;
+}
+
+
+bool
+PlaylistWindow::_PrepareAlbumLoad(SpotifyApi& api, const std::string& albumId)
+{
+	BMessenger messenger(this);
+	api.Content().GetAlbum(albumId, [messenger](bool ok,
+			const nlohmann::json& albumData) {
+		std::string albumName = "Album";
+		if (ok) {
+			albumName = JsonString(albumData, "name", "Album");
+			BMessage* titleMsg = new BMessage('uTtl');
+			titleMsg->AddString("title", albumName.c_str());
+			messenger.SendMessage(titleMsg);
+			delete titleMsg;
+
+			std::string coverUrl;
+			if (albumData.contains("images")
+			        && albumData["images"].is_array()
+			        && !albumData["images"].empty()) {
+				coverUrl = JsonString(albumData["images"][0], "url");
+			}
+			BMessage* covMsg = new BMessage('uCov');
+			covMsg->AddString("url", coverUrl.c_str());
+			messenger.SendMessage(covMsg);
+			delete covMsg;
+		}
+	});
+	return true;
+}
+
+
+bool
+PlaylistWindow::_PrepareShowLoad(SpotifyApi& api, const std::string& showId,
+	bool ignoreEpisodeCache)
+{
+	BMessenger messenger(this);
+
+	if (ignoreEpisodeCache)
+		api.Content().InvalidateShowEpisodes(showId);
+
+	api.Library().CheckFollowingShow(showId, [messenger](bool ok,
+			const nlohmann::json& data) {
+		bool valid = ok && data.is_array() && !data.empty()
+			&& data[0].is_boolean();
+		BMessage* subMsg = new BMessage('subU');
+		subMsg->AddBool("ok", valid);
+		if (valid)
+			subMsg->AddBool("following", data[0].get<bool>());
+		messenger.SendMessage(subMsg);
+		delete subMsg;
+	});
+
+	api.Content().GetShow(showId, [messenger](bool ok,
+			const nlohmann::json& data) {
+		if (!ok) return;
+		BMessage* titleMsg = new BMessage('uTtl');
+		titleMsg->AddString("title",
+			JsonString(data, "name", "Podcast").c_str());
+		messenger.SendMessage(titleMsg);
+		delete titleMsg;
+		std::string url;
+		if (data.contains("images") && data["images"].is_array()
+		        && !data["images"].empty()) {
+			url = JsonString(data["images"][0], "url");
+		}
+		BMessage* covMsg = new BMessage('uCov');
+		covMsg->AddString("url", url.c_str());
+		messenger.SendMessage(covMsg);
+		delete covMsg;
+	});
+
+	if (ignoreEpisodeCache || !_LoadCache())
+		return true;
+
+	_RebuildEpisodeList(fEpisodeSearchFilter);
+	_UpdateEpisodeInfo();
+	if (!fCurrentPlayingTrackUri.empty())
+		SetPlayingTrack(fCurrentPlayingTrackUri.c_str());
+	_RefreshPodcastHead(0);
+	return false;
 }
 
 
@@ -3215,130 +3673,31 @@ PlaylistWindow::_LoadNextPage()
 	BMessenger messenger(this);
 	int32 offset = fPageOffset;
 	int32 limit = fPageBatchSize;
-	int32 episodeSearchGeneration = fUri.find("spotify:show:") == 0
+	SpotifyItemKind kind = SpotifyItemKindForUri(fUri);
+	int32 episodeSearchGeneration = kind == kSpotifyItemShow
 		&& fEpisodeSearchPaging ? fEpisodeSearchGeneration : -1;
 
-	auto sendFailure = [messenger, episodeSearchGeneration](
-			const nlohmann::json& data) {
-		BMessage failed('pLdF');
-		failed.AddInt32("search_generation", episodeSearchGeneration);
-		failed.AddInt32("status", SpotifyApi::ResponseStatus(data));
-		failed.AddInt32("retry_after", SpotifyApi::ResponseRetryAfter(data));
-		messenger.SendMessage(&failed);
-	};
-
 	if (fUri == "spotify:collection") {
-		api->GetSavedTracks(offset, limit, [messenger, sendFailure, offset](
-				bool ok, const nlohmann::json& data) {
-			if (!ok || !data.contains("items")) {
-				sendFailure(data);
-				return;
-			}
-			BMessage* msg = new BMessage('pLdt');
-			msg->AddBool("append", offset > 0);
-			msg->AddInt32("total", JsonInt(data, "total", -1));
-			int32 pageCount = (int32)data["items"].size();
-			msg->AddInt32("page_count", pageCount);
-			msg->AddInt32("next_offset", offset + pageCount);
-			int32 itemIndex = 0;
-			for (const auto& item : data["items"]) {
-				int32 number = offset + itemIndex + 1;
-				itemIndex++;
-				if (!item.contains("track") || !item["track"].is_object())
-					continue;
-				AddTrackToMessage(msg, item["track"], number, "", "");
-			}
-			messenger.SendMessage(msg);
-			delete msg;
-		});
+		_LoadCollectionPage(*api, messenger, offset, limit,
+			episodeSearchGeneration);
 		return;
 	}
 
-	if (fUri.find("spotify:playlist:") == 0) {
-		std::string id = fUri.substr(17);
-		api->GetPlaylistTracks(id, offset, limit,
-			[messenger, sendFailure, offset](bool ok, const nlohmann::json& data) {
-			if (!ok || !data.contains("items")) {
-				sendFailure(data);
-				return;
-			}
-			BMessage* msg = new BMessage('pLdt');
-			msg->AddBool("append", offset > 0);
-			msg->AddInt32("total", JsonInt(data, "total", -1));
-			int32 pageCount = (int32)data["items"].size();
-			msg->AddInt32("page_count", pageCount);
-			msg->AddInt32("next_offset", offset + pageCount);
-			int32 itemIndex = 0;
-			for (const auto& item : data["items"]) {
-				int32 number = offset + itemIndex + 1;
-				itemIndex++;
-				if (item.contains("item") && item["item"].is_object())
-					AddTrackToMessage(msg, item["item"], number, "", "");
-				else if (item.contains("track") && item["track"].is_object())
-					AddTrackToMessage(msg, item["track"], number, "", "");
-			}
-			messenger.SendMessage(msg);
-			delete msg;
-		});
+	if (kind == kSpotifyItemPlaylist) {
+		_LoadPlaylistPage(*api, messenger, SpotifyItemIdForUri(fUri), offset,
+			limit, episodeSearchGeneration);
 		return;
 	}
 
-	if (fUri.find("spotify:album:") == 0) {
-		std::string id = fUri.substr(14);
-		std::string albumName = fPlaylistName ? fPlaylistName->Text() : "Album";
-		api->GetAlbumTracks(id, offset, limit,
-			[messenger, sendFailure, offset, id, albumName](
-				bool ok, const nlohmann::json& data) {
-			if (!ok || !data.contains("items")) {
-				sendFailure(data);
-				return;
-			}
-			BMessage* msg = new BMessage('pLdt');
-			msg->AddBool("append", offset > 0);
-			msg->AddInt32("total", JsonInt(data, "total", -1));
-			int32 pageCount = (int32)data["items"].size();
-			msg->AddInt32("page_count", pageCount);
-			msg->AddInt32("next_offset", offset + pageCount);
-			int32 itemIndex = 0;
-			for (const auto& track : data["items"]) {
-				int32 number = offset + itemIndex + 1;
-				itemIndex++;
-				if (track.is_object())
-					AddTrackToMessage(msg, track, number, albumName,
-						"spotify:album:" + id);
-			}
-			messenger.SendMessage(msg);
-			delete msg;
-		});
+	if (kind == kSpotifyItemAlbum) {
+		_LoadAlbumPage(*api, messenger, SpotifyItemIdForUri(fUri), offset,
+			limit, episodeSearchGeneration);
 		return;
 	}
 
-	if (fUri.find("spotify:show:") == 0) {
-		std::string id = fUri.substr(13);
-		api->GetShowEpisodes(id, offset, limit,
-			[messenger, sendFailure, offset](bool ok, const nlohmann::json& data) {
-			if (!ok || !data.contains("items")) {
-				sendFailure(data);
-				return;
-			}
-			BMessage* msg = new BMessage('pEpL');
-			msg->AddInt32("append", offset > 0 ? 1 : 0);
-			msg->AddInt32("total", (int32)JsonInt(data, "total"));
-			int32 pageCount = (int32)data["items"].size();
-			msg->AddInt32("page_count", pageCount);
-			msg->AddInt32("next_offset", offset + pageCount);
-			int32 itemIndex = 0;
-			for (const auto& ep : data["items"]) {
-				int32 number = offset + itemIndex + 1;
-				itemIndex++;
-				if (ep.is_object())
-					AddEpisodeToMessage(msg, ep, number);
-				else
-					AddUnavailableEpisodeToMessage(msg, number);
-			}
-			messenger.SendMessage(msg);
-			delete msg;
-		});
+	if (kind == kSpotifyItemShow) {
+		_LoadShowPage(*api, messenger, SpotifyItemIdForUri(fUri), offset,
+			limit, episodeSearchGeneration);
 		return;
 	}
 
@@ -3348,11 +3707,121 @@ PlaylistWindow::_LoadNextPage()
 
 
 void
+PlaylistWindow::_LoadCollectionPage(SpotifyApi& api,
+	const BMessenger& messenger, int32 offset, int32 limit,
+	int32 searchGeneration)
+{
+	api.Library().GetSavedTracks(offset, limit,
+		[messenger, offset, searchGeneration](bool ok,
+				const nlohmann::json& data) {
+		if (!ok || !data.contains("items")) {
+			SendPageLoadFailure(messenger, searchGeneration, data);
+			return;
+		}
+		BMessage* msg = CreateTrackPageMessage(offset, data);
+		int32 itemIndex = 0;
+		for (const auto& item : data["items"]) {
+			int32 number = offset + itemIndex + 1;
+			itemIndex++;
+			if (!item.contains("track") || !item["track"].is_object())
+				continue;
+			AddTrackToMessage(msg, item["track"], number, "", "");
+		}
+		messenger.SendMessage(msg);
+		delete msg;
+	});
+}
+
+
+void
+PlaylistWindow::_LoadPlaylistPage(SpotifyApi& api,
+	const BMessenger& messenger, const std::string& playlistId, int32 offset,
+	int32 limit, int32 searchGeneration)
+{
+	api.Playlists().GetPlaylistTracks(playlistId, offset, limit,
+		[messenger, offset, searchGeneration](bool ok,
+				const nlohmann::json& data) {
+		if (!ok || !data.contains("items")) {
+			SendPageLoadFailure(messenger, searchGeneration, data);
+			return;
+		}
+		BMessage* msg = CreateTrackPageMessage(offset, data);
+		int32 itemIndex = 0;
+		for (const auto& item : data["items"]) {
+			int32 number = offset + itemIndex + 1;
+			itemIndex++;
+			if (item.contains("item") && item["item"].is_object())
+				AddTrackToMessage(msg, item["item"], number, "", "");
+			else if (item.contains("track") && item["track"].is_object())
+				AddTrackToMessage(msg, item["track"], number, "", "");
+		}
+		messenger.SendMessage(msg);
+		delete msg;
+	});
+}
+
+
+void
+PlaylistWindow::_LoadAlbumPage(SpotifyApi& api,
+	const BMessenger& messenger, const std::string& albumId, int32 offset,
+	int32 limit, int32 searchGeneration)
+{
+	std::string albumName = fPlaylistName ? fPlaylistName->Text() : "Album";
+	api.Content().GetAlbumTracks(albumId, offset, limit,
+		[messenger, offset, albumId, albumName, searchGeneration](
+				bool ok, const nlohmann::json& data) {
+		if (!ok || !data.contains("items")) {
+			SendPageLoadFailure(messenger, searchGeneration, data);
+			return;
+		}
+		BMessage* msg = CreateTrackPageMessage(offset, data);
+		int32 itemIndex = 0;
+		for (const auto& track : data["items"]) {
+			int32 number = offset + itemIndex + 1;
+			itemIndex++;
+			if (track.is_object()) {
+				AddTrackToMessage(msg, track, number, albumName,
+					SpotifyUriForItemKind(kSpotifyItemAlbum, albumId));
+			}
+		}
+		messenger.SendMessage(msg);
+		delete msg;
+	});
+}
+
+
+void
+PlaylistWindow::_LoadShowPage(SpotifyApi& api,
+	const BMessenger& messenger, const std::string& showId, int32 offset,
+	int32 limit, int32 searchGeneration)
+{
+	api.Content().GetShowEpisodes(showId, offset, limit,
+		[messenger, offset, searchGeneration](bool ok,
+				const nlohmann::json& data) {
+		if (!ok || !data.contains("items")) {
+			SendPageLoadFailure(messenger, searchGeneration, data);
+			return;
+		}
+		BMessage* msg = CreateEpisodePageMessage(offset, data);
+		int32 itemIndex = 0;
+		for (const auto& ep : data["items"]) {
+			int32 number = offset + itemIndex + 1;
+			itemIndex++;
+			if (ep.is_object())
+				AddEpisodeToMessage(msg, ep, number);
+			else
+				AddUnavailableEpisodeToMessage(msg, number);
+		}
+		messenger.SendMessage(msg);
+		delete msg;
+	});
+}
+
+
+void
 PlaylistWindow::_CheckLazyLoad()
 {
-	if (!fTrackList || fPageLoading || fPodcastHeadRefreshing
-			|| fTrackRemovalPending || fTrackReorderPending
-			|| fPlaylistClearPending || !fPageHasMore)
+	if (!_CanLazyLoadPage())
 		return;
 	if (!fEpisodeSearchFilter.empty()) {
 		if (fEpisodeSearchPaging && !fEpisodeSearchWaitingRetry)
@@ -3360,20 +3829,33 @@ PlaylistWindow::_CheckLazyLoad()
 		return;
 	}
 
+	if (_ShouldLoadNextPageForScroll())
+		_LoadNextPage();
+}
+
+
+bool
+PlaylistWindow::_CanLazyLoadPage() const
+{
+	return fTrackList && !fPageLoading && !fPodcastHeadRefreshing
+		&& !fTrackRemovalPending && !fTrackReorderPending
+		&& !fPlaylistClearPending && fPageHasMore;
+}
+
+
+bool
+PlaylistWindow::_ShouldLoadNextPageForScroll() const
+{
 	BScrollBar* scrollBar = TrackVerticalScrollBar(fTrackList);
-	if (!scrollBar) {
-		if (fTrackList->CountRows() == 0)
-			_LoadNextPage();
-		return;
-	}
+	if (!scrollBar)
+		return fTrackList->CountRows() == 0;
 
 	float min = 0.0f;
 	float max = 0.0f;
 	scrollBar->GetRange(&min, &max);
 	float value = scrollBar->Value();
-	if ((max <= 0.0f && fTrackList->CountRows() == 0)
-			|| value >= max - 220.0f)
-		_LoadNextPage();
+	return (max <= 0.0f && fTrackList->CountRows() == 0)
+		|| value >= max - 220.0f;
 }
 
 static std::string
@@ -3529,7 +4011,7 @@ PlaylistWindow::_HasEpisode(const std::string& uri, const std::string& title,
 void
 PlaylistWindow::_RefreshPodcastHead(int32 offset)
 {
-	if (fUri.find("spotify:show:") != 0 || fEpisodes.empty())
+	if (SpotifyItemKindForUri(fUri) != kSpotifyItemShow || fEpisodes.empty())
 		return;
 
 	App* app = (App*)be_app;
@@ -3541,15 +4023,15 @@ PlaylistWindow::_RefreshPodcastHead(int32 offset)
 		if (fPodcastHeadRefreshing)
 			return;
 		fPendingPodcastHeadEpisodes.clear();
-		api->InvalidateShowEpisodes(fUri.substr(13));
+		api->Content().InvalidateShowEpisodes(SpotifyItemIdForUri(fUri));
 	}
 
 	fPodcastHeadRefreshing = true;
-	std::string id = fUri.substr(13);
+	std::string id = SpotifyItemIdForUri(fUri);
 	BMessenger messenger(this);
 	int32 limit = fPageBatchSize;
 
-	api->GetShowEpisodes(id, offset, limit,
+	api->Content().GetShowEpisodes(id, offset, limit,
 		[messenger, offset](bool ok, const nlohmann::json& data) {
 		BMessage* msg = new BMessage('pEpR');
 		msg->AddBool("ok", ok);
@@ -3608,12 +4090,13 @@ PlaylistWindow::_LoadMoreEpisodes()
 bool
 PlaylistWindow::_LoadCache()
 {
+	SpotifyItemKind kind = SpotifyItemKindForUri(fUri);
 	if (fUri == "spotify:collection"
-			|| fUri.find("spotify:playlist:") == 0) {
+			|| kind == kSpotifyItemPlaylist) {
 		BPath path;
-		bool isPlaylist = fUri.find("spotify:playlist:") == 0;
+		bool isPlaylist = kind == kSpotifyItemPlaylist;
 		if (isPlaylist) {
-			if (!PlaylistCachePath(fUri.substr(17), path, false))
+			if (!PlaylistCachePath(SpotifyItemIdForUri(fUri), path, false))
 				return false;
 		} else {
 			if (!LikedSongsCachePath(path, false))
@@ -3693,8 +4176,8 @@ PlaylistWindow::_LoadCache()
 		}
 	}
 
-	if (fUri.find("spotify:show:") != 0) return false;
-	std::string id = fUri.substr(13);
+	if (kind != kSpotifyItemShow) return false;
+	std::string id = SpotifyItemIdForUri(fUri);
 
 	BPath path;
 	if (!ShowCachePath(id, path, false)) return false;
@@ -3764,15 +4247,15 @@ void
 PlaylistWindow::_WriteCacheNow()
 {
 	if (fUri == "spotify:collection"
-			|| fUri.find("spotify:playlist:") == 0) {
+			|| SpotifyItemKindForUri(fUri) == kSpotifyItemPlaylist) {
 		if (!fTrackList) return;
-		bool isPlaylist = fUri.find("spotify:playlist:") == 0;
+		bool isPlaylist = SpotifyItemKindForUri(fUri) == kSpotifyItemPlaylist;
 		if (isPlaylist && fPlaylistSnapshotId.empty())
 			return;
 
 		BPath path;
 		if (isPlaylist) {
-			if (!PlaylistCachePath(fUri.substr(17), path, true))
+			if (!PlaylistCachePath(SpotifyItemIdForUri(fUri), path, true))
 				return;
 		} else {
 			if (!LikedSongsCachePath(path, true))
@@ -3821,8 +4304,8 @@ PlaylistWindow::_WriteCacheNow()
 		return;
 	}
 
-	if (fUri.find("spotify:show:") != 0) return;
-	std::string id = fUri.substr(13);
+	if (SpotifyItemKindForUri(fUri) != kSpotifyItemShow) return;
+	std::string id = SpotifyItemIdForUri(fUri);
 
 	BPath path;
 	if (!ShowCachePath(id, path, true)) return;
@@ -3859,16 +4342,16 @@ PlaylistWindow::_DeleteCache()
 		unlink(path.Path());
 		return;
 	}
-	if (fUri.find("spotify:playlist:") == 0) {
+	if (SpotifyItemKindForUri(fUri) == kSpotifyItemPlaylist) {
 		BPath path;
-		if (!PlaylistCachePath(fUri.substr(17), path, false)) return;
+		if (!PlaylistCachePath(SpotifyItemIdForUri(fUri), path, false)) return;
 		CancelCacheWrite(path.Path());
 		unlink(path.Path());
 		return;
 	}
-	if (fUri.find("spotify:show:") != 0) return;
+	if (SpotifyItemKindForUri(fUri) != kSpotifyItemShow) return;
 	BPath path;
-	if (!ShowCachePath(fUri.substr(13), path, false)) return;
+	if (!ShowCachePath(SpotifyItemIdForUri(fUri), path, false)) return;
 	CancelCacheWrite(path.Path());
 	unlink(path.Path());
 }

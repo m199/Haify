@@ -3,6 +3,7 @@
 #include "Messages.h"
 #include "SettingsController.h"
 #include "DiscoverListView.h"
+#include "spotify/SpotifyUri.h"
 #include "spotify/api/SpotifyApi.h"
 #include "UiLogic.h"
 #include <nlohmann/json.hpp>
@@ -101,7 +102,7 @@ ShowSearchItemContextMenu(const std::string& uri, const std::string& title,
 	menu->AddItem(new BMenuItem(libraryLabel, library));
 
 	if (api && SpotifyItemCanAddToPlaylist(kind)) {
-		auto playlists = api->GetCachedPlaylists();
+		auto playlists = api->Playlists().GetCachedPlaylists();
 		if (!playlists.empty()) {
 			BMenu* addMenu = new BMenu(B_TRANSLATE("Add to Playlist"));
 			for (const auto& playlist : playlists) {
@@ -118,7 +119,7 @@ ShowSearchItemContextMenu(const std::string& uri, const std::string& title,
 	if (selected && selected->Message()) {
 		BMessage* message = selected->Message();
 		if (message->what == 'sQue' && api) {
-			api->AddToQueue(uri, nullptr);
+			api->Playback().AddToQueue(uri, nullptr);
 		} else if ((message->what == 'sAdd' || message->what == 'sRem') && api) {
 			bool add = message->what == 'sAdd';
 			auto complete = [target, add, uri](bool ok, const nlohmann::json&) {
@@ -128,10 +129,11 @@ ShowSearchItemContextMenu(const std::string& uri, const std::string& title,
 				result.AddString("uri", uri.c_str());
 				target.SendMessage(&result);
 			};
-			if (add) api->SaveLibraryItems({uri}, complete);
-			else api->RemoveLibraryItems({uri}, complete);
+			if (add) api->Library().SaveLibraryItems({uri}, complete);
+			else api->Library().RemoveLibraryItems({uri}, complete);
 		} else if (message->what == 'sPlA' && api) {
-			api->AddTrackToPlaylist(message->GetString("playlist_id", ""), uri,
+			api->Playlists().AddTrackToPlaylist(
+				message->GetString("playlist_id", ""), uri,
 				[target](bool ok, const nlohmann::json&) {
 					BMessage result('sPlR');
 					result.AddBool("ok", ok);
@@ -391,8 +393,9 @@ SearchWindow::MessageReceived(BMessage* message)
 			if (!api) break;
 			BMessenger self(this);
 			std::string titleStr = title ? title : "";
-			api->CheckLibraryItems({uriStr}, [self, uriStr, titleStr, screenPt](
-					bool ok, const nlohmann::json& data) {
+			api->Library().CheckLibraryItems({uriStr}, [self, uriStr,
+					titleStr, screenPt](bool ok,
+					const nlohmann::json& data) {
 				BMessage result('sCmR');
 				result.AddString("uri", uriStr.c_str());
 				result.AddString("title", titleStr.c_str());
@@ -586,7 +589,7 @@ SearchWindow::_DoSearch()
 	std::string types = _BuildTypeParam();
 	BMessenger self(this);
 
-	api->Search(query, types,
+	api->Content().Search(query, types,
 		[self, generation](bool ok, const nlohmann::json& data) {
 			if (!ok) {
 				BMessage err(kMsgResults);
@@ -611,8 +614,8 @@ SearchWindow::_DoSearch()
 					std::string uri = SearchJsonString(item, "uri");
 					if (std::string(key) == "audiobooks"
 							&& item.contains("id") && item["id"].is_string()) {
-						uri = "spotify:audiobook:"
-							+ item["id"].get<std::string>();
+						uri = SpotifyUriForItemKind(kSpotifyItemAudiobook,
+							item["id"].get<std::string>());
 					}
 					std::string artist, artUri, album, albUri;
 

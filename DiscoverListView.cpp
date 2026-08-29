@@ -1,5 +1,5 @@
 #include "DiscoverListView.h"
-#include "UiLogic.h"
+#include "spotify/SpotifyUri.h"
 
 #include <Message.h>
 #include <MessageFilter.h>
@@ -152,7 +152,7 @@ DiscoverListView::DiscoverListView(const char* name,
 	  fLogicalTab(logicalTab)
 {
 	SetViewUIColor(B_LIST_BACKGROUND_COLOR);
-	
+
 	for (int32 i = 0; i < (int32)cols.size(); i++) {
 		BColumn* col = new BoldStringColumn(cols[i].label, cols[i].width,
 			60, 9999, B_TRUNCATE_END);
@@ -405,8 +405,8 @@ DiscoverListView::_DispatchClick(bool isDouble)
 
 		case kColRouteOnDouble:
 			if (isDouble) {
-				bool playable = uri.find("spotify:track:") == 0
-					|| uri.find("spotify:episode:") == 0;
+				bool playable = SpotifyItemIsPlayable(
+					SpotifyItemKindForUri(uri));
 				BMessage msg(playable ? 'play' : 'open');
 				msg.AddString("uri", uri.c_str());
 				msg.AddString("title", title.c_str());

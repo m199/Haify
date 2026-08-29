@@ -10,7 +10,9 @@
 #include "HaifyDebug.h"
 #include "Config.h"
 #include "UiLogic.h"
+#include "spotify/SpotifyUri.h"
 #include "spotify/api/SpotifyApi.h"
+#include "spotify/api/SpotifyResponse.h"
 #include <nlohmann/json.hpp>
 
 #include <AboutWindow.h>
@@ -189,12 +191,13 @@ PlayerWindow::_PollPlayback()
 
 	fPlaybackRequestPending = true;
 	BMessenger self(this);
-	api->GetPlaybackState([self, api](bool ok, const nlohmann::json& data) {
+	api->Playback().GetPlaybackState([self, api](bool ok,
+			const nlohmann::json& data) {
 		// Do not double the traffic during rate limits or outages. The legacy
 		// endpoint is only useful when Spotify reports that the state endpoint
 		// itself is unavailable for this playback session.
-		if (!ok && SpotifyApi::ResponseStatus(data) == 404) {
-			api->GetCurrentlyPlaying([self](bool fallbackOk,
+		if (!ok && SpotifyResponseStatus(data) == 404) {
+			api->Playback().GetCurrentlyPlaying([self](bool fallbackOk,
 					const nlohmann::json& fallbackData) {
 				BMessage fallback(kMsgPlaybackPollResult);
 				_FillPlaybackPollMessage(fallback, fallbackOk, fallbackData);
@@ -235,7 +238,8 @@ PlayerWindow::_FetchQueuePrediction()
 
 	BMessenger self(this);
 	std::string trackUri = fCurrentTrackUri;
-	api->GetQueue([self, trackUri](bool ok, const nlohmann::json& data) {
+	api->Playback().GetQueue([self, trackUri](bool ok,
+			const nlohmann::json& data) {
 		BMessage msg('qprd');
 		msg.AddString("source_track_uri", trackUri.c_str());
 		if (ok && data.contains("queue") && data["queue"].is_array()
@@ -597,11 +601,13 @@ PlayerWindow::_ResolveAudiobookContextForPlayback(
 	const std::string& trackUri, const std::string& parentKind,
 	const std::string& openUri)
 {
-	if (trackUri.find("spotify:episode:") != 0)
+	if (SpotifyItemKindForUri(trackUri) != kSpotifyItemEpisode)
 		return;
-	if (parentKind == "audiobook" || openUri.find("spotify:audiobook:") == 0)
+	if (parentKind == "audiobook"
+			|| SpotifyItemKindForUri(openUri) == kSpotifyItemAudiobook)
 		return;
-	if (parentKind != "show" && openUri.find("spotify:show:") != 0)
+	if (parentKind != "show"
+			&& SpotifyItemKindForUri(openUri) != kSpotifyItemShow)
 		return;
 	if (fAudiobookContextRequestPending
 			&& fAudiobookContextRequestTrackUri == trackUri) {
@@ -620,8 +626,8 @@ PlayerWindow::_ResolveAudiobookContextForPlayback(
 	fLastAudiobookContextLookupTrackUri = trackUri;
 
 	BMessenger self(this);
-	std::string chapterId = trackUri.substr(16);
-	api->GetChapter(chapterId, [self, trackUri](bool ok,
+	std::string chapterId = SpotifyItemIdForUri(trackUri);
+	api->Content().GetChapter(chapterId, [self, trackUri](bool ok,
 			const nlohmann::json& chapter) {
 		BMessage result(kMsgAudiobookContextResult);
 		result.AddString("source_track_uri", trackUri.c_str());
@@ -651,18 +657,18 @@ PlayerWindow::_PlayUri(BMessage* message)
 	std::string contextUri = message->GetString("context_uri", "");
 	std::string nextQueueUri = message->GetString("next_queue_uri", "");
 
-	if (uriStr.find("spotify:track:") == 0
-			|| uriStr.find("spotify:episode:") == 0) {
+	SpotifyItemKind kind = SpotifyItemKindForUri(uriStr);
+	if (SpotifyItemIsPlayable(kind)) {
 		_ApplyOptimisticPlay(message);
 
-		if (uriStr.find("spotify:track:") == 0) {
+		if (kind == kSpotifyItemTrack) {
 			BMessenger self(this);
-			std::string trackId = uriStr.substr(14);
+			std::string trackId = SpotifyItemIdForUri(uriStr);
 			std::string repeatState = fRepeatState;
 			bool shuffleOn = fShuffleOn;
 			int32 volumePct = fVolumePct;
-			api->GetTrack(trackId, [self, repeatState, shuffleOn, volumePct](
-					bool ok, const nlohmann::json& data) {
+			api->Content().GetTrack(trackId, [self, repeatState, shuffleOn,
+					volumePct](bool ok, const nlohmann::json& data) {
 				if (!ok || !data.is_object())
 					return;
 				BMessage msg('pbst');
@@ -678,16 +684,16 @@ PlayerWindow::_PlayUri(BMessage* message)
 			});
 		}
 
-		api->PlayTrack(uriStr, contextUri,
+		api->Playback().PlayTrack(uriStr, contextUri,
 			[api, nextQueueUri](bool ok, const nlohmann::json&) {
 			if (ok && !nextQueueUri.empty())
-				api->AddToQueue(nextQueueUri, nullptr);
+				api->Playback().AddToQueue(nextQueueUri, nullptr);
 		});
 		_ScheduleVerifyPoll(kVerifyPollDelay);
 		return;
 	}
 
-	api->PlayContext(uriStr, nullptr);
+	api->Playback().PlayContext(uriStr, nullptr);
 	_ScheduleVerifyPoll(kVerifyPollDelay);
 }
 
@@ -959,8 +965,8 @@ PlayerWindow::_ShowAddTrackMenu(const std::string& trackUri,
 	auto showMenu = [self, api, trackUri, context, screenWhere]() {
 		ShowTrackContextMenu(trackUri, context, screenWhere, self, api, true);
 	};
-	if (api->GetCachedPlaylists().empty()) {
-		api->GetPlaylists([showMenu](bool, const nlohmann::json&) {
+	if (api->Playlists().GetCachedPlaylists().empty()) {
+		api->Playlists().GetPlaylists([showMenu](bool, const nlohmann::json&) {
 			showMenu();
 		});
 	} else {
@@ -974,10 +980,10 @@ PlayerWindow::_RemoveCurrentTrackFromLikedSongs(const std::string& trackUri)
 {
 	App* app = (App*)be_app;
 	SpotifyApi* api = app->GetApi();
-	if (!api || trackUri.find("spotify:track:") != 0)
+	if (!api || SpotifyItemKindForUri(trackUri) != kSpotifyItemTrack)
 		return;
 
-	api->RemoveSavedTrack(trackUri.substr(14), nullptr);
+	api->Library().RemoveSavedTrack(SpotifyItemIdForUri(trackUri), nullptr);
 }
 
 
@@ -1060,7 +1066,8 @@ PlayerWindow::MessageReceived(BMessage* message)
 				kNowPlayingPrimaryOpenUriField, "");
 			const char* parentKind = message->GetString(
 				kNowPlayingParentKindField, "");
-			if (!openUri || strncmp(openUri, "spotify:audiobook:", 18) != 0
+			std::string openUriString = openUri ? openUri : "";
+			if (SpotifyItemKindForUri(openUriString) != kSpotifyItemAudiobook
 					|| !parentKind || strcmp(parentKind, "audiobook") != 0) {
 				break;
 			}
@@ -1119,8 +1126,8 @@ PlayerWindow::MessageReceived(BMessage* message)
 			if (fPlayerBar) fPlayerBar->SetPlaying(!wasPlaying);
 			fIsPlaying = !wasPlaying;
 			fLastPlaybackSyncUs = system_time();
-			if (wasPlaying) api->Pause(nullptr);
-			else            api->Play(nullptr);
+			if (wasPlaying) api->Playback().Pause(nullptr);
+			else            api->Playback().Play(nullptr);
 			break;
 	}
 
@@ -1129,7 +1136,7 @@ PlayerWindow::MessageReceived(BMessage* message)
 			App* app = (App*)be_app;
 			SpotifyApi* api = app->GetApi();
 			if (!api) break;
-			api->Next(nullptr);
+			api->Playback().Next(nullptr);
 			if (fHasPredictedNext)
 				_ApplyPredictedNext();
 			else
@@ -1142,7 +1149,7 @@ PlayerWindow::MessageReceived(BMessage* message)
 			App* app = (App*)be_app;
 			SpotifyApi* api = app->GetApi();
 			if (!api) break;
-			api->Previous(nullptr);
+			api->Playback().Previous(nullptr);
 			fHasPredictedNext = false;
 			fQueueTrackUri.clear();
 			_ScheduleVerifyPoll(kVerifyPollDelay);
@@ -1161,7 +1168,7 @@ PlayerWindow::MessageReceived(BMessage* message)
 					vol = 100;
 				_SetVolumeOptimistically(vol);
 				if (api)
-					api->SetVolume((int)vol, nullptr);
+					api->Playback().SetVolume((int)vol, nullptr);
 			}
 			break;
 		}
@@ -1182,12 +1189,14 @@ PlayerWindow::MessageReceived(BMessage* message)
 					targetVolume = 100;
 
 				_SetVolumeOptimistically(targetVolume);
-				api->SetVolume((int)targetVolume, nullptr, fVolumeDeviceId);
+				api->Playback().SetVolume((int)targetVolume, nullptr,
+					fVolumeDeviceId);
 				break;
 			}
 
 			BMessenger self(this);
-			api->GetPlaybackState([self](bool ok, const nlohmann::json& data) {
+			api->Playback().GetPlaybackState([self](bool ok,
+					const nlohmann::json& data) {
 				BMessage toggle(kMsgApplyMuteToggle);
 				toggle.AddBool("ok", ok);
 
@@ -1260,7 +1269,8 @@ PlayerWindow::MessageReceived(BMessage* message)
 			App* app = (App*)be_app;
 			SpotifyApi* api = app->GetApi();
 			if (api) {
-				api->SetVolume((int)targetVolume, nullptr, fVolumeDeviceId);
+				api->Playback().SetVolume((int)targetVolume, nullptr,
+					fVolumeDeviceId);
 			}
 			break;
 		}
@@ -1276,7 +1286,7 @@ PlayerWindow::MessageReceived(BMessage* message)
 			if (fPlayerBar) fPlayerBar->SetShuffle(fShuffleOn);
 			fHasPredictedNext = false;
 			fQueueTrackUri.clear();
-			api->SetShuffle(fShuffleOn, nullptr);
+			api->Playback().SetShuffle(fShuffleOn, nullptr);
 			break;
 		}
 
@@ -1293,7 +1303,7 @@ PlayerWindow::MessageReceived(BMessage* message)
 			if (fPlayerBar) fPlayerBar->SetRepeat(fRepeatState.c_str());
 			fHasPredictedNext = false;
 			fQueueTrackUri.clear();
-			api->SetRepeat(fRepeatState, nullptr);
+			api->Playback().SetRepeat(fRepeatState, nullptr);
 			break;
 		}
 
@@ -1330,7 +1340,7 @@ PlayerWindow::MessageReceived(BMessage* message)
 				BMessage stateMsg(MSG_REPLICANT_STATE);
 				_FillReplicantStateMessage(stateMsg, fProgressMs);
 				be_app->PostMessage(&stateMsg);
-				api->Seek((int)(posUs / 1000LL), nullptr);
+				api->Playback().Seek((int)(posUs / 1000LL), nullptr);
 				_ScheduleVerifyPoll(kVerifyPollDelay);
 			}
 			break;
@@ -1390,8 +1400,10 @@ PlayerWindow::MessageReceived(BMessage* message)
 	{
 			App* app = (App*)be_app;
 			SpotifyApi* api = app->GetApi();
-			if (!api || fCurrentTrackUri.find("spotify:track:") != 0) break;
-			api->SaveTrack(fCurrentTrackUri.substr(14), nullptr);
+			if (!api || SpotifyItemKindForUri(fCurrentTrackUri)
+					!= kSpotifyItemTrack) break;
+			api->Library().SaveTrack(SpotifyItemIdForUri(fCurrentTrackUri),
+				nullptr);
 			break;
 	}
 
@@ -1402,15 +1414,16 @@ PlayerWindow::MessageReceived(BMessage* message)
 			if (!api) break;
 			const char* trackUri = message->GetString("trackUri",
 				fCurrentTrackUri.c_str());
-			if (!trackUri || strncmp(trackUri, "spotify:track:", 14) != 0)
+			std::string uri = trackUri ? trackUri : "";
+			std::string id = SpotifyItemIdForUri(uri);
+			if (SpotifyItemKindForUri(uri) != kSpotifyItemTrack
+					|| id.empty())
 				break;
 			BPoint screenWhere;
 			if (message->FindPoint("screen_where", &screenWhere) != B_OK)
 				screenWhere = Frame().LeftTop();
-			std::string uri = trackUri;
-			std::string id = uri.substr(14);
 			BMessenger self(this);
-			api->CheckSavedTracks(id, [self, uri, screenWhere](bool ok,
+			api->Library().CheckSavedTracks(id, [self, uri, screenWhere](bool ok,
 					const nlohmann::json& data) {
 				bool liked = false;
 				if (ok && data.is_array() && !data.empty()
@@ -1430,7 +1443,8 @@ PlayerWindow::MessageReceived(BMessage* message)
 		{
 			const char* trackUri = message->GetString("trackUri", "");
 			BPoint screenWhere;
-			if (!trackUri || strncmp(trackUri, "spotify:track:", 14) != 0)
+			if (SpotifyItemKindForUri(trackUri ? trackUri : "")
+					!= kSpotifyItemTrack)
 				break;
 			if (message->FindPoint("screen_where", &screenWhere) != B_OK)
 				screenWhere = Frame().LeftTop();
@@ -1511,7 +1525,7 @@ PlayerWindow::MessageReceived(BMessage* message)
 			if (message->FindString("id", &id) != B_OK || !id) break;
 			App* app = (App*)be_app;
 			SpotifyApi* api = app->GetApi();
-			if (api) api->TransferPlayback(id, nullptr);
+			if (api) api->Playback().TransferPlayback(id, nullptr);
 			break;
 		}
 
@@ -1559,7 +1573,7 @@ PlayerWindow::MenusBeginning()
 	}
 
 	BMessenger self(this);
-	api->GetDevices([self](bool ok, const nlohmann::json& data) {
+	api->Playback().GetDevices([self](bool ok, const nlohmann::json& data) {
 		BMessage* msg = new BMessage('dEvL');
 		if (ok && data.contains("devices")) {
 			for (const auto& d : data["devices"]) {

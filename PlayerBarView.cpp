@@ -4,6 +4,7 @@
 #include "NowPlayingFields.h"
 #include "PlaybackSeekBarView.h"
 #include "SettingsController.h"
+#include "spotify/SpotifyUri.h"
 #include "UiLogic.h"
 #include <Message.h>
 #include <MessageRunner.h>
@@ -1463,7 +1464,7 @@ void PlayerBarView::SetTrackUri(const char* trackUri) {
     fCurrentTrackUri = trackUri ? trackUri : "";
     if (fAddTrackButton)
         fAddTrackButton->SetEnabled(
-            fCurrentTrackUri.find("spotify:track:") == 0);
+            SpotifyItemKindForUri(fCurrentTrackUri) == kSpotifyItemTrack);
 }
 
 void PlayerBarView::SetOpenUri(const char* uri) {

@@ -1,6 +1,7 @@
 #include "SpotifyCapabilities.h"
 
 #include "api/SpotifyApi.h"
+#include "api/SpotifyResponse.h"
 
 #include <Autolock.h>
 
@@ -99,10 +100,10 @@ time_t SpotifyCapabilities::LastAudiobookCheck() const
 AudiobookCapabilityState SpotifyCapabilities::_FailureState(
     const nlohmann::json& data)
 {
-    int status = SpotifyApi::ResponseStatus(data);
+    int status = SpotifyResponseStatus(data);
     if (status == 403)
         return kAudiobookForbidden;
-    if (SpotifyApi::IsTemporaryFailure(data))
+    if (SpotifyResponseIsTemporaryFailure(data))
         return kAudiobookTemporaryError;
     return kAudiobookUnavailable;
 }
@@ -139,7 +140,7 @@ void SpotifyCapabilities::ProbeAudiobooks(
         fAudiobookProbeInFlight = true;
     }
 
-    api->GetSavedAudiobooks(0, 1,
+    api->Library().GetSavedAudiobooks(0, 1,
         [this, api](bool ok, const nlohmann::json& data) {
             if (!ok) {
                 _FinishAudiobookProbe(_FailureState(data));
@@ -151,7 +152,7 @@ void SpotifyCapabilities::ProbeAudiobooks(
                     ? kAudiobookUnavailable : kAudiobookAvailable);
                 return;
             }
-            api->Search("a", "audiobook",
+            api->Content().Search("a", "audiobook",
                 [this](bool searchOk, const nlohmann::json& searchData) {
                     if (!searchOk) {
                         _FinishAudiobookProbe(_FailureState(searchData));

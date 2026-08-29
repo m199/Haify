@@ -14,7 +14,7 @@
 
 #include "Config.h"
 #include "SettingsController.h"
-#include "UiLogic.h"
+#include "spotify/SpotifyUri.h"
 #include "spotify/auth/SpotifyAuth.h"
 #include "spotify/api/SpotifyApi.h"
 #include "network/ImageCache.h"
@@ -171,7 +171,8 @@ App::_RefreshSpotifyAccount()
 	if (!fIsAuthenticated || !fApi)
 		return;
 	BMessenger app(this);
-	fApi->GetCurrentUserProfile([app](bool ok, const nlohmann::json& profile) {
+	fApi->Profile().GetCurrentUserProfile([app](bool ok,
+			const nlohmann::json& profile) {
 		if (!ok || !profile.is_object()) return;
 		BMessage message('spAc');
 		message.AddString("account_id",
@@ -508,7 +509,7 @@ App::MessageReceived(BMessage* message)
 			// GetPlaylists may have completed before the profile ID was known.
 			// Rebuild its writable-playlist cache now with the resolved identity.
 			BMessenger application(this);
-			fApi->GetPlaylists([application](bool ok,
+			fApi->Playlists().GetPlaylists([application](bool ok,
 					const nlohmann::json&) {
 				if (!ok) return;
 				BMessage refreshed(MSG_PLAYLISTS_CHANGED);
@@ -662,8 +663,7 @@ App::MessageReceived(BMessage* message)
 				const char* uri = message->GetString("uri", "");
 				if ((!uri || !uri[0]))
 					uri = message->GetString("trackUri", "");
-				if (uri && (strncmp(uri, "spotify:track:", 14) == 0
-						|| strncmp(uri, "spotify:episode:", 16) == 0))
+				if (uri && SpotifyItemIsPlayable(SpotifyItemKindForUri(uri)))
 					_BroadcastPlayingTrack(uri);
 			}
 			if (fPlayerWindow)
@@ -712,8 +712,9 @@ App::MessageReceived(BMessage* message)
 			message->FindString("title", &title);
 			if (!uri || !uri[0]) break;
 			std::string uriStr = uri;
-			if (uriStr.find("spotify:artist:") == 0) {
-				std::string id = uriStr.substr(15);
+			SpotifyItemKind kind = SpotifyItemKindForUri(uriStr);
+			if (kind == kSpotifyItemArtist) {
+				std::string id = SpotifyItemIdForUri(uriStr);
 				ArtistWindow* window = FindOpenWindow<ArtistWindow>(this,
 					[&](ArtistWindow* candidate) {
 						return candidate->GetArtistId() == id;
@@ -725,8 +726,8 @@ App::MessageReceived(BMessage* message)
 					window->Show();
 				}
 				_SendCurrentTrackTo(window);
-			} else if (uriStr.find("spotify:episode:") == 0) {
-				std::string id = uriStr.substr(16);
+			} else if (kind == kSpotifyItemEpisode) {
+				std::string id = SpotifyItemIdForUri(uriStr);
 				EpisodeWindow* window = FindOpenWindow<EpisodeWindow>(this,
 					[&](EpisodeWindow* candidate) {
 						return candidate->GetEpisodeId() == id;
@@ -737,7 +738,7 @@ App::MessageReceived(BMessage* message)
 					window = new EpisodeWindow(id);
 					window->Show();
 				}
-			} else if (uriStr.find("spotify:audiobook:") == 0) {
+			} else if (kind == kSpotifyItemAudiobook) {
 				if (!fCapabilities.AudiobooksEnabled()) {
 					BAlert* alert = new BAlert("", B_TRANSLATE(
 						"Audiobooks are not available for this account or market."),
@@ -745,7 +746,7 @@ App::MessageReceived(BMessage* message)
 					alert->Go();
 					break;
 				}
-				std::string id = uriStr.substr(18);
+				std::string id = SpotifyItemIdForUri(uriStr);
 				AudiobookWindow* window = FindOpenWindow<AudiobookWindow>(this,
 					[&](AudiobookWindow* candidate) {
 						return candidate->GetAudiobookId() == id;
@@ -756,11 +757,11 @@ App::MessageReceived(BMessage* message)
 					window = new AudiobookWindow(id);
 					window->Show();
 				}
-			} else if (uriStr.find("spotify:track:") == 0) {
+			} else if (kind == kSpotifyItemTrack) {
 				BMessage play('play');
 				play.AddString("uri", uriStr.c_str());
 				PostMessage(&play);
-			} else if (uriStr.find("spotify:show:") == 0
+			} else if (kind == kSpotifyItemShow
 					&& !message->GetBool("skip_audiobook_resolution", false)
 					&& fCapabilities.AudiobooksEnabled() && fApi) {
 				std::string id = SpotifyItemIdForUri(uriStr);
@@ -774,15 +775,18 @@ App::MessageReceived(BMessage* message)
 					break;
 				}
 				BMessenger app(this);
-				fApi->GetAudiobook(id, [app, uriStr, id, t](bool ok,
+				fApi->Content().GetAudiobook(id, [app, uriStr, id, t](bool ok,
 						const nlohmann::json& book) {
 					BMessage resolved('open');
 					if (ok && book.is_object()) {
 						std::string audiobookUri;
 						if (book.contains("uri") && book["uri"].is_string())
 							audiobookUri = book["uri"].get<std::string>();
-						if (audiobookUri.find("spotify:audiobook:") != 0)
-							audiobookUri = "spotify:audiobook:" + id;
+						if (SpotifyItemKindForUri(audiobookUri)
+								!= kSpotifyItemAudiobook) {
+							audiobookUri = SpotifyUriForItemKind(
+								kSpotifyItemAudiobook, id);
+						}
 						resolved.AddString("uri", audiobookUri.c_str());
 					} else {
 						resolved.AddString("uri", uriStr.c_str());
@@ -792,9 +796,9 @@ App::MessageReceived(BMessage* message)
 					app.SendMessage(&resolved);
 				});
 			} else if (uriStr == "spotify:collection"
-					|| uriStr.find("spotify:album:") == 0
-					|| uriStr.find("spotify:playlist:") == 0
-					|| uriStr.find("spotify:show:") == 0) {
+					|| kind == kSpotifyItemAlbum
+					|| kind == kSpotifyItemPlaylist
+					|| kind == kSpotifyItemShow) {
 				std::string t = title ? title : "";
 				PlaylistWindow* window = FindOpenWindow<PlaylistWindow>(this,
 					[&](PlaylistWindow* candidate) {
@@ -821,7 +825,7 @@ App::MessageReceived(BMessage* message)
 			const char* id = "";
 			message->FindString("id", &id);
 			if (id && id[0]) {
-				std::string uri = std::string("spotify:album:") + id;
+				std::string uri = SpotifyUriForItemKind(kSpotifyItemAlbum, id);
 				PlaylistWindow* window = FindOpenWindow<PlaylistWindow>(this,
 					[&](PlaylistWindow* candidate) {
 						return candidate->GetUri() == uri;
@@ -1059,7 +1063,7 @@ App::MessageReceived(BMessage* message)
 			if (message->GetBool("transfer", false) && GetApi()
 					&& fLibrespotPid > 0 && deviceId && deviceId[0]) {
 				BMessenger app(this);
-				fApi->TransferPlayback(deviceId,
+				fApi->Playback().TransferPlayback(deviceId,
 					[app](bool ok, const nlohmann::json&) {
 					if (!ok)
 						return;
@@ -1463,7 +1467,7 @@ App::_TryTransferPlaybackToLibrespot()
 	BMessenger messenger(this);
 	fLibrespotTransferAttempts++;
 
-	api->GetDevices([messenger, deviceName](bool ok,
+	api->Playback().GetDevices([messenger, deviceName](bool ok,
 			const nlohmann::json& data) {
 		std::string deviceId;
 		if (ok && data.contains("devices") && data["devices"].is_array()) {
@@ -1495,7 +1499,7 @@ App::_TransferPlaybackToLibrespotDevice(const char* deviceId)
 
 	if (fLibrespotTransferMode == kLibrespotTransferAlways) {
 		BMessenger app(this);
-		api->TransferPlayback(deviceId,
+		api->Playback().TransferPlayback(deviceId,
 			[app](bool ok, const nlohmann::json&) {
 			if (!ok)
 				return;
@@ -1507,7 +1511,7 @@ App::_TransferPlaybackToLibrespotDevice(const char* deviceId)
 
 	std::string targetDeviceId = deviceId;
 	BMessenger messenger(this);
-	api->GetPlaybackState([messenger, targetDeviceId](bool ok,
+	api->Playback().GetPlaybackState([messenger, targetDeviceId](bool ok,
 			const nlohmann::json& data) {
 		bool shouldTransfer = ok;
 		if (ok && data.is_object()) {

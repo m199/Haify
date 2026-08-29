@@ -4,6 +4,7 @@
 #include "Messages.h"
 #include "SettingsController.h"
 #include "DiscoverListView.h"
+#include "spotify/SpotifyUri.h"
 #include "spotify/api/SpotifyApi.h"
 #include <nlohmann/json.hpp>
 
@@ -192,8 +193,8 @@ public:
 
 		BMessage drag('drag');
 		drag.AddString("uri", row->fUri.c_str());
-		drag.AddString("itemType",
-			row->fUri.find("spotify:episode:") == 0 ? "episode" : "track");
+		drag.AddString("itemType", SpotifyItemKindForUri(row->fUri)
+			== kSpotifyItemEpisode ? "episode" : "track");
 		drag.AddString("trackUri", row->fUri.c_str());
 		BStringField* title = dynamic_cast<BStringField*>(row->GetField(0));
 		BStringField* artist = dynamic_cast<BStringField*>(row->GetField(1));
@@ -503,7 +504,8 @@ QueueWindow::_LoadQueue()
 	BMessenger self(this);
 	std::string currentUri = fCurrentUri;
 
-	api->GetQueue([self, currentUri](bool ok, const nlohmann::json& data) {
+	api->Playback().GetQueue([self, currentUri](bool ok,
+			const nlohmann::json& data) {
 		if (!ok) return;
 
 		auto parseMs = [](int ms) -> std::string {
@@ -563,7 +565,8 @@ QueueWindow::_LoadRecent()
 	fRecentLoaded = true;
 	BMessenger self(this);
 
-	api->GetRecentlyPlayed(50, [self](bool ok, const nlohmann::json& data) {
+	api->Playback().GetRecentlyPlayed(50, [self](bool ok,
+			const nlohmann::json& data) {
 		if (!ok || !data.contains("items")) return;
 
 		BMessage* msg = new BMessage('rRow');

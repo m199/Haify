@@ -4,6 +4,7 @@
 #include "ArtworkView.h"
 #include "Messages.h"
 #include "NowPlayingFields.h"
+#include "spotify/SpotifyUri.h"
 #include "spotify/api/SpotifyApi.h"
 
 #include <Application.h>
@@ -107,7 +108,7 @@ void EpisodeWindow::_Load()
     if (!api) return;
     BMessenger self(this);
     std::string episodeId = fEpisodeId;
-    api->GetEpisode(fEpisodeId, [self, episodeId](bool ok,
+    api->Content().GetEpisode(fEpisodeId, [self, episodeId](bool ok,
             const nlohmann::json& episode) {
         if (!ok || !episode.is_object()) return;
         BMessage message('eDat');
@@ -115,13 +116,15 @@ void EpisodeWindow::_Load()
             EpisodeJsonString(episode, "name", "Unknown").c_str());
         message.AddString("description",
             EpisodeJsonString(episode, "description").c_str());
-        message.AddString("uri", ("spotify:episode:" + episodeId).c_str());
+        std::string episodeUri = SpotifyUriForItemKind(
+            kSpotifyItemEpisode, episodeId);
+        message.AddString("uri", episodeUri.c_str());
         if (episode.contains("show") && episode["show"].is_object()) {
             message.AddString("show",
                 EpisodeJsonString(episode["show"], "name").c_str());
             std::string showId = EpisodeJsonString(episode["show"], "id");
             message.AddString("show_uri", (!showId.empty()
-                ? "spotify:show:" + showId
+                ? SpotifyUriForItemKind(kSpotifyItemShow, showId)
                 : EpisodeJsonString(episode["show"], "uri")).c_str());
         }
         if (episode.contains("images") && episode["images"].is_array()
@@ -137,7 +140,8 @@ void EpisodeWindow::_Load()
                 EpisodeJsonString(episode["restrictions"], "reason").c_str());
         self.SendMessage(&message);
     });
-    api->CheckLibraryItems({"spotify:episode:" + fEpisodeId},
+    api->Library().CheckLibraryItems(
+        {SpotifyUriForItemKind(kSpotifyItemEpisode, fEpisodeId)},
         [self](bool ok, const nlohmann::json& data) {
             if (!ok || !data.is_array() || data.empty()) return;
             BMessage message('eSts');
@@ -167,7 +171,7 @@ void EpisodeWindow::MessageReceived(BMessage* message)
         {
             std::string uri = message->GetString("uri", "");
             std::string operation = message->GetString("operation", "");
-            if (uri == "spotify:episode:" + fEpisodeId
+            if (uri == SpotifyUriForItemKind(kSpotifyItemEpisode, fEpisodeId)
                     && (operation == "add" || operation == "remove")) {
                 _UpdateSaved(operation == "add");
             }
@@ -214,9 +218,9 @@ void EpisodeWindow::MessageReceived(BMessage* message)
                     play.AddString(kNowPlayingParentUriField,
                         fShowUri.c_str());
                     play.AddString(kNowPlayingParentKindField, "show");
-                    if (fShowUri.find("spotify:show:") == 0) {
+                    if (SpotifyItemKindForUri(fShowUri) == kSpotifyItemShow) {
                         play.AddString(kNowPlayingShowIdField,
-                            fShowUri.substr(13).c_str());
+                            SpotifyItemIdForUri(fShowUri).c_str());
                     }
                 }
                 play.AddString(kNowPlayingItemKindField, "episode");
@@ -235,7 +239,7 @@ void EpisodeWindow::MessageReceived(BMessage* message)
             App* app = dynamic_cast<App*>(be_app);
             SpotifyApi* api = app ? app->GetApi() : nullptr;
             if (api && !fEpisodeUri.empty())
-                api->AddToQueue(fEpisodeUri, nullptr);
+                api->Playback().AddToQueue(fEpisodeUri, nullptr);
             break;
         }
         case 'eSav':
@@ -245,7 +249,8 @@ void EpisodeWindow::MessageReceived(BMessage* message)
             if (!api) break;
             bool target = !fSaved;
             BMessenger self(this);
-            std::string episodeUri = "spotify:episode:" + fEpisodeId;
+            std::string episodeUri = SpotifyUriForItemKind(
+                kSpotifyItemEpisode, fEpisodeId);
             auto done = [self, target, episodeUri](bool ok,
                     const nlohmann::json&) {
                 if (!ok) return;
@@ -258,8 +263,8 @@ void EpisodeWindow::MessageReceived(BMessage* message)
                 be_app->PostMessage(&changed);
             };
             std::vector<std::string> uris = {episodeUri};
-            if (target) api->SaveLibraryItems(uris, done);
-            else api->RemoveLibraryItems(uris, done);
+            if (target) api->Library().SaveLibraryItems(uris, done);
+            else api->Library().RemoveLibraryItems(uris, done);
             break;
         }
         default:

@@ -826,7 +826,8 @@ SettingsWindow::_LoadSpotifyProfile()
 	if (!api)
 		return;
 	BMessenger self(this);
-	api->GetCurrentUserProfile([self](bool ok, const nlohmann::json& profile) {
+	api->Profile().GetCurrentUserProfile([self](bool ok,
+			const nlohmann::json& profile) {
 		BMessage message('spPf');
 		message.AddBool("ok", ok);
 		if (ok && profile.is_object()) {

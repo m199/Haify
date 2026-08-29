@@ -1,5 +1,5 @@
 #include "NowPlayingItem.h"
-#include "UiLogic.h"
+#include "spotify/SpotifyUri.h"
 
 namespace {
 
@@ -11,15 +11,6 @@ JsonString(const nlohmann::json& object, const char* key)
 		return "";
 	}
 	return object[key].get<std::string>();
-}
-
-
-std::string
-SpotifyUri(const char* prefix, const std::string& id)
-{
-	if (id.empty())
-		return "";
-	return std::string(prefix) + id;
 }
 
 
@@ -53,7 +44,8 @@ MapTrackParent(NowPlayingItem& result, const nlohmann::json& item)
 	result.parentKind = "album";
 	result.parentUri = JsonString(album, "uri");
 	if (result.parentUri.empty())
-		result.parentUri = SpotifyUri("spotify:album:", result.albumId);
+		result.parentUri = SpotifyUriForItemKind(kSpotifyItemAlbum,
+			result.albumId);
 	result.primaryOpenUri = result.parentUri;
 }
 
@@ -68,7 +60,7 @@ MapEpisodeParent(NowPlayingItem& result, const nlohmann::json& item)
 		result.parentKind = "audiobook";
 		result.parentUri = JsonString(audiobook, "uri");
 		if (result.parentUri.empty()) {
-			result.parentUri = SpotifyUri("spotify:audiobook:",
+			result.parentUri = SpotifyUriForItemKind(kSpotifyItemAudiobook,
 				result.audiobookId);
 		}
 		result.primaryOpenUri = result.parentUri;
@@ -86,7 +78,8 @@ MapEpisodeParent(NowPlayingItem& result, const nlohmann::json& item)
 		result.parentKind = "show";
 		result.parentUri = JsonString(show, "uri");
 		if (result.parentUri.empty())
-			result.parentUri = SpotifyUri("spotify:show:", result.showId);
+			result.parentUri = SpotifyUriForItemKind(kSpotifyItemShow,
+				result.showId);
 		result.primaryOpenUri = result.parentUri;
 		if (result.imageUrl.empty())
 			result.imageUrl = FirstImageUrl(show);

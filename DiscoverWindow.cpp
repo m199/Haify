@@ -4,7 +4,9 @@
 #include "Messages.h"
 #include "SettingsController.h"
 #include "App.h"
+#include "spotify/SpotifyUri.h"
 #include "spotify/api/SpotifyApi.h"
+#include "spotify/api/SpotifyResponse.h"
 #include <nlohmann/json.hpp>
 #include "TrackContextMenu.h"
 #include "UiLogic.h"
@@ -104,23 +106,20 @@ static const std::vector<ColDef> kTabCols[TAB_COUNT] = {
 static bool
 PrimaryUriMatchesTab(int32 tab, const std::string& uri)
 {
-	const char* prefix = nullptr;
-	switch (tab) {
-		case TAB_PLAYLISTS:
-			return uri == "spotify:collection"
-				|| (uri.find("spotify:playlist:") == 0
-					&& uri.size() > strlen("spotify:playlist:"));
-		case TAB_TOP_TRACKS:       prefix = "spotify:track:"; break;
-		case TAB_TOP_ARTISTS:      prefix = "spotify:artist:"; break;
-		case TAB_NEW_RELEASES:
-		case TAB_SAVED_ALBUMS:     prefix = "spotify:album:"; break;
-		case TAB_PODCASTS:         prefix = "spotify:show:"; break;
-		case TAB_FOLLOWED_ARTISTS: prefix = "spotify:artist:"; break;
-		case TAB_SAVED_EPISODES:   prefix = "spotify:episode:"; break;
-		case TAB_AUDIOBOOKS:       prefix = "spotify:audiobook:"; break;
-		default: return false;
-	}
-	return uri.find(prefix) == 0 && uri.size() > strlen(prefix);
+	SpotifyItemKind kind = SpotifyItemKindForUri(uri);
+	if (tab == TAB_PLAYLISTS && uri == "spotify:collection")
+		return true;
+	if (SpotifyItemIdForUri(uri).empty())
+		return false;
+	if (tab == TAB_TOP_TRACKS) return kind == kSpotifyItemTrack;
+	if (tab == TAB_TOP_ARTISTS || tab == TAB_FOLLOWED_ARTISTS)
+		return kind == kSpotifyItemArtist;
+	if (tab == TAB_NEW_RELEASES || tab == TAB_SAVED_ALBUMS)
+		return kind == kSpotifyItemAlbum;
+	if (tab == TAB_PODCASTS) return kind == kSpotifyItemShow;
+	if (tab == TAB_SAVED_EPISODES) return kind == kSpotifyItemEpisode;
+	if (tab == TAB_AUDIOBOOKS) return kind == kSpotifyItemAudiobook;
+	return tab == TAB_PLAYLISTS && kind == kSpotifyItemPlaylist;
 }
 
 struct RowData {
@@ -236,8 +235,8 @@ WriteDiscoverCacheAsync(const std::string& path, nlohmann::json data)
 static std::string
 PlaylistUri(const std::string& id)
 {
-	return id.find("spotify:playlist:") == 0
-		? id : "spotify:playlist:" + id;
+	return SpotifyItemKindForUri(id) == kSpotifyItemPlaylist
+		? id : SpotifyUriForItemKind(kSpotifyItemPlaylist, id);
 }
 
 
@@ -719,7 +718,7 @@ DiscoverWindow::_HandleLibraryDrop(const std::string& uri)
 	SpotifyApi* api = app ? app->GetApi() : nullptr;
 	if (!api) return;
 	BMessenger self(this);
-	api->CheckLibraryItems({uri}, [self, uri](bool ok,
+	api->Library().CheckLibraryItems({uri}, [self, uri](bool ok,
 			const nlohmann::json& data) {
 		BMessage result('dSts');
 		result.AddString("uri", uri.c_str());
@@ -750,7 +749,7 @@ DiscoverWindow::_HandlePlaylistDrop(const std::string& itemUri,
 		return true;
 	}
 
-	if (targetUri.find("spotify:playlist:") != 0)
+	if (SpotifyItemKindForUri(targetUri) != kSpotifyItemPlaylist)
 		return false;
 	if (!writable) {
 		BAlert* alert = new BAlert("", B_TRANSLATE(
@@ -766,11 +765,11 @@ DiscoverWindow::_HandlePlaylistDrop(const std::string& itemUri,
 
 	BMessenger self(this);
 	std::string playlistId = targetUri.substr(17);
-	api->AddTrackToPlaylist(playlistId, itemUri,
+	api->Playlists().AddTrackToPlaylist(playlistId, itemUri,
 		[self](bool ok, const nlohmann::json& data) {
 			BMessage result('dPlA');
 			result.AddBool("ok", ok);
-			result.AddInt32("status", SpotifyApi::ResponseStatus(data));
+			result.AddInt32("status", SpotifyResponseStatus(data));
 			self.SendMessage(&result);
 		});
 	return true;
@@ -1104,8 +1103,8 @@ DiscoverWindow::MessageReceived(BMessage* message)
 		case 'play':
 		{
 			const char* uri = message->GetString("uri", "");
-			if (uri && (strncmp(uri, "spotify:track:", 14) == 0
-					|| strncmp(uri, "spotify:episode:", 16) == 0)) {
+			if (uri && SpotifyItemIsPlayable(
+					SpotifyItemKindForUri(uri))) {
 				if (fCurrentTrackUri != uri) {
 					fCurrentTrackUri = uri;
 					int32 tab = _LogicalTab(
@@ -1165,8 +1164,8 @@ DiscoverWindow::MessageReceived(BMessage* message)
 			App* app = (App*)be_app;
 			SpotifyApi* api = app->GetApi();
 
-			if (uriStr.find("spotify:track:") == 0
-					|| uriStr.find("spotify:episode:") == 0) {
+			SpotifyItemKind kind = SpotifyItemKindForUri(uriStr);
+			if (SpotifyItemIsPlayable(kind)) {
 				std::string context = sourceTab == TAB_SAVED_EPISODES
 					? "spotify:saved-episodes" : "";
 				bool saved = sourceTab == TAB_SAVED_EPISODES;
@@ -1179,7 +1178,7 @@ DiscoverWindow::MessageReceived(BMessage* message)
 				if (!known && api) {
 					int32 generation = ++fLibraryStateGenerations[uriStr];
 					BMessenger self(this);
-					api->CheckLibraryItems({uriStr},
+					api->Library().CheckLibraryItems({uriStr},
 						[self, uriStr, generation](bool ok,
 								const nlohmann::json& data) {
 							BMessage result(kMsgLibraryStateCached);
@@ -1195,10 +1194,10 @@ DiscoverWindow::MessageReceived(BMessage* message)
 				}
 				::ShowPlayableItemContextMenu(uriStr, context, pt,
 					BMessenger(this), api, false, true, saved);
-			} else if (uriStr.find("spotify:playlist:") == 0) {
-				_ShowPlaylistContextMenu(uriStr.substr(17),
+			} else if (kind == kSpotifyItemPlaylist) {
+				_ShowPlaylistContextMenu(SpotifyItemIdForUri(uriStr),
 					message->GetBool("owned", false), pt);
-			} else if (uriStr.find("spotify:") == 0) {
+			} else if (kind != kSpotifyItemUnknown) {
 				BPopUpMenu* menu = new BPopUpMenu("item", false, false);
 				BMessage* openMsg = new BMessage('open');
 				openMsg->AddString("uri", uriStr.c_str());
@@ -1209,7 +1208,7 @@ DiscoverWindow::MessageReceived(BMessage* message)
 				playMsg->AddString("uri", uriStr.c_str());
 				menu->AddItem(new BMenuItem(B_TRANSLATE("Play"), playMsg));
 
-				if (uriStr.find("spotify:album:") == 0) {
+				if (kind == kSpotifyItemAlbum) {
 					menu->AddSeparatorItem();
 					if (sourceTab == TAB_SAVED_ALBUMS) {
 						BMessage* removeMsg = new BMessage('remA');
@@ -1222,20 +1221,20 @@ DiscoverWindow::MessageReceived(BMessage* message)
 						saveMsg->AddString("uri", uriStr.c_str());
 						menu->AddItem(new BMenuItem(B_TRANSLATE("Save Album"), saveMsg));
 					}
-				} else if ((uriStr.find("spotify:show:") == 0
+				} else if ((kind == kSpotifyItemShow
 							&& sourceTab == TAB_PODCASTS)
-						|| (uriStr.find("spotify:artist:") == 0
+						|| (kind == kSpotifyItemArtist
 							&& sourceTab == TAB_FOLLOWED_ARTISTS)
-						|| (uriStr.find("spotify:audiobook:") == 0
+						|| (kind == kSpotifyItemAudiobook
 							&& sourceTab == TAB_AUDIOBOOKS)) {
 					menu->AddSeparatorItem();
 					BMessage* removeMsg = new BMessage('remI');
 					removeMsg->AddString("uri", uriStr.c_str());
-					const char* label = uriStr.find("spotify:show:") == 0
+					const char* label = kind == kSpotifyItemShow
 						? B_TRANSLATE("Unsubscribe")
-						: uriStr.find("spotify:artist:") == 0
-							? B_TRANSLATE("Unfollow Artist")
-							: B_TRANSLATE("Remove from Audiobooks");
+						: kind == kSpotifyItemArtist
+						? B_TRANSLATE("Unfollow Artist")
+						: B_TRANSLATE("Remove from Audiobooks");
 					menu->AddItem(new BMenuItem(label, removeMsg));
 				}
 
@@ -1321,7 +1320,7 @@ DiscoverWindow::MessageReceived(BMessage* message)
 			SpotifyApi* api = app ? app->GetApi() : nullptr;
 			if (!api) break;
 			BMessenger self(this);
-			api->SaveLibraryItems({uri}, [self, uri](bool ok,
+			api->Library().SaveLibraryItems({uri}, [self, uri](bool ok,
 					const nlohmann::json&) {
 				BMessage result('dAdd');
 				result.AddString("uri", uri.c_str());
@@ -1350,15 +1349,16 @@ DiscoverWindow::MessageReceived(BMessage* message)
 		case 'savA':
 		{
 			const char* uri = message->GetString("uri", "");
-			if (!uri || strncmp(uri, "spotify:album:", 14) != 0)
+			std::string savedUri = uri ? uri : "";
+			std::string albumId = SpotifyItemIdForUri(savedUri);
+			if (SpotifyItemKindForUri(savedUri) != kSpotifyItemAlbum
+					|| albumId.empty())
 				break;
 			App* app = (App*)be_app;
 			SpotifyApi* api = app->GetApi();
 			if (!api)
 				break;
-			std::string albumId = std::string(uri).substr(14);
-			std::string savedUri = uri;
-			api->SaveAlbum(albumId, [savedUri](bool ok,
+			api->Library().SaveAlbum(albumId, [savedUri](bool ok,
 					const nlohmann::json&) {
 				if (ok) PostLibraryChange("add", savedUri);
 			});
@@ -1368,15 +1368,16 @@ DiscoverWindow::MessageReceived(BMessage* message)
 		case 'remA':
 		{
 			const char* uri = message->GetString("uri", "");
-			if (!uri || strncmp(uri, "spotify:album:", 14) != 0)
+			std::string removedUri = uri ? uri : "";
+			std::string albumId = SpotifyItemIdForUri(removedUri);
+			if (SpotifyItemKindForUri(removedUri) != kSpotifyItemAlbum
+					|| albumId.empty())
 				break;
 			App* app = (App*)be_app;
 			SpotifyApi* api = app->GetApi();
 			if (!api)
 				break;
-			std::string albumId = std::string(uri).substr(14);
-			std::string removedUri = uri;
-			api->RemoveSavedAlbum(albumId, [removedUri](bool ok,
+			api->Library().RemoveSavedAlbum(albumId, [removedUri](bool ok,
 					const nlohmann::json&) {
 				if (ok) PostLibraryChange("remove", removedUri);
 			});
@@ -1397,13 +1398,13 @@ DiscoverWindow::MessageReceived(BMessage* message)
 				result.AddString("uri", uri.c_str());
 				self.SendMessage(&result);
 			};
-			std::string id = uri.substr(uri.rfind(':') + 1);
+			std::string id = SpotifyItemIdForUri(uri);
 			if (kind == kSpotifyItemShow)
-				api->UnfollowShow(id, done);
+				api->Library().UnfollowShow(id, done);
 			else if (kind == kSpotifyItemArtist)
-				api->UnfollowArtist(id, done);
+				api->Library().UnfollowArtist(id, done);
 			else if (kind == kSpotifyItemAudiobook)
-				api->RemoveSavedAudiobook(id, done);
+				api->Library().RemoveSavedAudiobook(id, done);
 			break;
 		}
 
@@ -1422,13 +1423,13 @@ DiscoverWindow::MessageReceived(BMessage* message)
 		case 'remL':
 		{
 			const char* uri = message->GetString("trackUri", "");
-			if (!uri || (strncmp(uri, "spotify:track:", 14) != 0
-					&& strncmp(uri, "spotify:episode:", 16) != 0)) break;
+			std::string removedUri = uri ? uri : "";
+			SpotifyItemKind kind = SpotifyItemKindForUri(removedUri);
+			if (!SpotifyItemIsPlayable(kind)) break;
 			App* app = dynamic_cast<App*>(be_app);
 			SpotifyApi* api = app ? app->GetApi() : nullptr;
 			if (!api) break;
-			std::string removedUri = uri;
-			api->RemoveLibraryItems({removedUri}, [removedUri](bool ok,
+			api->Library().RemoveLibraryItems({removedUri}, [removedUri](bool ok,
 					const nlohmann::json&) {
 				if (!ok) return;
 				PostLibraryChange("remove", removedUri);
@@ -1465,8 +1466,8 @@ DiscoverWindow::MessageReceived(BMessage* message)
 			if (!api) break;
 			BMessenger self(this);
 			std::string requestedName = name;
-			api->CreatePlaylist(requestedName, [self, requestedName](bool ok,
-					const nlohmann::json& data) {
+			api->Playlists().CreatePlaylist(requestedName,
+				[self, requestedName](bool ok, const nlohmann::json& data) {
 				BMessage result('plCr');
 				result.AddBool("ok", ok);
 				nlohmann::json created = MutationResponseBody(data);
@@ -1517,7 +1518,7 @@ DiscoverWindow::MessageReceived(BMessage* message)
 			App* app = (App*)be_app;
 			SpotifyApi* api = app->GetApi();
 			if (api) {
-				for (const auto& pl : api->GetCachedPlaylists())
+				for (const auto& pl : api->Playlists().GetCachedPlaylists())
 					if (pl.first == id) { currentName = pl.second; break; }
 			}
 			BMessage confirm('plRc');
@@ -1547,8 +1548,8 @@ DiscoverWindow::MessageReceived(BMessage* message)
 				_UpdatePlaylistRow(row, newName, "", row->fWritable,
 					row->fOwned);
 			}
-			api->RenamePlaylist(sid, newName, [self, sid, oldName, newName](bool ok,
-					const nlohmann::json&) {
+			api->Playlists().RenamePlaylist(sid, newName,
+				[self, sid, oldName, newName](bool ok, const nlohmann::json&) {
 				BMessage result('plRr');
 				result.AddBool("ok", ok);
 				result.AddString("id", sid.c_str());
@@ -1614,7 +1615,7 @@ DiscoverWindow::MessageReceived(BMessage* message)
 						fLists[TAB_PLAYLISTS]->RemoveRow(row);
 						fPendingPlaylistRemovals[sid] = pending;
 					}
-					api->UnfollowPlaylist(sid, [self, sid](bool ok,
+					api->Playlists().UnfollowPlaylist(sid, [self, sid](bool ok,
 							const nlohmann::json&) {
 						BMessage result('plDr');
 						result.AddBool("ok", ok);
@@ -2079,16 +2080,25 @@ DiscoverWindow::_ApplyLibraryChange(BMessage* message)
 	std::string operation = message->GetString("operation", "");
 	std::string uri = message->GetString("uri", "");
 	int32 tab = -1;
-	if (uri.find("spotify:album:") == 0)
-		tab = TAB_SAVED_ALBUMS;
-	else if (uri.find("spotify:show:") == 0)
-		tab = TAB_PODCASTS;
-	else if (uri.find("spotify:artist:") == 0)
-		tab = TAB_FOLLOWED_ARTISTS;
-	else if (uri.find("spotify:episode:") == 0)
-		tab = TAB_SAVED_EPISODES;
-	else if (uri.find("spotify:audiobook:") == 0)
-		tab = TAB_AUDIOBOOKS;
+	switch (SpotifyItemKindForUri(uri)) {
+		case kSpotifyItemAlbum:
+			tab = TAB_SAVED_ALBUMS;
+			break;
+		case kSpotifyItemShow:
+			tab = TAB_PODCASTS;
+			break;
+		case kSpotifyItemArtist:
+			tab = TAB_FOLLOWED_ARTISTS;
+			break;
+		case kSpotifyItemEpisode:
+			tab = TAB_SAVED_EPISODES;
+			break;
+		case kSpotifyItemAudiobook:
+			tab = TAB_AUDIOBOOKS;
+			break;
+		default:
+			break;
+	}
 	if (tab < 0 || !fLists[tab])
 		return;
 	int32 generation = ++fLibraryChangeGenerations[uri];
@@ -2253,7 +2263,7 @@ DiscoverWindow::_ResolveLibraryAddition(int32 tab, const std::string& uri,
 				showName = JsonString(item["show"], "name");
 				std::string showId = JsonString(item["show"], "id");
 				showUri = showId.empty() ? JsonString(item["show"], "uri")
-					: "spotify:show:" + showId;
+					: SpotifyUriForItemKind(kSpotifyItemShow, showId);
 			}
 			std::string progress;
 			if (showProgress && item.contains("resume_point")
@@ -2293,15 +2303,15 @@ DiscoverWindow::_ResolveLibraryAddition(int32 tab, const std::string& uri,
 	};
 
 	if (tab == TAB_SAVED_ALBUMS)
-		api->GetAlbum(id, done);
+		api->Content().GetAlbum(id, done);
 	else if (tab == TAB_PODCASTS)
-		api->GetShow(id, done);
+		api->Content().GetShow(id, done);
 	else if (tab == TAB_FOLLOWED_ARTISTS)
-		api->GetArtist(id, done);
+		api->Artists().GetArtist(id, done);
 	else if (tab == TAB_SAVED_EPISODES)
-		api->GetEpisode(id, done);
+		api->Content().GetEpisode(id, done);
 	else if (tab == TAB_AUDIOBOOKS)
-		api->GetAudiobook(id, done);
+		api->Content().GetAudiobook(id, done);
 }
 
 
@@ -2393,7 +2403,7 @@ DiscoverWindow::_ApplyPlaylistChange(BMessage* message)
 	std::string uri = message->GetString("uri", "");
 	if (uri.empty())
 		uri = PlaylistUri(id);
-	if (uri.empty() || uri == "spotify:playlist:")
+	if (uri.empty() || uri == SpotifyItemUriPrefix(kSpotifyItemPlaylist))
 		return;
 	fPlaylistSyncGeneration++;
 	fLoadTime[TAB_PLAYLISTS] = system_time();
@@ -2465,8 +2475,9 @@ DiscoverWindow::_ApplyPlaylistSnapshot(BMessage* message)
 		std::string playlistUri = uri ? uri : "";
 		if (playlistUri.empty())
 			continue;
-		std::string id = playlistUri.find("spotify:playlist:") == 0
-			? playlistUri.substr(17) : "";
+		std::string id = SpotifyItemKindForUri(playlistUri)
+			== kSpotifyItemPlaylist
+			? SpotifyItemIdForUri(playlistUri) : "";
 		serverUris.insert(playlistUri);
 		if (!id.empty() && fPendingPlaylistRemovals.find(id)
 				!= fPendingPlaylistRemovals.end())
@@ -2514,7 +2525,7 @@ DiscoverWindow::ReloadPlaylists()
 	std::string accountId = settings.spotifyAccountId;
 	int32 generation = ++fPlaylistSyncGeneration;
 	BMessenger self(this);
-	api->GetPlaylists([self, accountId, generation](bool ok,
+	api->Playlists().GetPlaylists([self, accountId, generation](bool ok,
 			const nlohmann::json& data) {
 		if (!ok || !data.contains("items") || !data["items"].is_array())
 			return;
@@ -2557,14 +2568,18 @@ DiscoverWindow::_InvalidateTabCache(int32 tab)
 	if (!api)
 		return;
 	switch (tab) {
-		case TAB_TOP_TRACKS: api->InvalidateCachePrefix("/me/top/tracks"); break;
-		case TAB_TOP_ARTISTS: api->InvalidateCachePrefix("/me/top/artists"); break;
-		case TAB_NEW_RELEASES: api->InvalidateCachePrefix("/search?q=tag%3Anew"); break;
-		case TAB_SAVED_ALBUMS: api->InvalidateCachePrefix("/me/albums"); break;
-		case TAB_PODCASTS: api->InvalidateCachePrefix("/me/shows"); break;
-		case TAB_FOLLOWED_ARTISTS: api->InvalidateCachePrefix("/me/following"); break;
-		case TAB_SAVED_EPISODES: api->InvalidateCachePrefix("/me/episodes"); break;
-		case TAB_AUDIOBOOKS: api->InvalidateCachePrefix("/me/audiobooks"); break;
+		case TAB_TOP_TRACKS: api->Content().InvalidateTopItems("tracks"); break;
+		case TAB_TOP_ARTISTS: api->Content().InvalidateTopItems("artists"); break;
+		case TAB_NEW_RELEASES: api->Content().InvalidateNewReleases(); break;
+		case TAB_SAVED_ALBUMS: api->Library().InvalidateSavedAlbums(); break;
+		case TAB_PODCASTS: api->Library().InvalidateSavedShows(); break;
+		case TAB_FOLLOWED_ARTISTS:
+			api->Library().InvalidateFollowedArtists();
+			break;
+		case TAB_SAVED_EPISODES:
+			api->Library().InvalidateSavedEpisodes();
+			break;
+		case TAB_AUDIOBOOKS: api->Library().InvalidateSavedAudiobooks(); break;
 		default: break;
 	}
 }
@@ -2655,7 +2670,8 @@ DiscoverWindow::_LoadTab(int32 tab, bool nextPage)
 		}
 
 		case TAB_TOP_TRACKS:
-			api->GetTopItems("tracks", 20, [send](bool ok, const nlohmann::json& data) {
+			api->Content().GetTopItems("tracks", 20, [send](bool ok,
+					const nlohmann::json& data) {
 				if (!ok || !data.contains("items")) return;
 				std::vector<RowData> rows;
 				for (const auto& item : data["items"]) {
@@ -2676,7 +2692,8 @@ DiscoverWindow::_LoadTab(int32 tab, bool nextPage)
 			break;
 
 		case TAB_TOP_ARTISTS:
-			api->GetTopItems("artists", 20, [send](bool ok, const nlohmann::json& data) {
+			api->Content().GetTopItems("artists", 20, [send](bool ok,
+					const nlohmann::json& data) {
 				if (!ok || !data.contains("items")) return;
 				std::vector<RowData> rows;
 				for (const auto& item : data["items"]) {
@@ -2695,7 +2712,8 @@ DiscoverWindow::_LoadTab(int32 tab, bool nextPage)
 			break;
 
 		case TAB_NEW_RELEASES:
-			api->GetNewReleases(20, [send](bool ok, const nlohmann::json& data) {
+			api->Content().GetNewReleases(20, [send](bool ok,
+					const nlohmann::json& data) {
 				if (!ok || !data.contains("albums")
 				        || !data["albums"].contains("items")) return;
 				std::vector<RowData> rows;
@@ -2717,7 +2735,8 @@ DiscoverWindow::_LoadTab(int32 tab, bool nextPage)
 			break;
 
 		case TAB_SAVED_ALBUMS:
-			api->GetSavedAlbums(20, [send](bool ok, const nlohmann::json& data) {
+			api->Library().GetSavedAlbums(20, [send](bool ok,
+					const nlohmann::json& data) {
 				if (!ok || !data.contains("items")) return;
 				std::vector<RowData> rows;
 				for (const auto& item : data["items"]) {
@@ -2750,7 +2769,7 @@ DiscoverWindow::_LoadTab(int32 tab, bool nextPage)
 						ids.AddString("audiobook_id", id.c_str());
 					messenger.SendMessage(&ids);
 				}
-				api->GetSavedShows(20, [send, audiobookIds](bool ok,
+				api->Library().GetSavedShows(20, [send, audiobookIds](bool ok,
 						const nlohmann::json& data) {
 					if (!ok || !data.contains("items")
 							|| !data["items"].is_array()) return;
@@ -2776,8 +2795,9 @@ DiscoverWindow::_LoadTab(int32 tab, bool nextPage)
 					send(rows);
 				});
 			};
-			api->GetAllSavedAudiobooks([loadShows, cachedAudiobookIds](bool ok,
-					const nlohmann::json& books) {
+			api->Library().GetAllSavedAudiobooks(
+				[loadShows, cachedAudiobookIds](bool ok,
+						const nlohmann::json& books) {
 				if (!ok || !books.is_array()) {
 					loadShows(cachedAudiobookIds, false);
 					return;
@@ -2801,14 +2821,14 @@ DiscoverWindow::_LoadTab(int32 tab, bool nextPage)
 		{
 			fPageLoading[tab] = true;
 			std::string after = fPageCursor[tab];
-			api->GetFollowedArtists(after, 50,
+			api->Artists().GetFollowedArtists(after, 50,
 				[send, messenger, loadGeneration](bool ok,
 						const nlohmann::json& data) {
 					BMessage done(kMsgPageDone);
 					done.AddInt32("tab", TAB_FOLLOWED_ARTISTS);
 					done.AddInt32("load_generation", loadGeneration);
 					if (!ok) {
-						if (SpotifyApi::ResponseStatus(data) == 403)
+						if (SpotifyResponseStatus(data) == 403)
 							send({{{B_TRANSLATE("Permission to read followed artists is missing"),
 								B_TRANSLATE("Reconnect Spotify in Settings")},
 								{"", ""}, {"", ""}}});
@@ -2869,7 +2889,7 @@ DiscoverWindow::_LoadTab(int32 tab, bool nextPage)
 				"user-read-playback-position") != std::string::npos;
 			fPageLoading[tab] = true;
 			int32 offset = fPageOffset[tab];
-			api->GetSavedEpisodes(offset, 50,
+			api->Library().GetSavedEpisodes(offset, 50,
 				[send, messenger, offset, showProgress, loadGeneration](bool ok,
 						const nlohmann::json& data) {
 					BMessage done(kMsgPageDone);
@@ -2892,12 +2912,13 @@ DiscoverWindow::_LoadTab(int32 tab, bool nextPage)
 						if (episode.contains("show") && episode["show"].is_object()) {
 							showName = JsonString(episode["show"], "name");
 							std::string showId = JsonString(episode["show"], "id");
-							showUri = !showId.empty() ? "spotify:show:" + showId
+							showUri = !showId.empty()
+								? SpotifyUriForItemKind(kSpotifyItemShow, showId)
 								: JsonString(episode["show"], "uri");
 						}
 						std::string episodeId = JsonString(episode, "id");
 						std::string episodeUri = !episodeId.empty()
-							? "spotify:episode:" + episodeId
+							? SpotifyUriForItemKind(kSpotifyItemEpisode, episodeId)
 							: JsonString(episode, "uri");
 						if (!PrimaryUriMatchesTab(TAB_SAVED_EPISODES,
 								episodeUri))
@@ -2935,7 +2956,7 @@ DiscoverWindow::_LoadTab(int32 tab, bool nextPage)
 		{
 			fPageLoading[tab] = true;
 			int32 offset = fPageOffset[tab];
-			api->GetSavedAudiobooks(offset, 50,
+			api->Library().GetSavedAudiobooks(offset, 50,
 				[send, messenger, offset, loadGeneration](bool ok,
 						const nlohmann::json& data) {
 					BMessage done(kMsgPageDone);
@@ -2953,7 +2974,8 @@ DiscoverWindow::_LoadTab(int32 tab, bool nextPage)
 						if (JsonString(book, "type") != "audiobook") continue;
 						std::string id = JsonString(book, "id");
 						std::string uri = !id.empty()
-							? "spotify:audiobook:" + id : JsonString(book, "uri");
+							? SpotifyUriForItemKind(kSpotifyItemAudiobook, id)
+							: JsonString(book, "uri");
 						if (!PrimaryUriMatchesTab(TAB_AUDIOBOOKS, uri))
 							continue;
 						std::string author;

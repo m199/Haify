@@ -1,20 +1,12 @@
 #pragma once
 
+#include "spotify/SpotifyUri.h"
+#include "spotify/SpotifyPlaylistPolicy.h"
+
 #include <algorithm>
 #include <set>
 #include <string>
 #include <vector>
-
-enum SpotifyItemKind {
-	kSpotifyItemUnknown = 0,
-	kSpotifyItemTrack,
-	kSpotifyItemEpisode,
-	kSpotifyItemAlbum,
-	kSpotifyItemShow,
-	kSpotifyItemArtist,
-	kSpotifyItemAudiobook,
-	kSpotifyItemPlaylist
-};
 
 enum PlaylistDropAction {
 	kPlaylistDropIgnore = 0,
@@ -46,101 +38,12 @@ enum NowPlayingSubtitleClickAction {
 };
 
 inline SpotifyItemKind
-SpotifyItemKindForUri(const std::string& uri)
-{
-	if (uri.find("spotify:track:") == 0) return kSpotifyItemTrack;
-	if (uri.find("spotify:episode:") == 0) return kSpotifyItemEpisode;
-	if (uri.find("spotify:album:") == 0) return kSpotifyItemAlbum;
-	if (uri.find("spotify:show:") == 0) return kSpotifyItemShow;
-	if (uri.find("spotify:artist:") == 0) return kSpotifyItemArtist;
-	if (uri.find("spotify:audiobook:") == 0) return kSpotifyItemAudiobook;
-	if (uri.find("spotify:playlist:") == 0) return kSpotifyItemPlaylist;
-	return kSpotifyItemUnknown;
-}
-
-inline SpotifyItemKind
-SpotifyItemKindForTypeName(const std::string& typeName)
-{
-	if (typeName == "track") return kSpotifyItemTrack;
-	if (typeName == "episode") return kSpotifyItemEpisode;
-	if (typeName == "album") return kSpotifyItemAlbum;
-	if (typeName == "show") return kSpotifyItemShow;
-	if (typeName == "artist") return kSpotifyItemArtist;
-	if (typeName == "audiobook") return kSpotifyItemAudiobook;
-	if (typeName == "playlist") return kSpotifyItemPlaylist;
-	return kSpotifyItemUnknown;
-}
-
-inline std::string
-SpotifyItemIdForUri(const std::string& uri)
-{
-	if (SpotifyItemKindForUri(uri) == kSpotifyItemUnknown)
-		return "";
-	size_t separator = uri.rfind(':');
-	if (separator == std::string::npos || separator + 1 >= uri.size())
-		return "";
-	return uri.substr(separator + 1);
-}
-
-inline SpotifyItemKind
 SpotifyEffectiveItemKind(SpotifyItemKind apiKind, const std::string& id,
 	const std::set<std::string>& audiobookIds)
 {
 	if (!id.empty() && audiobookIds.find(id) != audiobookIds.end())
 		return kSpotifyItemAudiobook;
 	return apiKind;
-}
-
-inline const char*
-SpotifyItemTypeName(SpotifyItemKind kind)
-{
-	switch (kind) {
-		case kSpotifyItemTrack: return "track";
-		case kSpotifyItemEpisode: return "episode";
-		case kSpotifyItemAlbum: return "album";
-		case kSpotifyItemShow: return "show";
-		case kSpotifyItemArtist: return "artist";
-		case kSpotifyItemAudiobook: return "audiobook";
-		case kSpotifyItemPlaylist: return "playlist";
-		default: return "unknown";
-	}
-}
-
-inline const char*
-SpotifyLibraryTargetId(SpotifyItemKind kind)
-{
-	switch (kind) {
-		case kSpotifyItemTrack: return "playlists";
-		case kSpotifyItemEpisode: return "saved_episodes";
-		case kSpotifyItemAlbum: return "saved_albums";
-		case kSpotifyItemShow: return "podcasts";
-		case kSpotifyItemArtist: return "followed_artists";
-		case kSpotifyItemAudiobook: return "audiobooks";
-		case kSpotifyItemPlaylist: return "playlists";
-		default: return "";
-	}
-}
-
-inline bool
-SpotifyItemCanAddToPlaylist(SpotifyItemKind kind)
-{
-	return kind == kSpotifyItemTrack || kind == kSpotifyItemEpisode;
-}
-
-inline bool
-SpotifyItemIsPlayable(SpotifyItemKind kind)
-{
-	return kind == kSpotifyItemTrack || kind == kSpotifyItemEpisode;
-}
-
-inline bool
-SpotifyPlaylistIsWritable(bool collaborative,
-	const std::string& ownerAccountId, const std::string& ownerLegacyId,
-	const std::string& currentAccountId)
-{
-	return collaborative || (!currentAccountId.empty()
-		&& (ownerAccountId == currentAccountId
-			|| ownerLegacyId == currentAccountId));
 }
 
 inline bool
@@ -222,8 +125,8 @@ ShouldPreserveCurrentAudiobookContext(bool optimistic, bool trackChanged,
 	return !optimistic && !trackChanged && hasTrackUri
 		&& currentParentKind == "audiobook"
 		&& reportedParentKind != "audiobook"
-		&& currentOpenUri.find("spotify:audiobook:") == 0
-		&& reportedOpenUri.find("spotify:audiobook:") != 0;
+		&& SpotifyItemKindForUri(currentOpenUri) == kSpotifyItemAudiobook
+		&& SpotifyItemKindForUri(reportedOpenUri) != kSpotifyItemAudiobook;
 }
 
 inline bool
@@ -246,15 +149,6 @@ ShouldDeferOptimisticPlaybackPoll(bool optimistic, bool guardActive,
 		return true;
 	return hasReportedTrackUri && currentTrackUri != reportedTrackUri
 		&& optimisticSourceTrackUri == reportedTrackUri;
-}
-
-inline bool
-SpotifyPlaybackContextSupportsOffset(const std::string& itemUri,
-	const std::string& contextUri)
-{
-	return itemUri.find("spotify:track:") == 0
-		&& (contextUri.find("spotify:album:") == 0
-			|| contextUri.find("spotify:playlist:") == 0);
 }
 
 inline NowPlayingTitleClickAction

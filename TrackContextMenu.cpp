@@ -1,5 +1,6 @@
 #include "TrackContextMenu.h"
 #include "Messages.h"
+#include "spotify/SpotifyUri.h"
 #include "spotify/api/SpotifyApi.h"
 
 #include <Application.h>
@@ -25,7 +26,7 @@ public:
     {
         if (!fBuilt) {
             fBuilt = true;
-            auto playlists = fApi ? fApi->GetCachedPlaylists()
+            auto playlists = fApi ? fApi->Playlists().GetCachedPlaylists()
                 : std::vector<std::pair<std::string, std::string>>();
             for (const auto& playlist : playlists) {
                 BMessage* addMessage = new BMessage('addP');
@@ -55,9 +56,10 @@ ShowPlayableItemContextMenu(const std::string& itemUri,
     SpotifyApi* api, bool libraryOnly, bool libraryStateKnown, bool saved)
 {
     if (itemUri.empty()) return;
-    bool isTrack = itemUri.find("spotify:track:") == 0;
-    bool isEpisode = itemUri.find("spotify:episode:") == 0;
-    if (!isTrack && !isEpisode) return;
+    SpotifyItemKind itemKind = SpotifyItemKindForUri(itemUri);
+    if (!SpotifyItemIsPlayable(itemKind)) return;
+    bool isTrack = itemKind == kSpotifyItemTrack;
+    bool isEpisode = itemKind == kSpotifyItemEpisode;
 
     bool explicitSavedContext = (isTrack && contextUri == "spotify:collection")
         || (isEpisode && contextUri == "spotify:saved-episodes");
@@ -66,8 +68,8 @@ ShowPlayableItemContextMenu(const std::string& itemUri,
         saved = true;
     }
     if (!libraryStateKnown && api) {
-        api->CheckLibraryItems({itemUri}, [itemUri, contextUri, screenPt, win,
-            libraryOnly](bool ok, const nlohmann::json& data) {
+        api->Library().CheckLibraryItems({itemUri}, [itemUri, contextUri,
+            screenPt, win, libraryOnly](bool ok, const nlohmann::json& data) {
             BMessage result('iCmR');
             result.AddString("uri", itemUri.c_str());
             result.AddString("context_uri", contextUri.c_str());
@@ -112,9 +114,9 @@ ShowPlayableItemContextMenu(const std::string& itemUri,
             : B_TRANSLATE("Save Episode"), saveMessage));
     }
 
-    if (api && contextUri.find("spotify:playlist:") == 0) {
-        std::string playlistId = contextUri.substr(17);
-        for (const auto& playlist : api->GetCachedPlaylists()) {
+    if (api && SpotifyItemKindForUri(contextUri) == kSpotifyItemPlaylist) {
+        std::string playlistId = SpotifyItemIdForUri(contextUri);
+        for (const auto& playlist : api->Playlists().GetCachedPlaylists()) {
             if (playlist.first == playlistId) {
                 BMessage* removeMessage = new BMessage('remT');
                 removeMessage->AddString("trackUri", itemUri.c_str());
@@ -135,12 +137,12 @@ ShowPlayableItemContextMenu(const std::string& itemUri,
         BMessage* message = selected->Message();
         switch (message->what) {
             case 'addQ':
-                if (api) api->AddToQueue(itemUri, nullptr);
+                if (api) api->Playback().AddToQueue(itemUri, nullptr);
                 break;
             case 'likT':
                 if (api) {
-                    api->SaveLibraryItems({itemUri}, [itemUri](bool ok,
-                            const nlohmann::json&) {
+                    api->Library().SaveLibraryItems({itemUri}, [itemUri](
+                            bool ok, const nlohmann::json&) {
                         if (!ok)
                             return;
                         BMessage changed(MSG_LIBRARY_CHANGED);
@@ -154,7 +156,8 @@ ShowPlayableItemContextMenu(const std::string& itemUri,
                 if (api) {
                     const char* playlistId = message->GetString("playlistId", "");
                     if (*playlistId)
-                        api->AddTrackToPlaylist(playlistId, itemUri, nullptr);
+                        api->Playlists().AddTrackToPlaylist(playlistId,
+                            itemUri, nullptr);
                 }
                 break;
             default:

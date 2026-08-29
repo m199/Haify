@@ -32,6 +32,7 @@ private:
 	ArtworkView*			fArtworkView	= nullptr;
 	BStringView*			fNameView		= nullptr;
 	BStringView*			fFollowersView	= nullptr;
+	BStringView*			fTracksLabel	= nullptr;
 	BButton*				fFollowButton	= nullptr;
 	BMessageRunner*			fTopTracksRetryRunner = nullptr;
 	bool					fFollowing		= false;
