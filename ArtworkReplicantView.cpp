@@ -518,32 +518,42 @@ ArtworkReplicantView::_ForwardMessage(BMessage* message)
 
 
 void
+ArtworkReplicantView::_ApplyReplicantStateMessage(BMessage* message)
+{
+    if (!fRegistered)
+        _Register();
+    fTitle = message->GetString("title", "");
+    fArtist = message->GetString("artist", "");
+    const char* openUri = message->GetString(
+        kNowPlayingPrimaryOpenUriField, "");
+    if (!openUri || !openUri[0])
+        openUri = message->GetString("track_uri", "");
+    fOpenUri = openUri;
+    _ApplyAppearance(message);
+    SetArtworkUrl(message->GetString("artwork_url", ""));
+}
+
+
+void
+ArtworkReplicantView::_RetryRegister()
+{
+    if ((fIsReplicant || fRegisterForUpdates)
+            && (!fRegistered || !fTarget.IsValid()))
+        _Register();
+}
+
+
+void
 ArtworkReplicantView::MessageReceived(BMessage* message)
 {
     switch (message->what) {
         case MSG_REPLICANT_STATE:
-        {
-            if (!fRegistered)
-                _Register();
-            fTitle = message->GetString("title", "");
-            fArtist = message->GetString("artist", "");
-            const char* openUri = message->GetString(
-                kNowPlayingPrimaryOpenUriField, "");
-            if (!openUri || !openUri[0])
-                openUri = message->GetString("track_uri", "");
-            fOpenUri = openUri;
-            _ApplyAppearance(message);
-            SetArtworkUrl(message->GetString("artwork_url", ""));
+            _ApplyReplicantStateMessage(message);
             break;
-        }
 
         case kMsgRegisterRetry:
-        {
-            if ((fIsReplicant || fRegisterForUpdates)
-                    && (!fRegistered || !fTarget.IsValid()))
-                _Register();
+            _RetryRegister();
             break;
-        }
 
         case kMsgReloadArtwork:
             _RequestArtwork(true);

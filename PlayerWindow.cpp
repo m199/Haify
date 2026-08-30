@@ -130,6 +130,41 @@ _FillPlaybackPollMessage(BMessage& message, bool ok,
 }
 
 
+static bool
+_JsonBoolOrDefault(const nlohmann::json& object, const char* key,
+	bool fallback)
+{
+	if (!object.contains(key) || !object[key].is_boolean())
+		return fallback;
+	return object[key].get<bool>();
+}
+
+
+static void
+_AddMuteToggleDeviceFields(BMessage& message, const nlohmann::json& data)
+{
+	if (!data.is_object() || !data.contains("device")
+			|| !data["device"].is_object()) {
+		return;
+	}
+
+	const auto& device = data["device"];
+	if (device.contains("id") && device["id"].is_string()) {
+		std::string deviceId = device["id"].get<std::string>();
+		message.AddString("device_id", deviceId.c_str());
+	}
+	if (device.contains("volume_percent")
+			&& device["volume_percent"].is_number()) {
+		message.AddInt32("volume_percent",
+			(int32)device["volume_percent"].get<int>());
+	}
+	message.AddBool("supports_volume",
+		_JsonBoolOrDefault(device, "supports_volume", true));
+	message.AddBool("is_restricted",
+		_JsonBoolOrDefault(device, "is_restricted", false));
+}
+
+
 PlayerWindow::PlayerWindow()
 	: BWindow(BRect(200, 100,
 		200 + kDefaultPlayerWindowWidth,
@@ -988,479 +1023,637 @@ PlayerWindow::_RemoveCurrentTrackFromLikedSongs(const std::string& trackUri)
 
 
 void
-PlayerWindow::MessageReceived(BMessage* message)
+PlayerWindow::_ApplyPlaybackPollResult(BMessage* message)
+{
+	fPlaybackRequestPending = false;
+	if (message->GetBool("poll_ok", false)) {
+		fPendingLibrespotTrack.MakeEmpty();
+		fHasPendingLibrespotTrack = false;
+		fPlaybackPollFailures = 0;
+		bool hadPlaybackState = fHasPlaybackState;
+		bool hasItem = message->GetBool("has_item", false);
+		bool retryStartupEmptyPoll =
+			ShouldRetryStartupEmptyPlaybackPoll(hasItem, hadPlaybackState,
+				system_time(), fStartupEmptyPlaybackRetryUntilUs);
+		if (retryStartupEmptyPoll) {
+			_SchedulePlaybackPoll(kPlaybackStartupPollInterval);
+			return;
+		}
+		if (hasItem) {
+			fHasPlaybackState = true;
+			fStartupEmptyPlaybackRetryUntilUs = 0;
+		} else {
+			message->AddString("title", B_TRANSLATE("Nothing is playing"));
+		}
+		_ApplyPlaybackMessage(message);
+		bigtime_t delay = message->GetBool("is_playing", false)
+			? kPlaybackActivePollInterval : kPlaybackIdlePollInterval;
+		_SchedulePlaybackPoll(delay);
+	} else {
+		fPlaybackPollFailures++;
+		int32 retryAfter = message->GetInt32("retry_after", -1);
+		int32 shift = std::min(fPlaybackPollFailures - 1, (int32)5);
+		bigtime_t delay = retryAfter > 0
+			? (bigtime_t)retryAfter * 1000000LL
+			: kPlaybackStartupPollInterval << shift;
+		bigtime_t limit = fHasPlaybackState
+			? kPlaybackErrorPollLimit : kPlaybackStartupPollLimit;
+		if (retryAfter <= 0 && delay > limit)
+			delay = limit;
+		_SchedulePlaybackPoll(delay);
+	}
+}
+
+
+void
+PlayerWindow::_ApplyAudiobookContextResult(BMessage* message)
+{
+	const char* sourceTrackUri = message->GetString("source_track_uri", "");
+	if (!sourceTrackUri || fAudiobookContextRequestTrackUri != sourceTrackUri)
+		return;
+	fAudiobookContextRequestPending = false;
+	fAudiobookContextRequestTrackUri.clear();
+	if (!message->GetBool("ok", false) || fCurrentTrackUri != sourceTrackUri)
+		return;
+
+	const char* openUri = message->GetString(
+		kNowPlayingPrimaryOpenUriField, "");
+	const char* parentKind = message->GetString(
+		kNowPlayingParentKindField, "");
+	std::string openUriString = openUri ? openUri : "";
+	if (SpotifyItemKindForUri(openUriString) != kSpotifyItemAudiobook
+			|| !parentKind || strcmp(parentKind, "audiobook") != 0) {
+		return;
+	}
+
+	message->AddBool("is_playing", fIsPlaying);
+	message->AddInt32("progress_ms", fProgressMs);
+	if (fVolumePct >= 0)
+		message->AddInt32("volume_percent", fVolumePct);
+	message->AddString("repeat_state", fRepeatState.c_str());
+	message->AddBool("shuffle_state", fShuffleOn);
+	_ApplyPlaybackMessage(message);
+}
+
+
+void
+PlayerWindow::_ApplyQueuePrediction(BMessage* message)
+{
+	fQueueRequestPending = false;
+	const char* trackUri = message->GetString("source_track_uri", "");
+	if (trackUri && fCurrentTrackUri == trackUri
+			&& message->GetBool("has_next", false)) {
+		fPredictedNext = *message;
+		fPredictedNext.RemoveName("has_next");
+		fHasPredictedNext = true;
+		fQueueTrackUri = trackUri;
+		_HandlePlaybackTick();
+	} else if (fIsPlaying && trackUri && fCurrentTrackUri != trackUri) {
+		_FetchQueuePrediction();
+	}
+}
+
+
+void
+PlayerWindow::_ApplyVerifyPoll()
+{
+	delete fVerifyTimer;
+	fVerifyTimer = nullptr;
+	_PollPlayback();
+}
+
+
+void
+PlayerWindow::_TogglePlayPause()
+{
+	App* app = (App*)be_app;
+	SpotifyApi* api = app->GetApi();
+	if (!api)
+		return;
+	bool wasPlaying = fIsPlaying;
+	if (fPlayerBar)
+		fPlayerBar->SetPlaying(!wasPlaying);
+	fIsPlaying = !wasPlaying;
+	fLastPlaybackSyncUs = system_time();
+	if (wasPlaying)
+		api->Playback().Pause(nullptr);
+	else
+		api->Playback().Play(nullptr);
+}
+
+
+void
+PlayerWindow::_SkipNextTrack()
+{
+	App* app = (App*)be_app;
+	SpotifyApi* api = app->GetApi();
+	if (!api)
+		return;
+	api->Playback().Next(nullptr);
+	if (fHasPredictedNext)
+		_ApplyPredictedNext();
+	else
+		_ScheduleVerifyPoll(kVerifyPollDelay);
+}
+
+
+void
+PlayerWindow::_SkipPreviousTrack()
+{
+	App* app = (App*)be_app;
+	SpotifyApi* api = app->GetApi();
+	if (!api)
+		return;
+	api->Playback().Previous(nullptr);
+	fHasPredictedNext = false;
+	fQueueTrackUri.clear();
+	_ScheduleVerifyPoll(kVerifyPollDelay);
+}
+
+
+void
+PlayerWindow::_SetVolumeFromMessage(BMessage* message)
+{
+	App* app = (App*)be_app;
+	SpotifyApi* api = app->GetApi();
+	int32 volume = 0;
+	if (message->FindInt32("be:value", &volume) != B_OK)
+		return;
+	if (volume < 0)
+		volume = 0;
+	if (volume > 100)
+		volume = 100;
+	_SetVolumeOptimistically(volume);
+	if (api)
+		api->Playback().SetVolume((int)volume, nullptr);
+}
+
+
+void
+PlayerWindow::_ToggleMute()
+{
+	App* app = (App*)be_app;
+	SpotifyApi* api = app->GetApi();
+	if (!api)
+		return;
+
+	if (_RestoreMutedVolumeIfNeeded(api))
+		return;
+
+	BMessenger self(this);
+	api->Playback().GetPlaybackState([self](bool ok,
+			const nlohmann::json& data) {
+		BMessage toggle(kMsgApplyMuteToggle);
+		toggle.AddBool("ok", ok);
+		if (ok)
+			_AddMuteToggleDeviceFields(toggle, data);
+		self.SendMessage(&toggle);
+	});
+}
+
+
+bool
+PlayerWindow::_RestoreMutedVolumeIfNeeded(SpotifyApi* api)
+{
+	if (!fMutedByHaify || fVolumePct != 0 || !fHasLastNonZeroVolume)
+		return false;
+
+	int32 targetVolume = fLastNonZeroVolume;
+	if (targetVolume <= 0)
+		targetVolume = 50;
+	if (targetVolume > 100)
+		targetVolume = 100;
+
+	_SetVolumeOptimistically(targetVolume);
+	api->Playback().SetVolume((int)targetVolume, nullptr, fVolumeDeviceId);
+	return true;
+}
+
+
+void
+PlayerWindow::_ApplyMuteToggle(BMessage* message)
+{
+	if (!message->GetBool("ok", false)
+			|| !message->GetBool("supports_volume", true)
+			|| message->GetBool("is_restricted", false)) {
+		return;
+	}
+
+	int32 currentVolume = -1;
+	if (message->FindInt32("volume_percent", &currentVolume) != B_OK)
+		return;
+	if (currentVolume < 0)
+		return;
+	if (currentVolume > 100)
+		currentVolume = 100;
+	fVolumeDeviceId = message->GetString("device_id", "");
+
+	int32 targetVolume = 0;
+	if (currentVolume > 0) {
+		fLastNonZeroVolume = currentVolume;
+		fHasLastNonZeroVolume = true;
+	} else {
+		targetVolume = fHasLastNonZeroVolume ? fLastNonZeroVolume : 50;
+	}
+	if (targetVolume < 0)
+		targetVolume = 0;
+	if (targetVolume > 100)
+		targetVolume = 100;
+
+	_SetVolumeOptimistically(targetVolume);
+
+	App* app = (App*)be_app;
+	SpotifyApi* api = app->GetApi();
+	if (api)
+		api->Playback().SetVolume((int)targetVolume, nullptr,
+			fVolumeDeviceId);
+}
+
+
+void
+PlayerWindow::_ToggleShuffle()
+{
+	App* app = (App*)be_app;
+	SpotifyApi* api = app->GetApi();
+	if (!api || fCurrentParentKind == "audiobook")
+		return;
+	fShuffleOn = !fShuffleOn;
+	if (fPlayerBar)
+		fPlayerBar->SetShuffle(fShuffleOn);
+	fHasPredictedNext = false;
+	fQueueTrackUri.clear();
+	api->Playback().SetShuffle(fShuffleOn, nullptr);
+}
+
+
+void
+PlayerWindow::_ToggleRepeat()
+{
+	App* app = (App*)be_app;
+	SpotifyApi* api = app->GetApi();
+	if (!api || fCurrentParentKind == "audiobook")
+		return;
+	if (fRepeatState == "off")
+		fRepeatState = "context";
+	else if (fRepeatState == "context")
+		fRepeatState = "track";
+	else
+		fRepeatState = "off";
+	if (fPlayerBar)
+		fPlayerBar->SetRepeat(fRepeatState.c_str());
+	fHasPredictedNext = false;
+	fQueueTrackUri.clear();
+	api->Playback().SetRepeat(fRepeatState, nullptr);
+}
+
+
+void
+PlayerWindow::_ToggleLibrespotAutostart()
+{
+	bool autostart = false;
+	SettingsController::Update([&](HaifySettings& settings) {
+		settings.librespotAlwaysStart = !settings.librespotAlwaysStart;
+		autostart = settings.librespotAlwaysStart;
+	});
+	if (fAutostartItem)
+		fAutostartItem->SetMarked(autostart);
+}
+
+
+void
+PlayerWindow::_SeekFromMessage(BMessage* message)
+{
+	App* app = (App*)be_app;
+	SpotifyApi* api = app->GetApi();
+	int64 posUs = 0;
+	if (!api || message->FindInt64("position", &posUs) != B_OK)
+		return;
+	bigtime_t now = system_time();
+	fProgressMs = (int32)(posUs / 1000LL);
+	fSeekTargetMs = fProgressMs;
+	fSeekGuardUntilUs = now + kSeekGuard;
+	fLastPlaybackSyncUs = now;
+	if (fPlayerBar)
+		fPlayerBar->SetPosition(posUs, (bigtime_t)fDurationMs * 1000LL);
+	BMessage stateMsg(MSG_REPLICANT_STATE);
+	_FillReplicantStateMessage(stateMsg, fProgressMs);
+	be_app->PostMessage(&stateMsg);
+	api->Playback().Seek((int)(posUs / 1000LL), nullptr);
+	_ScheduleVerifyPoll(kVerifyPollDelay);
+}
+
+
+void
+PlayerWindow::_ApplySeekBarColor(BMessage* message)
+{
+	rgb_color color = {
+		(uint8)message->GetInt32("red", 0),
+		(uint8)message->GetInt32("green", 120),
+		(uint8)message->GetInt32("blue", 215),
+		(uint8)message->GetInt32("alpha", 255)
+	};
+	if (fPlayerBar)
+		fPlayerBar->SetSeekBarColor(
+			message->GetBool("use_system", false), color);
+}
+
+
+void
+PlayerWindow::_ApplyDroppedSeekBarColor(BMessage* message)
+{
+	const rgb_color* color = nullptr;
+	ssize_t colorSize = 0;
+	if (message->FindData("color", B_RGB_COLOR_TYPE,
+			(const void**)&color, &colorSize) != B_OK
+			|| colorSize != sizeof(rgb_color)) {
+		return;
+	}
+	SettingsController::Update([&](HaifySettings& settings) {
+		settings.seekBarUseSystemColor = false;
+		settings.seekBarColorRed = color->red;
+		settings.seekBarColorGreen = color->green;
+		settings.seekBarColorBlue = color->blue;
+		settings.seekBarColorAlpha = color->alpha;
+	});
+	BMessage changed(MSG_SEEKBAR_COLOR_CHANGED);
+	changed.AddBool("use_system", false);
+	changed.AddInt32("red", color->red);
+	changed.AddInt32("green", color->green);
+	changed.AddInt32("blue", color->blue);
+	changed.AddInt32("alpha", color->alpha);
+	be_app->PostMessage(&changed);
+}
+
+
+void
+PlayerWindow::_SaveCurrentTrack()
+{
+	App* app = (App*)be_app;
+	SpotifyApi* api = app->GetApi();
+	if (!api || SpotifyItemKindForUri(fCurrentTrackUri) != kSpotifyItemTrack)
+		return;
+	api->Library().SaveTrack(SpotifyItemIdForUri(fCurrentTrackUri), nullptr);
+}
+
+
+void
+PlayerWindow::_PrepareAddTrackMenu(BMessage* message)
+{
+	App* app = (App*)be_app;
+	SpotifyApi* api = app->GetApi();
+	if (!api)
+		return;
+	const char* trackUri = message->GetString("trackUri",
+		fCurrentTrackUri.c_str());
+	std::string uri = trackUri ? trackUri : "";
+	std::string id = SpotifyItemIdForUri(uri);
+	if (SpotifyItemKindForUri(uri) != kSpotifyItemTrack || id.empty())
+		return;
+	BPoint screenWhere;
+	if (message->FindPoint("screen_where", &screenWhere) != B_OK)
+		screenWhere = Frame().LeftTop();
+	BMessenger self(this);
+	api->Library().CheckSavedTracks(id, [self, uri, screenWhere](bool ok,
+			const nlohmann::json& data) {
+		bool liked = false;
+		if (ok && data.is_array() && !data.empty()
+				&& data[0].is_boolean()) {
+			liked = data[0].get<bool>();
+		}
+		BMessage open('sAtM');
+		open.AddString("trackUri", uri.c_str());
+		open.AddPoint("screen_where", screenWhere);
+		open.AddBool("liked", liked);
+		self.SendMessage(&open);
+	});
+}
+
+
+void
+PlayerWindow::_ShowAddTrackMenuFromMessage(BMessage* message)
+{
+	const char* trackUri = message->GetString("trackUri", "");
+	BPoint screenWhere;
+	if (SpotifyItemKindForUri(trackUri ? trackUri : "")
+			!= kSpotifyItemTrack)
+		return;
+	if (message->FindPoint("screen_where", &screenWhere) != B_OK)
+		screenWhere = Frame().LeftTop();
+	_ShowAddTrackMenu(trackUri, screenWhere,
+		message->GetBool("liked", false));
+}
+
+
+void
+PlayerWindow::_ApplyAuthStatus(BMessage* message)
+{
+	bool auth = false;
+	message->FindBool("ok", &auth);
+	if (fAuthItem) {
+		fAuthItem->SetLabel(auth
+			? B_TRANSLATE("Sign Out") : B_TRANSLATE("Sign In"));
+		fAuthItem->SetMessage(new BMessage(auth ? 'sout' : MSG_INIT_AUTH));
+	}
+}
+
+
+void
+PlayerWindow::_ApplyDeviceList(BMessage* message)
+{
+	if (!fDeviceMenu)
+		return;
+	while (fDeviceMenu->CountItems() > 0)
+		delete fDeviceMenu->RemoveItem((int32)0);
+
+	int32 index = 0;
+	const char* id;
+	while (message->FindString("id", index, &id) == B_OK) {
+		const char* name = message->FindString("name", index);
+		const char* type = message->FindString("type", index);
+		bool active = false;
+		message->FindBool("active", index, &active);
+
+		BMessage* deviceMessage = new BMessage('toDv');
+		deviceMessage->AddString("id", id);
+		std::string displayName = _SpotifyDeviceDisplayName(
+			id ? id : "", name ? name : "", type ? type : "");
+		BMenuItem* item = new BMenuItem(displayName.c_str(), deviceMessage);
+		item->SetMarked(active);
+		fDeviceMenu->AddItem(item);
+		index++;
+	}
+	if (fDeviceMenu->CountItems() == 0)
+		fDeviceMenu->AddItem(new BMenuItem(
+			B_TRANSLATE("No devices found"), nullptr));
+}
+
+
+void
+PlayerWindow::_TransferToDevice(BMessage* message)
+{
+	const char* id = nullptr;
+	if (message->FindString("id", &id) != B_OK || !id)
+		return;
+	App* app = (App*)be_app;
+	SpotifyApi* api = app->GetApi();
+	if (api)
+		api->Playback().TransferPlayback(id, nullptr);
+}
+
+
+bool
+PlayerWindow::_HandlePlaybackMessage(BMessage* message)
 {
 	switch (message->what) {
-
 		case 'lddt':
-			_PollPlayback();
-			break;
-
 		case 'poll':
 			_PollPlayback();
-			break;
+			return true;
 
 		case 'pbst':
 			_ApplyPlaybackMessage(message);
-			break;
+			return true;
 
 		case kMsgPlaybackPollResult:
-		{
-			fPlaybackRequestPending = false;
-			if (message->GetBool("poll_ok", false)) {
-				fPendingLibrespotTrack.MakeEmpty();
-				fHasPendingLibrespotTrack = false;
-				fPlaybackPollFailures = 0;
-				bool hadPlaybackState = fHasPlaybackState;
-				bool hasItem = message->GetBool("has_item", false);
-				bool retryStartupEmptyPoll
-					= ShouldRetryStartupEmptyPlaybackPoll(hasItem,
-						hadPlaybackState, system_time(),
-						fStartupEmptyPlaybackRetryUntilUs);
-				if (retryStartupEmptyPoll) {
-					_SchedulePlaybackPoll(kPlaybackStartupPollInterval);
-					break;
-				}
-				if (hasItem) {
-					fHasPlaybackState = true;
-					fStartupEmptyPlaybackRetryUntilUs = 0;
-				} else {
-					message->AddString("title", B_TRANSLATE("Nothing is playing"));
-				}
-				_ApplyPlaybackMessage(message);
-				bigtime_t delay = message->GetBool("is_playing", false)
-					? kPlaybackActivePollInterval : kPlaybackIdlePollInterval;
-				_SchedulePlaybackPoll(delay);
-			} else {
-				fPlaybackPollFailures++;
-				int32 retryAfter = message->GetInt32("retry_after", -1);
-				int32 shift = std::min(fPlaybackPollFailures - 1, (int32)5);
-				bigtime_t delay = retryAfter > 0
-					? (bigtime_t)retryAfter * 1000000LL
-					: kPlaybackStartupPollInterval << shift;
-				bigtime_t limit = fHasPlaybackState
-					? kPlaybackErrorPollLimit : kPlaybackStartupPollLimit;
-				if (retryAfter <= 0 && delay > limit)
-					delay = limit;
-				_SchedulePlaybackPoll(delay);
-			}
-			break;
-		}
+			_ApplyPlaybackPollResult(message);
+			return true;
 
 		case kMsgAudiobookContextResult:
-		{
-			const char* sourceTrackUri = message->GetString(
-				"source_track_uri", "");
-			if (!sourceTrackUri || fAudiobookContextRequestTrackUri
-					!= sourceTrackUri) {
-				break;
-			}
-			fAudiobookContextRequestPending = false;
-			fAudiobookContextRequestTrackUri.clear();
-			if (!message->GetBool("ok", false)
-					|| fCurrentTrackUri != sourceTrackUri) {
-				break;
-			}
-
-			const char* openUri = message->GetString(
-				kNowPlayingPrimaryOpenUriField, "");
-			const char* parentKind = message->GetString(
-				kNowPlayingParentKindField, "");
-			std::string openUriString = openUri ? openUri : "";
-			if (SpotifyItemKindForUri(openUriString) != kSpotifyItemAudiobook
-					|| !parentKind || strcmp(parentKind, "audiobook") != 0) {
-				break;
-			}
-
-			message->AddBool("is_playing", fIsPlaying);
-			message->AddInt32("progress_ms", fProgressMs);
-			if (fVolumePct >= 0)
-				message->AddInt32("volume_percent", fVolumePct);
-			message->AddString("repeat_state", fRepeatState.c_str());
-			message->AddBool("shuffle_state", fShuffleOn);
-			_ApplyPlaybackMessage(message);
-			break;
-		}
+			_ApplyAudiobookContextResult(message);
+			return true;
 
 		case MSG_SYNC_REPLICANT_STATE:
 			_PublishReplicantState();
-			break;
+			return true;
 
 		case 'play':
 			_PlayUri(message);
-			break;
+			return true;
 
 		case 'qprd':
-		{
-			fQueueRequestPending = false;
-			const char* trackUri = message->GetString("source_track_uri", "");
-			if (trackUri && fCurrentTrackUri == trackUri
-					&& message->GetBool("has_next", false)) {
-				fPredictedNext = *message;
-				fPredictedNext.RemoveName("has_next");
-				fHasPredictedNext = true;
-				fQueueTrackUri = trackUri;
-				_HandlePlaybackTick();
-			} else if (fIsPlaying && trackUri && fCurrentTrackUri != trackUri) {
-				_FetchQueuePrediction();
-			}
-			break;
-		}
+			_ApplyQueuePrediction(message);
+			return true;
 
 		case kMsgPlaybackTick:
 			_HandlePlaybackTick();
-			break;
+			return true;
 
 		case kMsgVerifyPoll:
-			delete fVerifyTimer;
-			fVerifyTimer = nullptr;
-			_PollPlayback();
-			break;
+			_ApplyVerifyPoll();
+			return true;
 
-		case MSG_PLAY_PAUSE:
-	{
-			App* app = (App*)be_app;
-			SpotifyApi* api = app->GetApi();
-			if (!api) break;
-			bool wasPlaying = fIsPlaying;
-			if (fPlayerBar) fPlayerBar->SetPlaying(!wasPlaying);
-			fIsPlaying = !wasPlaying;
-			fLastPlaybackSyncUs = system_time();
-			if (wasPlaying) api->Playback().Pause(nullptr);
-			else            api->Playback().Play(nullptr);
-			break;
+		default:
+			return false;
 	}
+}
+
+
+bool
+PlayerWindow::_HandleTransportMessage(BMessage* message)
+{
+	switch (message->what) {
+		case MSG_PLAY_PAUSE:
+			_TogglePlayPause();
+			return true;
 
 		case MSG_NEXT_TRACK:
-		{
-			App* app = (App*)be_app;
-			SpotifyApi* api = app->GetApi();
-			if (!api) break;
-			api->Playback().Next(nullptr);
-			if (fHasPredictedNext)
-				_ApplyPredictedNext();
-			else
-				_ScheduleVerifyPoll(kVerifyPollDelay);
-			break;
-		}
+			_SkipNextTrack();
+			return true;
 
 		case MSG_PREV_TRACK:
-		{
-			App* app = (App*)be_app;
-			SpotifyApi* api = app->GetApi();
-			if (!api) break;
-			api->Playback().Previous(nullptr);
-			fHasPredictedNext = false;
-			fQueueTrackUri.clear();
-			_ScheduleVerifyPoll(kVerifyPollDelay);
-			break;
-		}
+			_SkipPreviousTrack();
+			return true;
 
 		case MSG_SET_VOLUME:
-		{
-			App* app = (App*)be_app;
-			SpotifyApi* api = app->GetApi();
-			int32 vol = 0;
-			if (message->FindInt32("be:value", &vol) == B_OK) {
-				if (vol < 0)
-					vol = 0;
-				if (vol > 100)
-					vol = 100;
-				_SetVolumeOptimistically(vol);
-				if (api)
-					api->Playback().SetVolume((int)vol, nullptr);
-			}
-			break;
-		}
+			_SetVolumeFromMessage(message);
+			return true;
 
 		case MSG_TOGGLE_MUTE:
-		{
-			App* app = (App*)be_app;
-			SpotifyApi* api = app->GetApi();
-			if (!api)
-				break;
-
-			if (fMutedByHaify && fVolumePct == 0
-					&& fHasLastNonZeroVolume) {
-				int32 targetVolume = fLastNonZeroVolume;
-				if (targetVolume <= 0)
-					targetVolume = 50;
-				if (targetVolume > 100)
-					targetVolume = 100;
-
-				_SetVolumeOptimistically(targetVolume);
-				api->Playback().SetVolume((int)targetVolume, nullptr,
-					fVolumeDeviceId);
-				break;
-			}
-
-			BMessenger self(this);
-			api->Playback().GetPlaybackState([self](bool ok,
-					const nlohmann::json& data) {
-				BMessage toggle(kMsgApplyMuteToggle);
-				toggle.AddBool("ok", ok);
-
-				if (ok && data.is_object() && data.contains("device")
-						&& data["device"].is_object()) {
-					const auto& device = data["device"];
-					if (device.contains("id") && device["id"].is_string()) {
-						std::string deviceId =
-							device["id"].get<std::string>();
-						toggle.AddString("device_id", deviceId.c_str());
-					}
-					if (device.contains("volume_percent")
-							&& device["volume_percent"].is_number()) {
-						toggle.AddInt32("volume_percent",
-							(int32)device["volume_percent"].get<int>());
-					}
-					bool supportsVolume = true;
-					if (device.contains("supports_volume")
-							&& device["supports_volume"].is_boolean()) {
-						supportsVolume =
-							device["supports_volume"].get<bool>();
-					}
-					bool isRestricted = false;
-					if (device.contains("is_restricted")
-							&& device["is_restricted"].is_boolean()) {
-						isRestricted = device["is_restricted"].get<bool>();
-					}
-					toggle.AddBool("supports_volume", supportsVolume);
-					toggle.AddBool("is_restricted", isRestricted);
-				}
-
-				self.SendMessage(&toggle);
-			});
-			break;
-		}
+			_ToggleMute();
+			return true;
 
 		case kMsgApplyMuteToggle:
-		{
-			if (!message->GetBool("ok", false))
-				break;
-			if (!message->GetBool("supports_volume", true))
-				break;
-			if (message->GetBool("is_restricted", false))
-				break;
-
-			int32 currentVolume = -1;
-			if (message->FindInt32("volume_percent", &currentVolume) != B_OK)
-				break;
-			if (currentVolume < 0)
-				break;
-			if (currentVolume > 100)
-				currentVolume = 100;
-			fVolumeDeviceId = message->GetString("device_id", "");
-
-			int32 targetVolume = 0;
-			if (currentVolume > 0) {
-				fLastNonZeroVolume = currentVolume;
-				fHasLastNonZeroVolume = true;
-			} else {
-				targetVolume = fHasLastNonZeroVolume
-					? fLastNonZeroVolume : 50;
-			}
-			if (targetVolume < 0)
-				targetVolume = 0;
-			if (targetVolume > 100)
-				targetVolume = 100;
-
-			_SetVolumeOptimistically(targetVolume);
-
-			App* app = (App*)be_app;
-			SpotifyApi* api = app->GetApi();
-			if (api) {
-				api->Playback().SetVolume((int)targetVolume, nullptr,
-					fVolumeDeviceId);
-			}
-			break;
-		}
+			_ApplyMuteToggle(message);
+			return true;
 
 		case MSG_TOGGLE_SHUFFLE:
-		{
-			App* app = (App*)be_app;
-			SpotifyApi* api = app->GetApi();
-			if (!api) break;
-			if (fCurrentParentKind == "audiobook")
-				break;
-			fShuffleOn = !fShuffleOn;
-			if (fPlayerBar) fPlayerBar->SetShuffle(fShuffleOn);
-			fHasPredictedNext = false;
-			fQueueTrackUri.clear();
-			api->Playback().SetShuffle(fShuffleOn, nullptr);
-			break;
-		}
+			_ToggleShuffle();
+			return true;
 
 		case MSG_TOGGLE_REPEAT:
-		{
-			App* app = (App*)be_app;
-			SpotifyApi* api = app->GetApi();
-			if (!api) break;
-			if (fCurrentParentKind == "audiobook")
-				break;
-			if      (fRepeatState == "off")     fRepeatState = "context";
-			else if (fRepeatState == "context") fRepeatState = "track";
-			else                                fRepeatState = "off";
-			if (fPlayerBar) fPlayerBar->SetRepeat(fRepeatState.c_str());
-			fHasPredictedNext = false;
-			fQueueTrackUri.clear();
-			api->Playback().SetRepeat(fRepeatState, nullptr);
-			break;
-		}
+			_ToggleRepeat();
+			return true;
 
 		case MSG_TOGGLE_LIBRESPOT_RUNNING:
 			be_app->PostMessage(MSG_TOGGLE_LIBRESPOT_RUNNING);
 			_UpdateLibrespotMenuItems();
-			break;
+			return true;
 
 		case MSG_TOGGLE_LIBRESPOT_AUTOSTART:
-		{
-			bool autostart = false;
-			SettingsController::Update([&](HaifySettings& s) {
-				s.librespotAlwaysStart = !s.librespotAlwaysStart;
-				autostart = s.librespotAlwaysStart;
-			});
-			if (fAutostartItem)
-				fAutostartItem->SetMarked(autostart);
-			break;
-		}
+			_ToggleLibrespotAutostart();
+			return true;
 
 		case MSG_SEEK_REQUEST:
-		{
-			App* app = (App*)be_app;
-			SpotifyApi* api = app->GetApi();
-			int64 posUs = 0;
-			if (api && message->FindInt64("position", &posUs) == B_OK) {
-				bigtime_t now = system_time();
-				fProgressMs = (int32)(posUs / 1000LL);
-				fSeekTargetMs = fProgressMs;
-				fSeekGuardUntilUs = now + kSeekGuard;
-				fLastPlaybackSyncUs = now;
-				if (fPlayerBar)
-					fPlayerBar->SetPosition(posUs, (bigtime_t)fDurationMs * 1000LL);
-				BMessage stateMsg(MSG_REPLICANT_STATE);
-				_FillReplicantStateMessage(stateMsg, fProgressMs);
-				be_app->PostMessage(&stateMsg);
-				api->Playback().Seek((int)(posUs / 1000LL), nullptr);
-				_ScheduleVerifyPoll(kVerifyPollDelay);
-			}
-			break;
-		}
+			_SeekFromMessage(message);
+			return true;
 
+		default:
+			return false;
+	}
+}
+
+
+bool
+PlayerWindow::_HandleInterfaceMessage(BMessage* message)
+{
+	switch (message->what) {
 		case MSG_SEEKBAR_COLOR_CHANGED:
-		{
-			rgb_color color = {
-				(uint8)message->GetInt32("red", 0),
-				(uint8)message->GetInt32("green", 120),
-				(uint8)message->GetInt32("blue", 215),
-				(uint8)message->GetInt32("alpha", 255)
-			};
-			if (fPlayerBar) {
-				fPlayerBar->SetSeekBarColor(
-					message->GetBool("use_system", false), color);
-			}
-			break;
-		}
+			_ApplySeekBarColor(message);
+			return true;
 
 		case MSG_REPLICANT_APPEARANCE_CHANGED:
 			if (fPlayerBar)
 				BMessenger(fPlayerBar).SendMessage(message);
-			break;
+			return true;
 
 		case MSG_SEEKBAR_COLOR_DROPPED:
-		{
-			const rgb_color* color = nullptr;
-			ssize_t colorSize = 0;
-			if (message->FindData("color", B_RGB_COLOR_TYPE,
-					(const void**)&color, &colorSize) != B_OK
-					|| colorSize != sizeof(rgb_color)) {
-				break;
-			}
-			SettingsController::Update([&](HaifySettings& settings) {
-				settings.seekBarUseSystemColor = false;
-				settings.seekBarColorRed = color->red;
-				settings.seekBarColorGreen = color->green;
-				settings.seekBarColorBlue = color->blue;
-				settings.seekBarColorAlpha = color->alpha;
-			});
-			BMessage changed(MSG_SEEKBAR_COLOR_CHANGED);
-			changed.AddBool("use_system", false);
-			changed.AddInt32("red", color->red);
-			changed.AddInt32("green", color->green);
-			changed.AddInt32("blue", color->blue);
-			changed.AddInt32("alpha", color->alpha);
-			be_app->PostMessage(&changed);
-			break;
-		}
+			_ApplyDroppedSeekBarColor(message);
+			return true;
 
 		case MSG_QUIT_APP:
 			be_app->PostMessage(B_QUIT_REQUESTED);
-			break;
+			return true;
 
 		case MSG_SAVE_CURRENT_TRACK:
-	{
-			App* app = (App*)be_app;
-			SpotifyApi* api = app->GetApi();
-			if (!api || SpotifyItemKindForUri(fCurrentTrackUri)
-					!= kSpotifyItemTrack) break;
-			api->Library().SaveTrack(SpotifyItemIdForUri(fCurrentTrackUri),
-				nullptr);
-			break;
-	}
+			_SaveCurrentTrack();
+			return true;
 
 		case MSG_SHOW_ADD_TRACK_MENU:
-		{
-			App* app = (App*)be_app;
-			SpotifyApi* api = app->GetApi();
-			if (!api) break;
-			const char* trackUri = message->GetString("trackUri",
-				fCurrentTrackUri.c_str());
-			std::string uri = trackUri ? trackUri : "";
-			std::string id = SpotifyItemIdForUri(uri);
-			if (SpotifyItemKindForUri(uri) != kSpotifyItemTrack
-					|| id.empty())
-				break;
-			BPoint screenWhere;
-			if (message->FindPoint("screen_where", &screenWhere) != B_OK)
-				screenWhere = Frame().LeftTop();
-			BMessenger self(this);
-			api->Library().CheckSavedTracks(id, [self, uri, screenWhere](bool ok,
-					const nlohmann::json& data) {
-				bool liked = false;
-				if (ok && data.is_array() && !data.empty()
-						&& data[0].is_boolean()) {
-					liked = data[0].get<bool>();
-				}
-				BMessage open('sAtM');
-				open.AddString("trackUri", uri.c_str());
-				open.AddPoint("screen_where", screenWhere);
-				open.AddBool("liked", liked);
-				self.SendMessage(&open);
-			});
-			break;
-		}
+			_PrepareAddTrackMenu(message);
+			return true;
 
 		case 'sAtM':
-		{
-			const char* trackUri = message->GetString("trackUri", "");
-			BPoint screenWhere;
-			if (SpotifyItemKindForUri(trackUri ? trackUri : "")
-					!= kSpotifyItemTrack)
-				break;
-			if (message->FindPoint("screen_where", &screenWhere) != B_OK)
-				screenWhere = Frame().LeftTop();
-			_ShowAddTrackMenu(trackUri, screenWhere,
-				message->GetBool("liked", false));
-			break;
-		}
+			_ShowAddTrackMenuFromMessage(message);
+			return true;
 
 		case 'remL':
 		{
 			const char* trackUri = message->GetString("trackUri", "");
 			if (trackUri && trackUri[0])
 				_RemoveCurrentTrackFromLikedSongs(trackUri);
-			break;
+			return true;
 		}
 
+		default:
+			return false;
+	}
+}
+
+
+bool
+PlayerWindow::_ForwardAppMessage(BMessage* message)
+{
+	switch (message->what) {
 		case MSG_OPEN_BROWSER:
 		case MSG_OPEN_PLAYLIST:
 		case MSG_OPEN_QUEUE:
@@ -1473,70 +1666,55 @@ PlayerWindow::MessageReceived(BMessage* message)
 		case MSG_INIT_AUTH:
 		case 'open':
 			be_app->PostMessage(message);
-			break;
+			return true;
 
 		case 'sout':
 			be_app->PostMessage('sout');
-			break;
+			return true;
 
+		default:
+			return false;
+	}
+}
+
+
+bool
+PlayerWindow::_HandleAccountDeviceMessage(BMessage* message)
+{
+	switch (message->what) {
 		case 'aust':
-		{
-			bool auth = false;
-			message->FindBool("ok", &auth);
-			if (fAuthItem) {
-				fAuthItem->SetLabel(auth ? B_TRANSLATE("Sign Out") : B_TRANSLATE("Sign In"));
-				fAuthItem->SetMessage(new BMessage(auth ? 'sout' : MSG_INIT_AUTH));
-			}
-			break;
-		}
+			_ApplyAuthStatus(message);
+			return true;
 
 		case 'dEvL':
-	{
-			if (!fDeviceMenu) break;
-			while (fDeviceMenu->CountItems() > 0)
-				delete fDeviceMenu->RemoveItem((int32)0);
-
-			int32 i = 0;
-			const char* id;
-			while (message->FindString("id", i, &id) == B_OK) {
-				const char* name   = message->FindString("name",   i);
-				const char* type   = message->FindString("type",   i);
-				bool        active = false;
-				message->FindBool("active", i, &active);
-
-				BMessage* msg = new BMessage('toDv');
-				msg->AddString("id", id);
-				std::string displayName = _SpotifyDeviceDisplayName(
-					id ? id : "", name ? name : "", type ? type : "");
-				BMenuItem* item = new BMenuItem(displayName.c_str(), msg);
-				item->SetMarked(active);
-				fDeviceMenu->AddItem(item);
-				i++;
-			}
-			if (fDeviceMenu->CountItems() == 0)
-				fDeviceMenu->AddItem(new BMenuItem(
-					B_TRANSLATE("No devices found"), nullptr));
-			break;
-		}
+			_ApplyDeviceList(message);
+			return true;
 
 		case 'toDv':
-		{
-			const char* id = nullptr;
-			if (message->FindString("id", &id) != B_OK || !id) break;
-			App* app = (App*)be_app;
-			SpotifyApi* api = app->GetApi();
-			if (api) api->Playback().TransferPlayback(id, nullptr);
-			break;
-		}
+			_TransferToDevice(message);
+			return true;
 
 		case B_ABOUT_REQUESTED:
 			_ShowAboutWindow();
-			break;
+			return true;
 
 		default:
-			BWindow::MessageReceived(message);
-			break;
+			return false;
 	}
+}
+
+
+void
+PlayerWindow::MessageReceived(BMessage* message)
+{
+	if (_HandlePlaybackMessage(message) || _HandleTransportMessage(message)
+			|| _HandleInterfaceMessage(message)
+			|| _ForwardAppMessage(message)
+			|| _HandleAccountDeviceMessage(message)) {
+		return;
+	}
+
+	BWindow::MessageReceived(message);
 }
 
 

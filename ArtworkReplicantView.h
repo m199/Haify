@@ -45,6 +45,8 @@ private:
     void                    _ShowContextMenu(BPoint screenWhere);
     void                    _RequestArtwork(bool reload);
     void                    _ForwardMessage(BMessage* message);
+    void                    _ApplyReplicantStateMessage(BMessage* message);
+    void                    _RetryRegister();
     virtual void            ArtworkStateChanged() override;
 
     BDragger*               fDragger = nullptr;

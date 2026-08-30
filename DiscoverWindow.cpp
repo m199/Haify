@@ -814,913 +814,1323 @@ DiscoverWindow::_SelectLibraryTarget(const std::string& uri)
 void
 DiscoverWindow::MessageReceived(BMessage* message)
 {
+	if (_HandleTabMessage(message) || _HandleDataMessage(message)
+			|| _HandlePlaybackOpenMessage(message)
+			|| _HandleLibraryActionMessage(message)
+			|| _HandlePlaylistActionMessage(message)
+			|| _HandleAppForwardMessage(message)) {
+		return;
+	}
+
+	BWindow::MessageReceived(message);
+}
+
+
+bool
+DiscoverWindow::_HandleTabMessage(BMessage* message)
+{
 	switch (message->what) {
 		case 'togT':
-		{
-			int32 tab;
-			if (message->FindInt32("tab", &tab) != B_OK) break;
-			if (tab < 0 || tab >= TAB_COUNT) break;
-			if (tab == TAB_AUDIOBOOKS && !_AudiobooksEnabled()) break;
-			if (fTabVisible[tab]) {
-				int32 visibleCount = 0;
-				for (int i = 0; i < TAB_COUNT; i++)
-					if (_IsTabEffectivelyVisible(i))
-						visibleCount++;
-				if (visibleCount <= 1)
-					break;
-			}
-			fTabVisible[tab] = !fTabVisible[tab];
-			fTabMenuItems[tab]->SetMarked(fTabVisible[tab]);
-			{
-				SettingsController::Update([&](HaifySettings& s) {
-					_SaveTabVisibility(s);
-				});
-			}
-			_RebuildTabs();
-			break;
-		}
+			_ToggleTabVisibility(message);
+			return true;
 
 		case 'tRdr':
 			_MoveTab(message->GetInt32("source", -1),
 				message->GetInt32("target", -1));
-			break;
+			return true;
 
 		case 'tRst':
-		{
-			fTabOrder.clear();
-			for (int32 i = 0; i < TAB_COUNT; i++)
-				fTabOrder.push_back(i);
-			SettingsController::Update([&](HaifySettings& settings) {
-				_SaveTabOrder(settings);
-			});
-			_RebuildTabs();
-			break;
-		}
+			_ResetTabOrder();
+			return true;
 
 		case MSG_SPOTIFY_CAPABILITIES_CHANGED:
-			if (fTabMenuItems[TAB_AUDIOBOOKS]) {
-				fTabMenuItems[TAB_AUDIOBOOKS]->SetEnabled(_AudiobooksEnabled());
-				fTabMenuItems[TAB_AUDIOBOOKS]->SetMarked(
-					fTabVisible[TAB_AUDIOBOOKS] && _AudiobooksEnabled());
-			}
-			_RebuildTabs();
-			break;
+			_ApplySpotifyCapabilities();
+			return true;
 
 		case 'tabS':
-		{
-			int32 visual = 0;
-			message->FindInt32("tab", &visual);
-			int32 logical = _LogicalTab(visual);
-			if (logical >= 0) {
-				_LoadPersistentCache(logical);
-				if (fLists[logical])
-					((DiscoverListView*)fLists[logical])->SetPlayingUri(
-						fCurrentTrackUri);
-				bool expired = fLoaded[logical]
-					&& (fCacheBacked[logical]
-						|| (system_time() - fLoadTime[logical]) > kCacheExpiry);
-				if (expired && logical == TAB_PLAYLISTS) {
-					ReloadPlaylists();
-				} else if (!fLoaded[logical] || expired) {
-					if (expired)
-						_InvalidateTabCache(logical);
-					fLoaded[logical] = false;
-					_LoadTab(logical);
-				}
-			}
-			break;
-		}
+			_SelectTab(message);
+			return true;
 
 		case kMsgAudiobookIdsUpdated:
 			_ApplyAudiobookIdSnapshot(message);
-			break;
+			return true;
 
+		default:
+			return false;
+	}
+}
+
+
+bool
+DiscoverWindow::_HandleDataMessage(BMessage* message)
+{
+	switch (message->what) {
 		case kMsgCacheLoaded:
 		case 'uRow':
-		{
-			int32 tab, cols;
-			if (message->FindInt32("tab",  &tab)  != B_OK) break;
-			if (message->FindInt32("cols", &cols) != B_OK || cols <= 0) break;
-			if (tab < 0 || tab >= TAB_COUNT || !fLists[tab]) break;
-			bool fromCache = message->GetBool("from_cache", false);
-			bool cacheLast = true;
-			if (fromCache) {
-				int32 cacheGeneration = message->GetInt32(
-					"cache_generation", -1);
-				if (cacheGeneration != fCacheLoadGeneration[tab]
-						|| message->GetString("account_id", "")
-							!= fCacheAccountId)
-					break;
-				cacheLast = message->GetBool("cache_last", true);
-				if (cacheLast)
-					fCacheLoadPending[tab] = false;
-				int32 selectedTab = _LogicalTab(
-					fTabView ? fTabView->Selection() : -1);
-				if (!message->GetBool("cache_available", true)
-						|| fFreshSnapshot[tab] || tab != selectedTab)
-					break;
-				if (message->GetBool("cache_first", false))
-					fLists[tab]->Clear();
-			}
-			if (!fromCache) {
-				int32 loadGeneration = -1;
-				if (message->FindInt32("load_generation", &loadGeneration) == B_OK
-						&& loadGeneration != fTabLoadGeneration[tab])
-					break;
-			}
-			if (message->GetBool("audiobook_ids_snapshot", false))
-				_ApplyAudiobookIdSnapshot(message);
-
-			std::vector<std::string> allV, allU, allT;
-			bool snapshotMessage = message->GetBool("snapshot", false);
-			if (fromCache)
-				snapshotMessage = false;
-			const char* s;
-			for (int32 i = 0; message->FindString("v", i, &s) == B_OK; i++) allV.push_back(s);
-			for (int32 i = 0; message->FindString("u", i, &s) == B_OK; i++) allU.push_back(s);
-			for (int32 i = 0; message->FindString("t", i, &s) == B_OK; i++) allT.push_back(s);
-
-			int32 nRows = (int32)allV.size() / cols;
-			if (tab == TAB_AUDIOBOOKS && snapshotMessage) {
-				fAudiobookIds.clear();
-				fAudiobookIdsKnown = true;
-			}
-			std::set<std::string> snapshotUris;
-			std::vector<std::string> snapshotOrder;
-			for (int32 r = 0; r < nRows; r++) {
-				if ((int32)allU.size() < (r + 1) * cols
-						|| (int32)allT.size() < (r + 1) * cols)
-					continue;
-				bool writable = true;
-				message->FindBool("writable", r, &writable);
-				bool owned = false;
-				message->FindBool("owned", r, &owned);
-				auto vb = allV.begin() + r * cols;
-				auto ub = allU.begin() + r * cols;
-				auto tb = allT.begin() + r * cols;
-				if (!ub->empty() && !PrimaryUriMatchesTab(tab, *ub))
-					continue;
-				std::string primaryId = SpotifyItemIdForUri(*ub);
-				if (tab == TAB_PODCASTS
-						&& SpotifyEffectiveItemKind(kSpotifyItemShow, primaryId,
-							fAudiobookIds) == kSpotifyItemAudiobook) {
-					continue;
-				}
-				if (tab == TAB_AUDIOBOOKS && !primaryId.empty()) {
-					fAudiobookIds.insert(primaryId);
-					fAudiobookIdsKnown = true;
-				}
-				if (!ub->empty()) {
-					snapshotUris.insert(*ub);
-					snapshotOrder.push_back(*ub);
-				}
-				if (!ub->empty()) {
-					DiscoverRow* existing = _FindRow(tab, *ub);
-					if (existing) {
-						existing->fUris.assign(ub, ub + cols);
-						existing->fTitles.assign(tb, tb + cols);
-						existing->fWritable = writable;
-						existing->fOwned = owned;
-						for (int32 column = 0; column < cols; column++) {
-							BoldStringField* field = dynamic_cast<BoldStringField*>(
-								existing->GetField(column));
-							if (field) {
-								field->SetString((vb + column)->c_str());
-								field->fEnabled = writable;
-							}
-						}
-						fLists[tab]->UpdateRow(existing);
-						continue;
-					}
-				}
-				if (tab >= TAB_SAVED_ALBUMS && tab <= TAB_AUDIOBOOKS) {
-					if (ub->empty() && !snapshotMessage) {
-						bool hasRealRow = false;
-						for (int32 i = 0; i < fLists[tab]->CountRows(); i++) {
-							DiscoverRow* existing = dynamic_cast<DiscoverRow*>(
-								fLists[tab]->RowAt(i));
-							if (existing && !existing->fUris.empty()
-									&& !existing->fUris[0].empty()) {
-								hasRealRow = true;
-								break;
-							}
-						}
-						if (hasRealRow)
-							continue;
-					}
-				}
-				fLists[tab]->AddRow(new DiscoverRow(
-					std::vector<std::string>(vb, vb + cols),
-					std::vector<std::string>(ub, ub + cols),
-					std::vector<std::string>(tb, tb + cols), writable, owned));
-			}
-			if (snapshotMessage) {
-				bool keptPlaceholder = false;
-				for (int32 index = fLists[tab]->CountRows() - 1;
-						index >= 0; index--) {
-					DiscoverRow* row = dynamic_cast<DiscoverRow*>(
-						fLists[tab]->RowAt(index));
-					if (!row)
-						continue;
-					std::string uri = row->fUris.empty() ? "" : row->fUris[0];
-					if (uri.empty() && nRows > 0 && !keptPlaceholder) {
-						keptPlaceholder = true;
-						continue;
-					}
-					if (snapshotUris.find(uri) == snapshotUris.end()) {
-						fLists[tab]->RemoveRow(row);
-						delete row;
-					}
-				}
-				for (int32 target = 0;
-						target < (int32)snapshotOrder.size(); target++) {
-					DiscoverRow* row = _FindRow(tab, snapshotOrder[target]);
-					if (!row)
-						continue;
-					int32 current = fLists[tab]->IndexOf(row);
-					if (current == target)
-						continue;
-					bool selected = fLists[tab]->CurrentSelection() == row;
-					fLists[tab]->RemoveRow(row);
-					fLists[tab]->AddRow(row, target);
-					if (selected)
-						fLists[tab]->AddToSelection(row);
-				}
-			}
-			if (fromCache && !cacheLast)
-				break;
-
-			int32 selectedTab = _LogicalTab(
-				fTabView ? fTabView->Selection() : -1);
-			if (tab == selectedTab)
-				((DiscoverListView*)fLists[tab])->SetPlayingUri(fCurrentTrackUri);
-			if (tab == TAB_AUDIOBOOKS)
-				_RemoveAudiobookDuplicatesFromPodcasts();
-			if (fromCache) {
-				fLoaded[tab] = true;
-				fCacheBacked[tab] = true;
-				fPageLoading[tab] = false;
-				fPageHasMore[tab] = false;
-				fLoadTime[tab] = 0;
-			} else {
-				if (snapshotMessage) {
-					fFreshSnapshot[tab] = true;
-					fCacheBacked[tab] = false;
-				}
-				_ScheduleCacheSave();
-			}
-			_CheckLazyLoad();
-			break;
-		}
+			_ApplyDiscoverRows(message);
+			return true;
 
 		case kMsgCheckLazyLoad:
 			_CheckLazyLoad();
-			break;
+			return true;
 
 		case kMsgPageDone:
-		{
-			int32 tab = message->GetInt32("tab", -1);
-			if (tab < 0 || tab >= TAB_COUNT)
-				break;
-			if (message->GetInt32("load_generation", -1)
-					!= fTabLoadGeneration[tab])
-				break;
-			fPageLoading[tab] = false;
-			fPageHasMore[tab] = message->GetBool("has_more", false);
-			fPageOffset[tab] = message->GetInt32("next_offset",
-				fPageOffset[tab]);
-			fPageCursor[tab] = message->GetString("next_cursor", "");
-			_CheckLazyLoad();
-			break;
-		}
+			_ApplyPageDone(message);
+			return true;
 
 		case kMsgSaveCache:
-			delete fCacheSaveRunner;
-			fCacheSaveRunner = nullptr;
-			_WriteCacheNow();
-			break;
-
-		case 'play':
-		{
-			const char* uri = message->GetString("uri", "");
-			if (uri && SpotifyItemIsPlayable(
-					SpotifyItemKindForUri(uri))) {
-				if (fCurrentTrackUri != uri) {
-					fCurrentTrackUri = uri;
-					int32 tab = _LogicalTab(
-						fTabView ? fTabView->Selection() : -1);
-					if (tab >= 0 && fLists[tab])
-						((DiscoverListView*)fLists[tab])->SetPlayingUri(
-							fCurrentTrackUri);
-				}
-			}
-			be_app->PostMessage(message);
-			break;
-		}
-
-		case 'open':
-		{
-			const char* uri = nullptr;
-			const char* titleStr = nullptr;
-			message->FindString("uri",   &uri);
-			message->FindString("title", &titleStr);
-			if (!uri || !uri[0]) break;
-
-			BMessage fwd('open');
-			fwd.AddString("uri", uri);
-			fwd.AddString("title", titleStr ? titleStr : "");
-			be_app->PostMessage(&fwd);
-			break;
-		}
-
-		case 'pStU':
-		{
-			const char* newUri = nullptr;
-			message->FindString("trackUri", &newUri);
-			if (!newUri) break;
-			std::string uriStr = newUri;
-			if (fCurrentTrackUri == uriStr)
-				break;
-			fCurrentTrackUri = uriStr;
-			int32 tab = _LogicalTab(
-				fTabView ? fTabView->Selection() : -1);
-			if (tab >= 0 && fLists[tab])
-				((DiscoverListView*)fLists[tab])->SetPlayingUri(uriStr);
-			break;
-		}
-
-		case 'rClk':
-		{
-			const char* uri = nullptr;
-			const char* title = nullptr;
-			BPoint pt;
-			if (message->FindString("uri",      &uri) != B_OK) break;
-			message->FindString("title", &title);
-			if (message->FindPoint ("screenPt", &pt)  != B_OK) break;
-			int32 sourceTab = -1;
-			message->FindInt32("tab", &sourceTab);
-			std::string uriStr = uri;
-
-			App* app = (App*)be_app;
-			SpotifyApi* api = app->GetApi();
-
-			SpotifyItemKind kind = SpotifyItemKindForUri(uriStr);
-			if (SpotifyItemIsPlayable(kind)) {
-				std::string context = sourceTab == TAB_SAVED_EPISODES
-					? "spotify:saved-episodes" : "";
-				bool saved = sourceTab == TAB_SAVED_EPISODES;
-				bool known = saved;
-				auto state = fKnownLibraryStates.find(uriStr);
-				if (state != fKnownLibraryStates.end()) {
-					known = true;
-					saved = state->second;
-				}
-				if (!known && api) {
-					int32 generation = ++fLibraryStateGenerations[uriStr];
-					BMessenger self(this);
-					api->Library().CheckLibraryItems({uriStr},
-						[self, uriStr, generation](bool ok,
-								const nlohmann::json& data) {
-							BMessage result(kMsgLibraryStateCached);
-							result.AddString("uri", uriStr.c_str());
-							result.AddInt32("generation", generation);
-							result.AddBool("ok", ok && data.is_array()
-								&& !data.empty() && data[0].is_boolean());
-							result.AddBool("saved", ok && data.is_array()
-								&& !data.empty() && data[0].is_boolean()
-								&& data[0].get<bool>());
-							self.SendMessage(&result);
-						});
-				}
-				::ShowPlayableItemContextMenu(uriStr, context, pt,
-					BMessenger(this), api, false, true, saved);
-			} else if (kind == kSpotifyItemPlaylist) {
-				_ShowPlaylistContextMenu(SpotifyItemIdForUri(uriStr),
-					message->GetBool("owned", false), pt);
-			} else if (kind != kSpotifyItemUnknown) {
-				BPopUpMenu* menu = new BPopUpMenu("item", false, false);
-				BMessage* openMsg = new BMessage('open');
-				openMsg->AddString("uri", uriStr.c_str());
-				openMsg->AddString("title", title ? title : "");
-				menu->AddItem(new BMenuItem(B_TRANSLATE("Open"), openMsg));
-
-				BMessage* playMsg = new BMessage('play');
-				playMsg->AddString("uri", uriStr.c_str());
-				menu->AddItem(new BMenuItem(B_TRANSLATE("Play"), playMsg));
-
-				if (kind == kSpotifyItemAlbum) {
-					menu->AddSeparatorItem();
-					if (sourceTab == TAB_SAVED_ALBUMS) {
-						BMessage* removeMsg = new BMessage('remA');
-						removeMsg->AddString("uri", uriStr.c_str());
-						menu->AddItem(new BMenuItem(
-							B_TRANSLATE("Remove from Saved Albums"),
-							removeMsg));
-					} else {
-						BMessage* saveMsg = new BMessage('savA');
-						saveMsg->AddString("uri", uriStr.c_str());
-						menu->AddItem(new BMenuItem(B_TRANSLATE("Save Album"), saveMsg));
-					}
-				} else if ((kind == kSpotifyItemShow
-							&& sourceTab == TAB_PODCASTS)
-						|| (kind == kSpotifyItemArtist
-							&& sourceTab == TAB_FOLLOWED_ARTISTS)
-						|| (kind == kSpotifyItemAudiobook
-							&& sourceTab == TAB_AUDIOBOOKS)) {
-					menu->AddSeparatorItem();
-					BMessage* removeMsg = new BMessage('remI');
-					removeMsg->AddString("uri", uriStr.c_str());
-					const char* label = kind == kSpotifyItemShow
-						? B_TRANSLATE("Unsubscribe")
-						: kind == kSpotifyItemArtist
-						? B_TRANSLATE("Unfollow Artist")
-						: B_TRANSLATE("Remove from Audiobooks");
-					menu->AddItem(new BMenuItem(label, removeMsg));
-				}
-
-				BMenuItem* sel = menu->Go(pt, false, true);
-				if (sel && sel->Message())
-					PostMessage(sel->Message());
-				delete menu;
-			}
-			break;
-		}
-
-		case 'iCmR':
-		{
-			App* app = dynamic_cast<App*>(be_app);
-			ShowPlayableItemContextMenu(message->GetString("uri", ""),
-				message->GetString("context_uri", ""),
-				message->GetPoint("screen_point", BPoint()), BMessenger(this),
-				app ? app->GetApi() : nullptr,
-				message->GetBool("library_only", false), true,
-				message->GetBool("saved", false));
-			break;
-		}
-
-		case kMsgLibraryStateCached:
-		{
-			std::string uri = message->GetString("uri", "");
-			if (!message->GetBool("ok", false) || uri.empty()
-					|| message->GetInt32("generation", -1)
-						!= fLibraryStateGenerations[uri])
-				break;
-			fKnownLibraryStates[uri] = message->GetBool("saved", false);
-			break;
-		}
-
-		case 'dDrp':
-		{
-			const char* uri = message->GetString("uri", "");
-			if (!uri || !uri[0]) uri = message->GetString("trackUri", "");
-			if (!uri || !uri[0]) uri = message->GetString("albumUri", "");
-			if (!uri || !uri[0])
-				break;
-			int32 targetTab = message->GetInt32("tab", -1);
-			std::string targetUri = message->GetString("targetUri", "");
-			if (targetTab == TAB_PLAYLISTS && !targetUri.empty()
-					&& _HandlePlaylistDrop(uri, targetUri,
-						message->GetBool("targetWritable", false))) {
-				break;
-			}
-			_HandleLibraryDrop(uri);
-			break;
-		}
-
-		case 'dPlA':
-		{
-			if (message->GetBool("ok", false))
-				break;
-			const char* text = message->GetInt32("status", -1) == 403
-				? B_TRANSLATE("This playlist cannot be modified.")
-				: B_TRANSLATE("Spotify could not add this item to the playlist.");
-			BAlert* alert = new BAlert("", text, B_TRANSLATE("OK"), nullptr,
-				nullptr, B_WIDTH_AS_USUAL, B_WARNING_ALERT);
-			alert->Go();
-			break;
-		}
-
-		case 'dSts':
-		{
-			std::string uri = message->GetString("uri", "");
-			if (!message->GetBool("ok", false)) {
-				BAlert* alert = new BAlert("", B_TRANSLATE(
-					"Spotify could not check this item's library status."),
-					B_TRANSLATE("OK"), nullptr, nullptr, B_WIDTH_AS_USUAL,
-					B_WARNING_ALERT);
-				alert->Go();
-				break;
-			}
-			if (message->GetBool("saved", false)) {
-				_SelectLibraryTarget(uri);
-				PostLibraryChange("add", uri);
-				break;
-			}
-			App* app = dynamic_cast<App*>(be_app);
-			SpotifyApi* api = app ? app->GetApi() : nullptr;
-			if (!api) break;
-			BMessenger self(this);
-			api->Library().SaveLibraryItems({uri}, [self, uri](bool ok,
-					const nlohmann::json&) {
-				BMessage result('dAdd');
-				result.AddString("uri", uri.c_str());
-				result.AddBool("ok", ok);
-				self.SendMessage(&result);
-			});
-			break;
-		}
-
-		case 'dAdd':
-		{
-			if (message->GetBool("ok", false)) {
-				std::string uri = message->GetString("uri", "");
-				_SelectLibraryTarget(uri);
-				PostLibraryChange("add", uri);
-			} else {
-				BAlert* alert = new BAlert("", B_TRANSLATE(
-					"Spotify could not add this item to your library."),
-					B_TRANSLATE("OK"), nullptr, nullptr, B_WIDTH_AS_USUAL,
-					B_WARNING_ALERT);
-				alert->Go();
-			}
-			break;
-		}
-
-		case 'savA':
-		{
-			const char* uri = message->GetString("uri", "");
-			std::string savedUri = uri ? uri : "";
-			std::string albumId = SpotifyItemIdForUri(savedUri);
-			if (SpotifyItemKindForUri(savedUri) != kSpotifyItemAlbum
-					|| albumId.empty())
-				break;
-			App* app = (App*)be_app;
-			SpotifyApi* api = app->GetApi();
-			if (!api)
-				break;
-			api->Library().SaveAlbum(albumId, [savedUri](bool ok,
-					const nlohmann::json&) {
-				if (ok) PostLibraryChange("add", savedUri);
-			});
-			break;
-		}
-
-		case 'remA':
-		{
-			const char* uri = message->GetString("uri", "");
-			std::string removedUri = uri ? uri : "";
-			std::string albumId = SpotifyItemIdForUri(removedUri);
-			if (SpotifyItemKindForUri(removedUri) != kSpotifyItemAlbum
-					|| albumId.empty())
-				break;
-			App* app = (App*)be_app;
-			SpotifyApi* api = app->GetApi();
-			if (!api)
-				break;
-			api->Library().RemoveSavedAlbum(albumId, [removedUri](bool ok,
-					const nlohmann::json&) {
-				if (ok) PostLibraryChange("remove", removedUri);
-			});
-			break;
-		}
-
-		case 'remI':
-		{
-			std::string uri = message->GetString("uri", "");
-			SpotifyItemKind kind = SpotifyItemKindForUri(uri);
-			App* app = dynamic_cast<App*>(be_app);
-			SpotifyApi* api = app ? app->GetApi() : nullptr;
-			if (!api || uri.empty()) break;
-			BMessenger self(this);
-			auto done = [self, uri](bool ok, const nlohmann::json&) {
-				BMessage result('rmIR');
-				result.AddBool("ok", ok);
-				result.AddString("uri", uri.c_str());
-				self.SendMessage(&result);
-			};
-			std::string id = SpotifyItemIdForUri(uri);
-			if (kind == kSpotifyItemShow)
-				api->Library().UnfollowShow(id, done);
-			else if (kind == kSpotifyItemArtist)
-				api->Library().UnfollowArtist(id, done);
-			else if (kind == kSpotifyItemAudiobook)
-				api->Library().RemoveSavedAudiobook(id, done);
-			break;
-		}
-
-		case 'rmIR':
-			if (message->GetBool("ok", false)) {
-				PostLibraryChange("remove", message->GetString("uri", ""));
-			} else {
-				BAlert* alert = new BAlert("", B_TRANSLATE(
-					"Spotify could not remove this item from your library."),
-					B_TRANSLATE("OK"), nullptr, nullptr, B_WIDTH_AS_USUAL,
-					B_WARNING_ALERT);
-				alert->Go();
-			}
-			break;
-
-		case 'remL':
-		{
-			const char* uri = message->GetString("trackUri", "");
-			std::string removedUri = uri ? uri : "";
-			SpotifyItemKind kind = SpotifyItemKindForUri(removedUri);
-			if (!SpotifyItemIsPlayable(kind)) break;
-			App* app = dynamic_cast<App*>(be_app);
-			SpotifyApi* api = app ? app->GetApi() : nullptr;
-			if (!api) break;
-			api->Library().RemoveLibraryItems({removedUri}, [removedUri](bool ok,
-					const nlohmann::json&) {
-				if (!ok) return;
-				PostLibraryChange("remove", removedUri);
-			});
-			break;
-		}
-
-		case 'tply':
-		{
-			const char* trackUri = message->GetString("trackUri", "");
-			if (!*trackUri) break;
-			BMessage play('play');
-			play.AddString("uri", trackUri);
-			be_app->PostMessage(&play);
-			break;
-		}
-
-		case 'plNw':
-		{
-			BMessage confirm('plNc');
-			TextInputDialog* dlg = new TextInputDialog(
-				B_TRANSLATE("New Playlist"),
-				B_TRANSLATE("Name:"), "", BMessenger(this), confirm);
-			dlg->Show();
-			break;
-		}
-
-		case 'plNc':
-		{
-			const char* name = message->GetString("name", "");
-			if (!*name) break;
-			App* app = (App*)be_app;
-			SpotifyApi* api = app->GetApi();
-			if (!api) break;
-			BMessenger self(this);
-			std::string requestedName = name;
-			api->Playlists().CreatePlaylist(requestedName,
-				[self, requestedName](bool ok, const nlohmann::json& data) {
-				BMessage result('plCr');
-				result.AddBool("ok", ok);
-				nlohmann::json created = MutationResponseBody(data);
-				if (ok && created.is_object()) {
-					std::string id = JsonString(created, "id");
-					std::string uri = JsonString(created, "uri");
-					std::string createdName = JsonString(created, "name",
-						requestedName.c_str());
-					std::string owner = "Spotify";
-					if (created.contains("owner") && created["owner"].is_object())
-						owner = JsonString(created["owner"], "display_name", "Spotify");
-					result.AddString("id", id.c_str());
-					result.AddString("uri", uri.c_str());
-					result.AddString("name", createdName.c_str());
-					result.AddString("owner", owner.c_str());
-				}
-				self.SendMessage(&result);
-			});
-			break;
-		}
-
-		case 'plCr':
-		{
-			if (!message->GetBool("ok", false)) {
-				BAlert* alert = new BAlert("", B_TRANSLATE(
-					"Spotify could not create the playlist."),
-					B_TRANSLATE("OK"), nullptr, nullptr, B_WIDTH_AS_USUAL,
-					B_WARNING_ALERT);
-				alert->Go();
-				break;
-			}
-			std::string id = message->GetString("id", "");
-			if (id.empty()) {
-				be_app->PostMessage(MSG_PLAYLISTS_CHANGED);
-				break;
-			}
-			PostPlaylistChange("add", id,
-				message->GetString("name", "Unknown"),
-				message->GetString("owner", "Spotify"), true, true);
-			break;
-		}
-
-		case 'plRn':
-		{
-			const char* id = message->GetString("id", "");
-			if (!*id) break;
-			std::string currentName;
-			App* app = (App*)be_app;
-			SpotifyApi* api = app->GetApi();
-			if (api) {
-				for (const auto& pl : api->Playlists().GetCachedPlaylists())
-					if (pl.first == id) { currentName = pl.second; break; }
-			}
-			BMessage confirm('plRc');
-			confirm.AddString("id", id);
-			TextInputDialog* dlg = new TextInputDialog(
-				B_TRANSLATE("Rename Playlist"),
-				B_TRANSLATE("Name:"), currentName.c_str(),
-				BMessenger(this), confirm);
-			dlg->Show();
-			break;
-		}
-
-		case 'plRc':
-		{
-			const char* name = message->GetString("name", "");
-			const char* id   = message->GetString("id",   "");
-			if (!*name || !*id) break;
-			App* app = (App*)be_app;
-			SpotifyApi* api = app->GetApi();
-			if (!api) break;
-			BMessenger self(this);
-			std::string sid = id, newName = name;
-			std::string oldName;
-			DiscoverRow* row = _FindPlaylistRow(PlaylistUri(sid));
-			if (row && !row->fTitles.empty()) {
-				oldName = row->fTitles[0];
-				_UpdatePlaylistRow(row, newName, "", row->fWritable,
-					row->fOwned);
-			}
-			api->Playlists().RenamePlaylist(sid, newName,
-				[self, sid, oldName, newName](bool ok, const nlohmann::json&) {
-				BMessage result('plRr');
-				result.AddBool("ok", ok);
-				result.AddString("id", sid.c_str());
-				result.AddString("oldName", oldName.c_str());
-				result.AddString("newName", newName.c_str());
-				self.SendMessage(&result);
-			});
-			break;
-		}
-
-		case 'plRr':
-		{
-			std::string id = message->GetString("id", "");
-			std::string oldName = message->GetString("oldName", "");
-			std::string newName = message->GetString("newName", "");
-			if (message->GetBool("ok", false)) {
-				PostPlaylistChange("rename", id, newName);
-			} else {
-				DiscoverRow* row = _FindPlaylistRow(PlaylistUri(id));
-				if (row && !row->fTitles.empty()
-						&& row->fTitles[0] == newName && !oldName.empty())
-					_UpdatePlaylistRow(row, oldName, "", row->fWritable,
-						row->fOwned);
-				BAlert* alert = new BAlert("", B_TRANSLATE(
-					"Spotify could not rename the playlist."),
-					B_TRANSLATE("OK"), nullptr, nullptr, B_WIDTH_AS_USUAL,
-					B_WARNING_ALERT);
-				alert->Go();
-			}
-			break;
-		}
-
-		case 'plDl':
-		{
-			const char* id      = message->GetString("id",      "");
-			bool        owned   = message->GetBool ("owned",    false);
-			if (!*id) break;
-			const char* label = owned
-				? B_TRANSLATE("Delete Playlist")
-				: B_TRANSLATE("Unfollow Playlist");
-			const char* body  = owned
-				? B_TRANSLATE("Really delete this playlist? This cannot be undone.")
-				: B_TRANSLATE("Unfollow this playlist?");
-			BAlert* alert = new BAlert("", body,
-				B_TRANSLATE("Cancel"), label, nullptr,
-				B_WIDTH_AS_USUAL, B_WARNING_ALERT);
-			if (alert->Go() == 1) {
-				App* app = (App*)be_app;
-				SpotifyApi* api = app->GetApi();
-				if (api) {
-					BMessenger self(this);
-					std::string sid = id;
-					std::string uri = PlaylistUri(sid);
-					if (fPendingPlaylistRemovals.find(sid)
-							!= fPendingPlaylistRemovals.end())
-						break;
-					DiscoverRow* row = _FindPlaylistRow(uri);
-					if (row) {
-						PendingPlaylistRemoval pending = {
-							row, fLists[TAB_PLAYLISTS]->IndexOf(row),
-							fLists[TAB_PLAYLISTS]->CurrentSelection() == row
-						};
-						fLists[TAB_PLAYLISTS]->RemoveRow(row);
-						fPendingPlaylistRemovals[sid] = pending;
-					}
-					api->Playlists().UnfollowPlaylist(sid, [self, sid](bool ok,
-							const nlohmann::json&) {
-						BMessage result('plDr');
-						result.AddBool("ok", ok);
-						result.AddString("id", sid.c_str());
-						self.SendMessage(&result);
-					});
-				}
-			}
-			break;
-		}
-
-		case 'plDr':
-		{
-			std::string id = message->GetString("id", "");
-			auto pending = fPendingPlaylistRemovals.find(id);
-			if (message->GetBool("ok", false)) {
-				if (pending != fPendingPlaylistRemovals.end()) {
-					delete pending->second.row;
-					fPendingPlaylistRemovals.erase(pending);
-				}
-				PostPlaylistChange("remove", id);
-			} else {
-				if (pending != fPendingPlaylistRemovals.end()) {
-					PendingPlaylistRemoval restore = pending->second;
-					fPendingPlaylistRemovals.erase(pending);
-					fLists[TAB_PLAYLISTS]->AddRow(restore.row,
-						restore.index);
-					if (restore.selected)
-						fLists[TAB_PLAYLISTS]->AddToSelection(restore.row);
-				}
-				BAlert* alert = new BAlert("", B_TRANSLATE(
-					"Spotify could not remove the playlist."),
-					B_TRANSLATE("OK"), nullptr, nullptr, B_WIDTH_AS_USUAL,
-					B_WARNING_ALERT);
-				alert->Go();
-			}
-			break;
-		}
+			_SaveCacheNowFromMessage();
+			return true;
 
 		case 'lddt':
 			LoadData();
-			break;
+			return true;
+
+		default:
+			return false;
+	}
+}
+
+
+bool
+DiscoverWindow::_HandlePlaybackOpenMessage(BMessage* message)
+{
+	switch (message->what) {
+		case 'play':
+			_ForwardPlayback(message);
+			return true;
+
+		case 'open':
+			_ForwardOpenRequest(message);
+			return true;
+
+		case 'pStU':
+			_ApplyPlayingTrackUpdate(message);
+			return true;
+
+		case 'rClk':
+			_ShowDiscoverContextMenu(message);
+			return true;
+
+		case 'iCmR':
+			_ShowPlayableContextMenu(message);
+			return true;
+
+		case kMsgLibraryStateCached:
+			_ApplyLibraryStateCached(message);
+			return true;
+
+		case 'tply':
+			_PlayTrackFromMessage(message);
+			return true;
+
+		default:
+			return false;
+	}
+}
+
+
+bool
+DiscoverWindow::_HandleLibraryActionMessage(BMessage* message)
+{
+	switch (message->what) {
+		case 'dDrp':
+			_HandleDiscoverDrop(message);
+			return true;
+
+		case 'dPlA':
+			_ApplyPlaylistDropResult(message);
+			return true;
+
+		case 'dSts':
+			_ApplyLibraryStatusResult(message);
+			return true;
+
+		case 'dAdd':
+			_ApplyLibraryAddResult(message);
+			return true;
+
+		case 'savA':
+			_SaveAlbumFromMessage(message);
+			return true;
+
+		case 'remA':
+			_RemoveAlbumFromMessage(message);
+			return true;
+
+		case 'remI':
+			_RemoveFollowedItem(message);
+			return true;
+
+		case 'rmIR':
+			_ApplyRemoveFollowedItemResult(message);
+			return true;
+
+		case 'remL':
+			_RemovePlayableFromLibrary(message);
+			return true;
+
+		default:
+			return false;
+	}
+}
+
+
+bool
+DiscoverWindow::_HandlePlaylistActionMessage(BMessage* message)
+{
+	switch (message->what) {
+		case 'plNw':
+			_ShowNewPlaylistDialog();
+			return true;
+
+		case 'plNc':
+			_CreatePlaylist(message);
+			return true;
+
+		case 'plCr':
+			_ApplyPlaylistCreateResult(message);
+			return true;
+
+		case 'plRn':
+			_ShowRenamePlaylistDialog(message);
+			return true;
+
+		case 'plRc':
+			_RenamePlaylist(message);
+			return true;
+
+		case 'plRr':
+			_ApplyPlaylistRenameResult(message);
+			return true;
+
+		case 'plDl':
+			_DeletePlaylist(message);
+			return true;
+
+		case 'plDr':
+			_ApplyPlaylistDeleteResult(message);
+			return true;
 
 		case MSG_PLAYLISTS_CHANGED:
-		{
-			const char* operation = nullptr;
-			if (message->FindString("operation", &operation) == B_OK)
-				_ApplyPlaylistChange(message);
-			else
-				ReloadPlaylists();
-			break;
-		}
+			_ApplyPlaylistsChanged(message);
+			return true;
 
 		case MSG_LIBRARY_CHANGED:
-		{
-			const char* operation = nullptr;
-			const char* uri = nullptr;
-			if (message->FindString("operation", &operation) == B_OK
-					&& message->FindString("uri", &uri) == B_OK) {
-				fKnownLibraryStates[uri] = strcmp(operation, "add") == 0;
-				fLibraryStateGenerations[uri]++;
-				_ApplyLibraryChange(message);
-			} else {
-				int32 tab = _LogicalTab(fTabView ? fTabView->Selection() : -1);
-				if (tab == TAB_PLAYLISTS)
-					ReloadPlaylists();
-				else if (tab >= 0) {
-					_InvalidateTabCache(tab);
-					fLoaded[tab] = false;
-					_LoadTab(tab);
-				}
-			}
-			break;
-		}
+			_ApplyLibraryChanged(message);
+			return true;
 
 		case 'lAdd':
 			_ApplyResolvedLibraryAddition(message);
-			break;
+			return true;
 
 		case 'pSyn':
 			_ApplyPlaylistSnapshot(message);
-			break;
+			return true;
 
 		case 'rTab':
-		{
-			int32 tab = -1;
-			if (message->FindInt32("tab", &tab) == B_OK)
-				_ReloadTab(tab);
-			break;
-		}
+			_ReloadTabFromMessage(message);
+			return true;
 
+		default:
+			return false;
+	}
+}
+
+
+bool
+DiscoverWindow::_HandleAppForwardMessage(BMessage* message)
+{
+	switch (message->what) {
 		case MSG_OPEN_BROWSER:
 		case MSG_OPEN_PLAYLIST:
 		case MSG_INIT_AUTH:
 			be_app->PostMessage(message);
-			break;
+			return true;
 
 		case 'sout':
 			be_app->PostMessage('sout');
-			break;
+			return true;
 
 		default:
-			BWindow::MessageReceived(message);
-			break;
+			return false;
 	}
+}
+
+
+void
+DiscoverWindow::_SaveCacheNowFromMessage()
+{
+	delete fCacheSaveRunner;
+	fCacheSaveRunner = nullptr;
+	_WriteCacheNow();
+}
+
+
+void
+DiscoverWindow::_ToggleTabVisibility(BMessage* message)
+{
+	int32 tab;
+	if (message->FindInt32("tab", &tab) != B_OK)
+		return;
+	if (tab < 0 || tab >= TAB_COUNT)
+		return;
+	if (tab == TAB_AUDIOBOOKS && !_AudiobooksEnabled())
+		return;
+	if (fTabVisible[tab]) {
+		int32 visibleCount = 0;
+		for (int i = 0; i < TAB_COUNT; i++) {
+			if (_IsTabEffectivelyVisible(i))
+				visibleCount++;
+		}
+		if (visibleCount <= 1)
+			return;
+	}
+	fTabVisible[tab] = !fTabVisible[tab];
+	fTabMenuItems[tab]->SetMarked(fTabVisible[tab]);
+	SettingsController::Update([&](HaifySettings& settings) {
+		_SaveTabVisibility(settings);
+	});
+	_RebuildTabs();
+}
+
+
+void
+DiscoverWindow::_ResetTabOrder()
+{
+	fTabOrder.clear();
+	for (int32 i = 0; i < TAB_COUNT; i++)
+		fTabOrder.push_back(i);
+	SettingsController::Update([&](HaifySettings& settings) {
+		_SaveTabOrder(settings);
+	});
+	_RebuildTabs();
+}
+
+
+void
+DiscoverWindow::_ApplySpotifyCapabilities()
+{
+	if (fTabMenuItems[TAB_AUDIOBOOKS]) {
+		fTabMenuItems[TAB_AUDIOBOOKS]->SetEnabled(_AudiobooksEnabled());
+		fTabMenuItems[TAB_AUDIOBOOKS]->SetMarked(
+			fTabVisible[TAB_AUDIOBOOKS] && _AudiobooksEnabled());
+	}
+	_RebuildTabs();
+}
+
+
+void
+DiscoverWindow::_SelectTab(BMessage* message)
+{
+	int32 visual = 0;
+	message->FindInt32("tab", &visual);
+	int32 logical = _LogicalTab(visual);
+	if (logical < 0)
+		return;
+	_LoadPersistentCache(logical);
+	if (fLists[logical])
+		((DiscoverListView*)fLists[logical])->SetPlayingUri(fCurrentTrackUri);
+	bool expired = fLoaded[logical]
+		&& (fCacheBacked[logical]
+			|| (system_time() - fLoadTime[logical]) > kCacheExpiry);
+	if (expired && logical == TAB_PLAYLISTS) {
+		ReloadPlaylists();
+	} else if (!fLoaded[logical] || expired) {
+		if (expired)
+			_InvalidateTabCache(logical);
+		fLoaded[logical] = false;
+		_LoadTab(logical);
+	}
+}
+
+
+void
+DiscoverWindow::_ApplyPageDone(BMessage* message)
+{
+	int32 tab = message->GetInt32("tab", -1);
+	if (tab < 0 || tab >= TAB_COUNT)
+		return;
+	if (message->GetInt32("load_generation", -1)
+			!= fTabLoadGeneration[tab])
+		return;
+	fPageLoading[tab] = false;
+	fPageHasMore[tab] = message->GetBool("has_more", false);
+	fPageOffset[tab] = message->GetInt32("next_offset", fPageOffset[tab]);
+	fPageCursor[tab] = message->GetString("next_cursor", "");
+	_CheckLazyLoad();
+}
+
+
+void
+DiscoverWindow::_ApplyDiscoverRows(BMessage* message)
+{
+	RowUpdateData update;
+	if (!_ReadRowUpdate(message, update))
+		return;
+	if (message->GetBool("audiobook_ids_snapshot", false))
+		_ApplyAudiobookIdSnapshot(message);
+
+	if (update.tab == TAB_AUDIOBOOKS && update.snapshotMessage) {
+		fAudiobookIds.clear();
+		fAudiobookIdsKnown = true;
+	}
+	_ApplyRowUpdateRows(message, update);
+	_PruneSnapshotRows(update);
+	_ReorderSnapshotRows(update);
+	_FinishRowUpdate(message, update);
+}
+
+
+bool
+DiscoverWindow::_ReadRowUpdate(BMessage* message, RowUpdateData& update)
+{
+	if (message->FindInt32("tab", &update.tab) != B_OK)
+		return false;
+	if (message->FindInt32("cols", &update.cols) != B_OK || update.cols <= 0)
+		return false;
+	if (update.tab < 0 || update.tab >= TAB_COUNT || !fLists[update.tab])
+		return false;
+
+	update.fromCache = message->GetBool("from_cache", false);
+	update.snapshotMessage = message->GetBool("snapshot", false);
+	if (update.fromCache) {
+		update.snapshotMessage = false;
+		if (!_ApplyCacheRowUpdateStart(message, update))
+			return false;
+	} else if (!_ApplyFreshRowUpdateStart(message, update)) {
+		return false;
+	}
+	_CollectRowUpdateStrings(message, update);
+	update.nRows = (int32)update.allV.size() / update.cols;
+	return true;
+}
+
+
+bool
+DiscoverWindow::_ApplyCacheRowUpdateStart(BMessage* message,
+	RowUpdateData& update)
+{
+	int32 cacheGeneration = message->GetInt32("cache_generation", -1);
+	if (cacheGeneration != fCacheLoadGeneration[update.tab]
+			|| message->GetString("account_id", "") != fCacheAccountId)
+		return false;
+	update.cacheLast = message->GetBool("cache_last", true);
+	if (update.cacheLast)
+		fCacheLoadPending[update.tab] = false;
+	int32 selectedTab = _LogicalTab(fTabView ? fTabView->Selection() : -1);
+	if (!message->GetBool("cache_available", true)
+			|| fFreshSnapshot[update.tab] || update.tab != selectedTab)
+		return false;
+	if (message->GetBool("cache_first", false))
+		fLists[update.tab]->Clear();
+	return true;
+}
+
+
+bool
+DiscoverWindow::_ApplyFreshRowUpdateStart(BMessage* message,
+	const RowUpdateData& update)
+{
+	int32 loadGeneration = -1;
+	return message->FindInt32("load_generation", &loadGeneration) != B_OK
+		|| loadGeneration == fTabLoadGeneration[update.tab];
+}
+
+
+void
+DiscoverWindow::_CollectRowUpdateStrings(BMessage* message,
+	RowUpdateData& update)
+{
+	const char* value;
+	for (int32 i = 0; message->FindString("v", i, &value) == B_OK; i++)
+		update.allV.push_back(value);
+	for (int32 i = 0; message->FindString("u", i, &value) == B_OK; i++)
+		update.allU.push_back(value);
+	for (int32 i = 0; message->FindString("t", i, &value) == B_OK; i++)
+		update.allT.push_back(value);
+}
+
+
+void
+DiscoverWindow::_ApplyRowUpdateRows(BMessage* message, RowUpdateData& update)
+{
+	for (int32 rowIndex = 0; rowIndex < update.nRows; rowIndex++)
+		_ApplyRowUpdateRow(message, update, rowIndex);
+}
+
+
+void
+DiscoverWindow::_ApplyRowUpdateRow(BMessage* message, RowUpdateData& update,
+	int32 rowIndex)
+{
+	if (!_RowUpdateColumnsAvailable(update, rowIndex))
+		return;
+	bool writable = true;
+	message->FindBool("writable", rowIndex, &writable);
+	bool owned = false;
+	message->FindBool("owned", rowIndex, &owned);
+	auto uris = update.allU.begin() + rowIndex * update.cols;
+	if (!_AcceptRowUpdatePrimaryUri(update, *uris))
+		return;
+	if (_ApplyExistingRowUpdateIfPresent(update, rowIndex, writable, owned))
+		return;
+	if (_ShouldSkipPlaceholderRowUpdate(update, *uris))
+		return;
+	_AddRowUpdateRow(update, rowIndex, writable, owned);
+}
+
+
+bool
+DiscoverWindow::_RowUpdateColumnsAvailable(const RowUpdateData& update,
+	int32 rowIndex) const
+{
+	return (int32)update.allU.size() >= (rowIndex + 1) * update.cols
+		&& (int32)update.allT.size() >= (rowIndex + 1) * update.cols;
+}
+
+
+bool
+DiscoverWindow::_AcceptRowUpdatePrimaryUri(RowUpdateData& update,
+	const std::string& uri)
+{
+	if (!uri.empty() && !PrimaryUriMatchesTab(update.tab, uri))
+		return false;
+	std::string primaryId = SpotifyItemIdForUri(uri);
+	if (update.tab == TAB_PODCASTS
+			&& SpotifyEffectiveItemKind(kSpotifyItemShow, primaryId,
+				fAudiobookIds) == kSpotifyItemAudiobook) {
+		return false;
+	}
+	if (update.tab == TAB_AUDIOBOOKS && !primaryId.empty()) {
+		fAudiobookIds.insert(primaryId);
+		fAudiobookIdsKnown = true;
+	}
+	if (!uri.empty()) {
+		update.snapshotUris.insert(uri);
+		update.snapshotOrder.push_back(uri);
+	}
+	return true;
+}
+
+
+bool
+DiscoverWindow::_ApplyExistingRowUpdateIfPresent(
+	const RowUpdateData& update, int32 rowIndex, bool writable, bool owned)
+{
+	auto uris = update.allU.begin() + rowIndex * update.cols;
+	if (uris->empty())
+		return false;
+	DiscoverRow* existing = _FindRow(update.tab, *uris);
+	if (!existing)
+		return false;
+	_ApplyExistingRowUpdate(existing, update, rowIndex, writable, owned);
+	return true;
+}
+
+
+bool
+DiscoverWindow::_ShouldSkipPlaceholderRowUpdate(const RowUpdateData& update,
+	const std::string& uri) const
+{
+	return update.tab >= TAB_SAVED_ALBUMS && update.tab <= TAB_AUDIOBOOKS
+		&& uri.empty() && !update.snapshotMessage
+		&& _RowUpdateHasRealRow(update.tab);
+}
+
+
+void
+DiscoverWindow::_AddRowUpdateRow(const RowUpdateData& update, int32 rowIndex,
+	bool writable, bool owned)
+{
+	auto values = update.allV.begin() + rowIndex * update.cols;
+	auto uris = update.allU.begin() + rowIndex * update.cols;
+	auto titles = update.allT.begin() + rowIndex * update.cols;
+	fLists[update.tab]->AddRow(new DiscoverRow(
+		std::vector<std::string>(values, values + update.cols),
+		std::vector<std::string>(uris, uris + update.cols),
+		std::vector<std::string>(titles, titles + update.cols),
+		writable, owned));
+}
+
+
+bool
+DiscoverWindow::_RowUpdateHasRealRow(int32 tab) const
+{
+	for (int32 i = 0; i < fLists[tab]->CountRows(); i++) {
+		DiscoverRow* existing = dynamic_cast<DiscoverRow*>(
+			fLists[tab]->RowAt(i));
+		if (existing && !existing->fUris.empty()
+				&& !existing->fUris[0].empty())
+			return true;
+	}
+	return false;
+}
+
+
+void
+DiscoverWindow::_ApplyExistingRowUpdate(DiscoverRow* row,
+	const RowUpdateData& update, int32 rowIndex, bool writable, bool owned)
+{
+	auto values = update.allV.begin() + rowIndex * update.cols;
+	auto uris = update.allU.begin() + rowIndex * update.cols;
+	auto titles = update.allT.begin() + rowIndex * update.cols;
+	row->fUris.assign(uris, uris + update.cols);
+	row->fTitles.assign(titles, titles + update.cols);
+	row->fWritable = writable;
+	row->fOwned = owned;
+	for (int32 column = 0; column < update.cols; column++) {
+		BoldStringField* field = dynamic_cast<BoldStringField*>(
+			row->GetField(column));
+		if (field) {
+			field->SetString((values + column)->c_str());
+			field->fEnabled = writable;
+		}
+	}
+	fLists[update.tab]->UpdateRow(row);
+}
+
+
+void
+DiscoverWindow::_PruneSnapshotRows(const RowUpdateData& update)
+{
+	if (!update.snapshotMessage)
+		return;
+	bool keptPlaceholder = false;
+	for (int32 index = fLists[update.tab]->CountRows() - 1;
+			index >= 0; index--) {
+		DiscoverRow* row = dynamic_cast<DiscoverRow*>(
+			fLists[update.tab]->RowAt(index));
+		if (!row)
+			continue;
+		std::string uri = row->fUris.empty() ? "" : row->fUris[0];
+		if (uri.empty() && update.nRows > 0 && !keptPlaceholder) {
+			keptPlaceholder = true;
+			continue;
+		}
+		if (update.snapshotUris.find(uri) == update.snapshotUris.end()) {
+			fLists[update.tab]->RemoveRow(row);
+			delete row;
+		}
+	}
+}
+
+
+void
+DiscoverWindow::_ReorderSnapshotRows(const RowUpdateData& update)
+{
+	if (!update.snapshotMessage)
+		return;
+	for (int32 target = 0; target < (int32)update.snapshotOrder.size();
+			target++) {
+		DiscoverRow* row = _FindRow(update.tab, update.snapshotOrder[target]);
+		if (!row)
+			continue;
+		int32 current = fLists[update.tab]->IndexOf(row);
+		if (current == target)
+			continue;
+		bool selected = fLists[update.tab]->CurrentSelection() == row;
+		fLists[update.tab]->RemoveRow(row);
+		fLists[update.tab]->AddRow(row, target);
+		if (selected)
+			fLists[update.tab]->AddToSelection(row);
+	}
+}
+
+
+void
+DiscoverWindow::_FinishRowUpdate(BMessage*, const RowUpdateData& update)
+{
+	if (update.fromCache && !update.cacheLast)
+		return;
+
+	int32 selectedTab = _LogicalTab(fTabView ? fTabView->Selection() : -1);
+	if (update.tab == selectedTab)
+		((DiscoverListView*)fLists[update.tab])->SetPlayingUri(
+			fCurrentTrackUri);
+	if (update.tab == TAB_AUDIOBOOKS)
+		_RemoveAudiobookDuplicatesFromPodcasts();
+	if (update.fromCache) {
+		fLoaded[update.tab] = true;
+		fCacheBacked[update.tab] = true;
+		fPageLoading[update.tab] = false;
+		fPageHasMore[update.tab] = false;
+		fLoadTime[update.tab] = 0;
+	} else {
+		if (update.snapshotMessage) {
+			fFreshSnapshot[update.tab] = true;
+			fCacheBacked[update.tab] = false;
+		}
+		_ScheduleCacheSave();
+	}
+	_CheckLazyLoad();
+}
+
+
+void
+DiscoverWindow::_ForwardPlayback(BMessage* message)
+{
+	const char* uri = message->GetString("uri", "");
+	if (uri && SpotifyItemIsPlayable(SpotifyItemKindForUri(uri))) {
+		if (fCurrentTrackUri != uri) {
+			fCurrentTrackUri = uri;
+			int32 tab = _LogicalTab(fTabView ? fTabView->Selection() : -1);
+			if (tab >= 0 && fLists[tab])
+				((DiscoverListView*)fLists[tab])->SetPlayingUri(
+					fCurrentTrackUri);
+		}
+	}
+	be_app->PostMessage(message);
+}
+
+
+void
+DiscoverWindow::_ForwardOpenRequest(BMessage* message)
+{
+	const char* uri = nullptr;
+	const char* title = nullptr;
+	message->FindString("uri", &uri);
+	message->FindString("title", &title);
+	if (!uri || !uri[0])
+		return;
+
+	BMessage forward('open');
+	forward.AddString("uri", uri);
+	forward.AddString("title", title ? title : "");
+	be_app->PostMessage(&forward);
+}
+
+
+void
+DiscoverWindow::_ApplyPlayingTrackUpdate(BMessage* message)
+{
+	const char* newUri = nullptr;
+	message->FindString("trackUri", &newUri);
+	if (!newUri)
+		return;
+	std::string uri = newUri;
+	if (fCurrentTrackUri == uri)
+		return;
+	fCurrentTrackUri = uri;
+	int32 tab = _LogicalTab(fTabView ? fTabView->Selection() : -1);
+	if (tab >= 0 && fLists[tab])
+		((DiscoverListView*)fLists[tab])->SetPlayingUri(uri);
+}
+
+
+void
+DiscoverWindow::_ShowDiscoverContextMenu(BMessage* message)
+{
+	const char* uri = nullptr;
+	const char* title = nullptr;
+	BPoint screen;
+	if (message->FindString("uri", &uri) != B_OK)
+		return;
+	message->FindString("title", &title);
+	if (message->FindPoint("screenPt", &screen) != B_OK)
+		return;
+	int32 sourceTab = -1;
+	message->FindInt32("tab", &sourceTab);
+	std::string uriString = uri;
+
+	App* app = (App*)be_app;
+	SpotifyApi* api = app->GetApi();
+
+	SpotifyItemKind kind = SpotifyItemKindForUri(uriString);
+	if (SpotifyItemIsPlayable(kind)) {
+		std::string context = sourceTab == TAB_SAVED_EPISODES
+			? "spotify:saved-episodes" : "";
+		bool saved = sourceTab == TAB_SAVED_EPISODES;
+		auto state = fKnownLibraryStates.find(uriString);
+		if (state != fKnownLibraryStates.end())
+			saved = state->second;
+		else
+			_RequestPlayableLibraryState(uriString);
+		::ShowPlayableItemContextMenu(uriString, context, screen,
+			BMessenger(this), api, false, true, saved);
+	} else if (kind == kSpotifyItemPlaylist) {
+		_ShowPlaylistContextMenu(SpotifyItemIdForUri(uriString),
+			message->GetBool("owned", false), screen);
+	} else if (kind != kSpotifyItemUnknown) {
+		_ShowBrowsableItemContextMenu(uriString, title ? title : "",
+			sourceTab, screen);
+	}
+}
+
+
+void
+DiscoverWindow::_RequestPlayableLibraryState(const std::string& uri)
+{
+	App* app = dynamic_cast<App*>(be_app);
+	SpotifyApi* api = app ? app->GetApi() : nullptr;
+	if (!api)
+		return;
+	int32 generation = ++fLibraryStateGenerations[uri];
+	BMessenger self(this);
+	api->Library().CheckLibraryItems({uri}, [self, uri, generation](bool ok,
+			const nlohmann::json& data) {
+		BMessage result(kMsgLibraryStateCached);
+		result.AddString("uri", uri.c_str());
+		result.AddInt32("generation", generation);
+		result.AddBool("ok", ok && data.is_array() && !data.empty()
+			&& data[0].is_boolean());
+		result.AddBool("saved", ok && data.is_array() && !data.empty()
+			&& data[0].is_boolean() && data[0].get<bool>());
+		self.SendMessage(&result);
+	});
+}
+
+
+void
+DiscoverWindow::_ShowBrowsableItemContextMenu(const std::string& uri,
+	const std::string& title, int32 sourceTab, BPoint screen)
+{
+	BPopUpMenu* menu = new BPopUpMenu("item", false, false);
+	BMessage* openMsg = new BMessage('open');
+	openMsg->AddString("uri", uri.c_str());
+	openMsg->AddString("title", title.c_str());
+	menu->AddItem(new BMenuItem(B_TRANSLATE("Open"), openMsg));
+
+	BMessage* playMsg = new BMessage('play');
+	playMsg->AddString("uri", uri.c_str());
+	menu->AddItem(new BMenuItem(B_TRANSLATE("Play"), playMsg));
+
+	_AddAlbumContextActions(menu, uri, sourceTab);
+	_AddLibraryRemovalContextAction(menu, uri, sourceTab);
+
+	BMenuItem* selected = menu->Go(screen, false, true);
+	if (selected && selected->Message())
+		PostMessage(selected->Message());
+	delete menu;
+}
+
+
+void
+DiscoverWindow::_AddAlbumContextActions(BPopUpMenu* menu,
+	const std::string& uri, int32 sourceTab)
+{
+	if (SpotifyItemKindForUri(uri) != kSpotifyItemAlbum)
+		return;
+	menu->AddSeparatorItem();
+	if (sourceTab == TAB_SAVED_ALBUMS) {
+		BMessage* removeMsg = new BMessage('remA');
+		removeMsg->AddString("uri", uri.c_str());
+		menu->AddItem(new BMenuItem(
+			B_TRANSLATE("Remove from Saved Albums"), removeMsg));
+	} else {
+		BMessage* saveMsg = new BMessage('savA');
+		saveMsg->AddString("uri", uri.c_str());
+		menu->AddItem(new BMenuItem(B_TRANSLATE("Save Album"), saveMsg));
+	}
+}
+
+
+void
+DiscoverWindow::_AddLibraryRemovalContextAction(BPopUpMenu* menu,
+	const std::string& uri, int32 sourceTab)
+{
+	SpotifyItemKind kind = SpotifyItemKindForUri(uri);
+	bool removable = (kind == kSpotifyItemShow && sourceTab == TAB_PODCASTS)
+		|| (kind == kSpotifyItemArtist && sourceTab == TAB_FOLLOWED_ARTISTS)
+		|| (kind == kSpotifyItemAudiobook && sourceTab == TAB_AUDIOBOOKS);
+	if (!removable)
+		return;
+	menu->AddSeparatorItem();
+	BMessage* removeMsg = new BMessage('remI');
+	removeMsg->AddString("uri", uri.c_str());
+	const char* label = kind == kSpotifyItemShow
+		? B_TRANSLATE("Unsubscribe") : kind == kSpotifyItemArtist
+		? B_TRANSLATE("Unfollow Artist") : B_TRANSLATE("Remove from Audiobooks");
+	menu->AddItem(new BMenuItem(label, removeMsg));
+}
+
+
+void
+DiscoverWindow::_ShowPlayableContextMenu(BMessage* message)
+{
+	App* app = dynamic_cast<App*>(be_app);
+	ShowPlayableItemContextMenu(message->GetString("uri", ""),
+		message->GetString("context_uri", ""),
+		message->GetPoint("screen_point", BPoint()), BMessenger(this),
+		app ? app->GetApi() : nullptr,
+		message->GetBool("library_only", false), true,
+		message->GetBool("saved", false));
+}
+
+
+void
+DiscoverWindow::_ApplyLibraryStateCached(BMessage* message)
+{
+	std::string uri = message->GetString("uri", "");
+	if (!message->GetBool("ok", false) || uri.empty()
+			|| message->GetInt32("generation", -1)
+				!= fLibraryStateGenerations[uri])
+		return;
+	fKnownLibraryStates[uri] = message->GetBool("saved", false);
+}
+
+
+void
+DiscoverWindow::_HandleDiscoverDrop(BMessage* message)
+{
+	const char* uri = message->GetString("uri", "");
+	if (!uri || !uri[0])
+		uri = message->GetString("trackUri", "");
+	if (!uri || !uri[0])
+		uri = message->GetString("albumUri", "");
+	if (!uri || !uri[0])
+		return;
+	int32 targetTab = message->GetInt32("tab", -1);
+	std::string targetUri = message->GetString("targetUri", "");
+	if (targetTab == TAB_PLAYLISTS && !targetUri.empty()
+			&& _HandlePlaylistDrop(uri, targetUri,
+				message->GetBool("targetWritable", false))) {
+		return;
+	}
+	_HandleLibraryDrop(uri);
+}
+
+
+void
+DiscoverWindow::_ApplyPlaylistDropResult(BMessage* message)
+{
+	if (message->GetBool("ok", false))
+		return;
+	const char* text = message->GetInt32("status", -1) == 403
+		? B_TRANSLATE("This playlist cannot be modified.")
+		: B_TRANSLATE("Spotify could not add this item to the playlist.");
+	BAlert* alert = new BAlert("", text, B_TRANSLATE("OK"), nullptr, nullptr,
+		B_WIDTH_AS_USUAL, B_WARNING_ALERT);
+	alert->Go();
+}
+
+
+void
+DiscoverWindow::_ApplyLibraryStatusResult(BMessage* message)
+{
+	std::string uri = message->GetString("uri", "");
+	if (!message->GetBool("ok", false)) {
+		BAlert* alert = new BAlert("", B_TRANSLATE(
+			"Spotify could not check this item's library status."),
+			B_TRANSLATE("OK"), nullptr, nullptr, B_WIDTH_AS_USUAL,
+			B_WARNING_ALERT);
+		alert->Go();
+		return;
+	}
+	if (message->GetBool("saved", false)) {
+		_SelectLibraryTarget(uri);
+		PostLibraryChange("add", uri);
+		return;
+	}
+	App* app = dynamic_cast<App*>(be_app);
+	SpotifyApi* api = app ? app->GetApi() : nullptr;
+	if (!api)
+		return;
+	BMessenger self(this);
+	api->Library().SaveLibraryItems({uri}, [self, uri](bool ok,
+			const nlohmann::json&) {
+		BMessage result('dAdd');
+		result.AddString("uri", uri.c_str());
+		result.AddBool("ok", ok);
+		self.SendMessage(&result);
+	});
+}
+
+
+void
+DiscoverWindow::_ApplyLibraryAddResult(BMessage* message)
+{
+	if (message->GetBool("ok", false)) {
+		std::string uri = message->GetString("uri", "");
+		_SelectLibraryTarget(uri);
+		PostLibraryChange("add", uri);
+	} else {
+		BAlert* alert = new BAlert("", B_TRANSLATE(
+			"Spotify could not add this item to your library."),
+			B_TRANSLATE("OK"), nullptr, nullptr, B_WIDTH_AS_USUAL,
+			B_WARNING_ALERT);
+		alert->Go();
+	}
+}
+
+
+void
+DiscoverWindow::_SaveAlbumFromMessage(BMessage* message)
+{
+	const char* uri = message->GetString("uri", "");
+	std::string savedUri = uri ? uri : "";
+	std::string albumId = SpotifyItemIdForUri(savedUri);
+	if (SpotifyItemKindForUri(savedUri) != kSpotifyItemAlbum
+			|| albumId.empty())
+		return;
+	App* app = (App*)be_app;
+	SpotifyApi* api = app->GetApi();
+	if (!api)
+		return;
+	api->Library().SaveAlbum(albumId, [savedUri](bool ok,
+			const nlohmann::json&) {
+		if (ok)
+			PostLibraryChange("add", savedUri);
+	});
+}
+
+
+void
+DiscoverWindow::_RemoveAlbumFromMessage(BMessage* message)
+{
+	const char* uri = message->GetString("uri", "");
+	std::string removedUri = uri ? uri : "";
+	std::string albumId = SpotifyItemIdForUri(removedUri);
+	if (SpotifyItemKindForUri(removedUri) != kSpotifyItemAlbum
+			|| albumId.empty())
+		return;
+	App* app = (App*)be_app;
+	SpotifyApi* api = app->GetApi();
+	if (!api)
+		return;
+	api->Library().RemoveSavedAlbum(albumId, [removedUri](bool ok,
+			const nlohmann::json&) {
+		if (ok)
+			PostLibraryChange("remove", removedUri);
+	});
+}
+
+
+void
+DiscoverWindow::_RemoveFollowedItem(BMessage* message)
+{
+	std::string uri = message->GetString("uri", "");
+	SpotifyItemKind kind = SpotifyItemKindForUri(uri);
+	App* app = dynamic_cast<App*>(be_app);
+	SpotifyApi* api = app ? app->GetApi() : nullptr;
+	if (!api || uri.empty())
+		return;
+	BMessenger self(this);
+	auto done = [self, uri](bool ok, const nlohmann::json&) {
+		BMessage result('rmIR');
+		result.AddBool("ok", ok);
+		result.AddString("uri", uri.c_str());
+		self.SendMessage(&result);
+	};
+	std::string id = SpotifyItemIdForUri(uri);
+	if (kind == kSpotifyItemShow)
+		api->Library().UnfollowShow(id, done);
+	else if (kind == kSpotifyItemArtist)
+		api->Library().UnfollowArtist(id, done);
+	else if (kind == kSpotifyItemAudiobook)
+		api->Library().RemoveSavedAudiobook(id, done);
+}
+
+
+void
+DiscoverWindow::_ApplyRemoveFollowedItemResult(BMessage* message)
+{
+	if (message->GetBool("ok", false)) {
+		PostLibraryChange("remove", message->GetString("uri", ""));
+	} else {
+		BAlert* alert = new BAlert("", B_TRANSLATE(
+			"Spotify could not remove this item from your library."),
+			B_TRANSLATE("OK"), nullptr, nullptr, B_WIDTH_AS_USUAL,
+			B_WARNING_ALERT);
+		alert->Go();
+	}
+}
+
+
+void
+DiscoverWindow::_RemovePlayableFromLibrary(BMessage* message)
+{
+	const char* uri = message->GetString("trackUri", "");
+	std::string removedUri = uri ? uri : "";
+	SpotifyItemKind kind = SpotifyItemKindForUri(removedUri);
+	if (!SpotifyItemIsPlayable(kind))
+		return;
+	App* app = dynamic_cast<App*>(be_app);
+	SpotifyApi* api = app ? app->GetApi() : nullptr;
+	if (!api)
+		return;
+	api->Library().RemoveLibraryItems({removedUri}, [removedUri](bool ok,
+			const nlohmann::json&) {
+		if (!ok)
+			return;
+		PostLibraryChange("remove", removedUri);
+	});
+}
+
+
+void
+DiscoverWindow::_PlayTrackFromMessage(BMessage* message)
+{
+	const char* trackUri = message->GetString("trackUri", "");
+	if (!*trackUri)
+		return;
+	BMessage play('play');
+	play.AddString("uri", trackUri);
+	be_app->PostMessage(&play);
+}
+
+
+void
+DiscoverWindow::_ShowNewPlaylistDialog()
+{
+	BMessage confirm('plNc');
+	TextInputDialog* dialog = new TextInputDialog(
+		B_TRANSLATE("New Playlist"), B_TRANSLATE("Name:"), "",
+		BMessenger(this), confirm);
+	dialog->Show();
+}
+
+
+void
+DiscoverWindow::_CreatePlaylist(BMessage* message)
+{
+	const char* name = message->GetString("name", "");
+	if (!*name)
+		return;
+	App* app = (App*)be_app;
+	SpotifyApi* api = app->GetApi();
+	if (!api)
+		return;
+	BMessenger self(this);
+	std::string requestedName = name;
+	api->Playlists().CreatePlaylist(requestedName,
+		[self, requestedName](bool ok, const nlohmann::json& data) {
+		BMessage result('plCr');
+		result.AddBool("ok", ok);
+		nlohmann::json created = MutationResponseBody(data);
+		if (ok && created.is_object()) {
+			std::string id = JsonString(created, "id");
+			std::string uri = JsonString(created, "uri");
+			std::string createdName = JsonString(created, "name",
+				requestedName.c_str());
+			std::string owner = "Spotify";
+			if (created.contains("owner") && created["owner"].is_object())
+				owner = JsonString(created["owner"], "display_name", "Spotify");
+			result.AddString("id", id.c_str());
+			result.AddString("uri", uri.c_str());
+			result.AddString("name", createdName.c_str());
+			result.AddString("owner", owner.c_str());
+		}
+		self.SendMessage(&result);
+	});
+}
+
+
+void
+DiscoverWindow::_ApplyPlaylistCreateResult(BMessage* message)
+{
+	if (!message->GetBool("ok", false)) {
+		BAlert* alert = new BAlert("", B_TRANSLATE(
+			"Spotify could not create the playlist."),
+			B_TRANSLATE("OK"), nullptr, nullptr, B_WIDTH_AS_USUAL,
+			B_WARNING_ALERT);
+		alert->Go();
+		return;
+	}
+	std::string id = message->GetString("id", "");
+	if (id.empty()) {
+		be_app->PostMessage(MSG_PLAYLISTS_CHANGED);
+		return;
+	}
+	PostPlaylistChange("add", id, message->GetString("name", "Unknown"),
+		message->GetString("owner", "Spotify"), true, true);
+}
+
+
+void
+DiscoverWindow::_ShowRenamePlaylistDialog(BMessage* message)
+{
+	const char* id = message->GetString("id", "");
+	if (!*id)
+		return;
+	std::string currentName;
+	App* app = (App*)be_app;
+	SpotifyApi* api = app->GetApi();
+	if (api) {
+		for (const auto& playlist : api->Playlists().GetCachedPlaylists()) {
+			if (playlist.first == id) {
+				currentName = playlist.second;
+				break;
+			}
+		}
+	}
+	BMessage confirm('plRc');
+	confirm.AddString("id", id);
+	TextInputDialog* dialog = new TextInputDialog(
+		B_TRANSLATE("Rename Playlist"), B_TRANSLATE("Name:"),
+		currentName.c_str(), BMessenger(this), confirm);
+	dialog->Show();
+}
+
+
+void
+DiscoverWindow::_RenamePlaylist(BMessage* message)
+{
+	const char* name = message->GetString("name", "");
+	const char* id = message->GetString("id", "");
+	if (!*name || !*id)
+		return;
+	App* app = (App*)be_app;
+	SpotifyApi* api = app->GetApi();
+	if (!api)
+		return;
+	BMessenger self(this);
+	std::string sid = id;
+	std::string newName = name;
+	std::string oldName;
+	DiscoverRow* row = _FindPlaylistRow(PlaylistUri(sid));
+	if (row && !row->fTitles.empty()) {
+		oldName = row->fTitles[0];
+		_UpdatePlaylistRow(row, newName, "", row->fWritable, row->fOwned);
+	}
+	api->Playlists().RenamePlaylist(sid, newName,
+		[self, sid, oldName, newName](bool ok, const nlohmann::json&) {
+		BMessage result('plRr');
+		result.AddBool("ok", ok);
+		result.AddString("id", sid.c_str());
+		result.AddString("oldName", oldName.c_str());
+		result.AddString("newName", newName.c_str());
+		self.SendMessage(&result);
+	});
+}
+
+
+void
+DiscoverWindow::_ApplyPlaylistRenameResult(BMessage* message)
+{
+	std::string id = message->GetString("id", "");
+	std::string oldName = message->GetString("oldName", "");
+	std::string newName = message->GetString("newName", "");
+	if (message->GetBool("ok", false)) {
+		PostPlaylistChange("rename", id, newName);
+	} else {
+		DiscoverRow* row = _FindPlaylistRow(PlaylistUri(id));
+		if (row && !row->fTitles.empty()
+				&& row->fTitles[0] == newName && !oldName.empty()) {
+			_UpdatePlaylistRow(row, oldName, "", row->fWritable,
+				row->fOwned);
+		}
+		BAlert* alert = new BAlert("", B_TRANSLATE(
+			"Spotify could not rename the playlist."),
+			B_TRANSLATE("OK"), nullptr, nullptr, B_WIDTH_AS_USUAL,
+			B_WARNING_ALERT);
+		alert->Go();
+	}
+}
+
+
+void
+DiscoverWindow::_DeletePlaylist(BMessage* message)
+{
+	const char* id = message->GetString("id", "");
+	bool owned = message->GetBool("owned", false);
+	if (!*id)
+		return;
+	const char* label = owned
+		? B_TRANSLATE("Delete Playlist") : B_TRANSLATE("Unfollow Playlist");
+	const char* body = owned
+		? B_TRANSLATE("Really delete this playlist? This cannot be undone.")
+		: B_TRANSLATE("Unfollow this playlist?");
+	BAlert* alert = new BAlert("", body, B_TRANSLATE("Cancel"), label,
+		nullptr, B_WIDTH_AS_USUAL, B_WARNING_ALERT);
+	if (alert->Go() != 1)
+		return;
+	App* app = (App*)be_app;
+	SpotifyApi* api = app->GetApi();
+	if (!api)
+		return;
+	BMessenger self(this);
+	std::string sid = id;
+	std::string uri = PlaylistUri(sid);
+	if (fPendingPlaylistRemovals.find(sid) != fPendingPlaylistRemovals.end())
+		return;
+	DiscoverRow* row = _FindPlaylistRow(uri);
+	if (row) {
+		PendingPlaylistRemoval pending = {
+			row, fLists[TAB_PLAYLISTS]->IndexOf(row),
+			fLists[TAB_PLAYLISTS]->CurrentSelection() == row
+		};
+		fLists[TAB_PLAYLISTS]->RemoveRow(row);
+		fPendingPlaylistRemovals[sid] = pending;
+	}
+	api->Playlists().UnfollowPlaylist(sid, [self, sid](bool ok,
+			const nlohmann::json&) {
+		BMessage result('plDr');
+		result.AddBool("ok", ok);
+		result.AddString("id", sid.c_str());
+		self.SendMessage(&result);
+	});
+}
+
+
+void
+DiscoverWindow::_ApplyPlaylistDeleteResult(BMessage* message)
+{
+	std::string id = message->GetString("id", "");
+	auto pending = fPendingPlaylistRemovals.find(id);
+	if (message->GetBool("ok", false)) {
+		if (pending != fPendingPlaylistRemovals.end()) {
+			delete pending->second.row;
+			fPendingPlaylistRemovals.erase(pending);
+		}
+		PostPlaylistChange("remove", id);
+	} else {
+		if (pending != fPendingPlaylistRemovals.end()) {
+			PendingPlaylistRemoval restore = pending->second;
+			fPendingPlaylistRemovals.erase(pending);
+			fLists[TAB_PLAYLISTS]->AddRow(restore.row, restore.index);
+			if (restore.selected)
+				fLists[TAB_PLAYLISTS]->AddToSelection(restore.row);
+		}
+		BAlert* alert = new BAlert("", B_TRANSLATE(
+			"Spotify could not remove the playlist."),
+			B_TRANSLATE("OK"), nullptr, nullptr, B_WIDTH_AS_USUAL,
+			B_WARNING_ALERT);
+		alert->Go();
+	}
+}
+
+
+void
+DiscoverWindow::_ApplyPlaylistsChanged(BMessage* message)
+{
+	const char* operation = nullptr;
+	if (message->FindString("operation", &operation) == B_OK)
+		_ApplyPlaylistChange(message);
+	else
+		ReloadPlaylists();
+}
+
+
+void
+DiscoverWindow::_ApplyLibraryChanged(BMessage* message)
+{
+	const char* operation = nullptr;
+	const char* uri = nullptr;
+	if (message->FindString("operation", &operation) == B_OK
+			&& message->FindString("uri", &uri) == B_OK) {
+		fKnownLibraryStates[uri] = strcmp(operation, "add") == 0;
+		fLibraryStateGenerations[uri]++;
+		_ApplyLibraryChange(message);
+	} else {
+		int32 tab = _LogicalTab(fTabView ? fTabView->Selection() : -1);
+		if (tab == TAB_PLAYLISTS)
+			ReloadPlaylists();
+		else if (tab >= 0) {
+			_InvalidateTabCache(tab);
+			fLoaded[tab] = false;
+			_LoadTab(tab);
+		}
+	}
+}
+
+
+void
+DiscoverWindow::_ReloadTabFromMessage(BMessage* message)
+{
+	int32 tab = -1;
+	if (message->FindInt32("tab", &tab) == B_OK)
+		_ReloadTab(tab);
 }
 
 

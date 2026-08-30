@@ -152,6 +152,74 @@ NormalizeAudiobookDescriptionSpacing(const std::string& description)
 	return normalized;
 }
 
+static std::string
+AudiobookDescriptionFromJson(const nlohmann::json& book)
+{
+	std::string description = AudiobookJsonString(book, "description");
+	if (description.empty())
+		description = AudiobookJsonString(book, "html_description");
+	description = StripLeadingAudiobookCredits(description);
+	return NormalizeAudiobookDescriptionSpacing(description);
+}
+
+static void
+AddAudiobookPeople(BMessage& message, const nlohmann::json& book,
+	const char* source, const char* target)
+{
+	if (!book.contains(source) || !book[source].is_array())
+		return;
+
+	for (const auto& person : book[source]) {
+		if (person.is_object())
+			message.AddString(target,
+				AudiobookJsonString(person, "name").c_str());
+	}
+}
+
+static void
+AddAudiobookImage(BMessage& message, const nlohmann::json& book)
+{
+	if (book.contains("images") && book["images"].is_array()
+			&& !book["images"].empty()) {
+		message.AddString("image",
+			AudiobookJsonString(book["images"][0], "url").c_str());
+	}
+}
+
+static void
+SendAudiobookDataMessage(BMessenger self, const std::string& audiobookId,
+	const nlohmann::json& book)
+{
+	if (!book.is_object())
+		return;
+
+	BMessage message('aDat');
+	message.AddString("name",
+		AudiobookJsonString(book, "name", "Unknown").c_str());
+	std::string description = AudiobookDescriptionFromJson(book);
+	message.AddString("description", description.c_str());
+	std::string audiobookUri = SpotifyUriForItemKind(
+		kSpotifyItemAudiobook, audiobookId);
+	message.AddString("uri", audiobookUri.c_str());
+	AddAudiobookPeople(message, book, "authors", "author");
+	AddAudiobookPeople(message, book, "narrators", "narrator");
+	AddAudiobookImage(message, book);
+	self.SendMessage(&message);
+}
+
+static void
+SendAudiobookSavedMessage(BMessenger self, bool ok,
+	const nlohmann::json& data)
+{
+	BMessage message('aSts');
+	bool valid = ok && data.is_array() && !data.empty()
+		&& data[0].is_boolean();
+	message.AddBool("ok", valid);
+	if (valid)
+		message.AddBool("saved", data[0].get<bool>());
+	self.SendMessage(&message);
+}
+
 static int32
 WrappedTitleLineCount(const BFont& font, const std::string& text, float width)
 {
@@ -325,43 +393,12 @@ AudiobookWindow::_Load()
 	std::string audiobookId = fAudiobookId;
 	api->Content().GetAudiobook(fAudiobookId, [self, audiobookId](bool ok,
 			const nlohmann::json& book) {
-		if (!ok || !book.is_object()) return;
-		BMessage message('aDat');
-		message.AddString("name", AudiobookJsonString(book, "name", "Unknown").c_str());
-		std::string description = AudiobookJsonString(book, "description");
-		if (description.empty())
-			description = AudiobookJsonString(book, "html_description");
-		description = StripLeadingAudiobookCredits(description);
-		description = NormalizeAudiobookDescriptionSpacing(description);
-		message.AddString("description", description.c_str());
-		std::string audiobookUri = SpotifyUriForItemKind(
-			kSpotifyItemAudiobook, audiobookId);
-		message.AddString("uri", audiobookUri.c_str());
-		auto addPeople = [&message, &book](const char* source, const char* target) {
-			if (!book.contains(source) || !book[source].is_array()) return;
-			for (const auto& person : book[source]) {
-				if (person.is_object())
-					message.AddString(target,
-						AudiobookJsonString(person, "name").c_str());
-			}
-		};
-		addPeople("authors", "author");
-		addPeople("narrators", "narrator");
-		if (book.contains("images") && book["images"].is_array()
-				&& !book["images"].empty())
-			message.AddString("image",
-				AudiobookJsonString(book["images"][0], "url").c_str());
-		self.SendMessage(&message);
+		if (ok)
+			SendAudiobookDataMessage(self, audiobookId, book);
 	});
 	api->Library().CheckSavedAudiobook(fAudiobookId,
 		[self](bool ok, const nlohmann::json& data) {
-			BMessage message('aSts');
-			bool valid = ok && data.is_array() && !data.empty()
-				&& data[0].is_boolean();
-			message.AddBool("ok", valid);
-			if (valid)
-				message.AddBool("saved", data[0].get<bool>());
-			self.SendMessage(&message);
+			SendAudiobookSavedMessage(self, ok, data);
 		});
 	_LoadChapters(0);
 }
@@ -492,200 +529,264 @@ AudiobookWindow::_NextPlayableChapterUri(const std::string& currentUri) const
 	return "";
 }
 
+
+void
+AudiobookWindow::_ApplyLibraryChanged(BMessage* message)
+{
+	std::string uri = message->GetString("uri", "");
+	std::string operation = message->GetString("operation", "");
+	if (uri == SpotifyUriForItemKind(kSpotifyItemAudiobook, fAudiobookId)
+			&& (operation == "add" || operation == "remove")) {
+		_UpdateSaved(operation == "add");
+	}
+}
+
+
+void
+AudiobookWindow::_ApplyAudiobookData(BMessage* message)
+{
+	fAudiobookUri = message->GetString("uri", "");
+	const char* name = message->GetString("name", B_TRANSLATE("Audiobook"));
+	fAudiobookName = name;
+	_ApplyTitleText();
+	BString windowTitle(B_TRANSLATE("Audiobook: "));
+	windowTitle << name;
+	SetTitle(windowTitle.String());
+	std::string description = message->GetString("description", "");
+	ApplyMediaDescription(fDescription, description);
+	fDescription->Reflow();
+	fDescription->SetLinks(MediaDescriptionLinks(description));
+
+	BString authors;
+	const char* person = nullptr;
+	for (int32 i = 0; message->FindString("author", i, &person) == B_OK; i++) {
+		if (!person || !person[0])
+			continue;
+		if (!authors.IsEmpty()) authors << ", ";
+		authors << person;
+	}
+	BString authorLine;
+	if (!authors.IsEmpty())
+		authorLine << B_TRANSLATE("Author(s): ") << authors;
+	fCredits->SetText(authorLine.String());
+
+	BString narrators;
+	for (int32 i = 0; message->FindString("narrator", i, &person) == B_OK;
+			i++) {
+		if (!narrators.IsEmpty()) narrators << ", ";
+		narrators << person;
+	}
+	BString narratorLine;
+	if (!narrators.IsEmpty())
+		narratorLine << B_TRANSLATE("Narrator(s): ") << narrators;
+	fNarrators->SetText(narratorLine.String());
+	_LoadArtwork(message->GetString("image", ""));
+}
+
+
+void
+AudiobookWindow::_ApplySavedState(BMessage* message)
+{
+	bool ok = message->GetBool("ok", true);
+	if (ok) {
+		_UpdateSaved(message->GetBool("saved", false));
+		if (message->GetBool("changed", false)) {
+			BMessage changed(MSG_LIBRARY_CHANGED);
+			changed.AddString("operation", fSaved ? "add" : "remove");
+			std::string audiobookUri = SpotifyUriForItemKind(
+				kSpotifyItemAudiobook, fAudiobookId);
+			changed.AddString("uri", audiobookUri.c_str());
+			be_app->PostMessage(&changed);
+		}
+		return;
+	}
+
+	bool showError = message->GetBool("show_error", false);
+	fSavePending = false;
+	_UpdateSavedControls();
+	if (showError) {
+		BAlert* alert = new BAlert(B_TRANSLATE("Audiobook"),
+			B_TRANSLATE("The Audiobooks library could not be updated."),
+			B_TRANSLATE("OK"));
+		alert->Go();
+	}
+}
+
+
+void
+AudiobookWindow::_ApplyChapters(BMessage* message)
+{
+	fLoadingChapters = false;
+	if (!message->GetBool("ok", false))
+		return;
+
+	const char* uri = nullptr;
+	for (int32 i = 0; message->FindString("uri", i, &uri) == B_OK; i++) {
+		const char* title = nullptr;
+		int32 durationMs = 0;
+		bool playable = true;
+		message->FindString("title", i, &title);
+		message->FindInt32("duration_ms", i, &durationMs);
+		message->FindBool("playable", i, &playable);
+		std::string chapterUri = uri ? uri : "";
+		std::string chapterTitle = title ? title : "Unknown";
+		int32 seconds = durationMs / 1000;
+		char duration[32];
+		snprintf(duration, sizeof(duration), "%d:%02d", seconds / 60,
+			seconds % 60);
+		std::string displayTitle = chapterTitle;
+		if (!playable) displayTitle += B_TRANSLATE(" (Unavailable)");
+		fChapterList->AddRow(new DiscoverRow(
+			{displayTitle, duration},
+			{playable ? chapterUri : "", ""},
+			{chapterTitle, ""}));
+	}
+	int32 next = message->GetInt32("next_offset", 0);
+	if (next > 0 && next < message->GetInt32("total", 0))
+		_LoadChapters(next);
+}
+
+
+void
+AudiobookWindow::_PlayChapter(BMessage* message)
+{
+	const char* uri = message->GetString("uri", "");
+	if (!*uri)
+		return;
+
+	std::string audiobookUri = fAudiobookUri.empty()
+		? SpotifyUriForItemKind(kSpotifyItemAudiobook, fAudiobookId)
+		: fAudiobookUri;
+	BMessage play('play');
+	play.AddString("uri", uri);
+	play.AddString("title", message->GetString("title", ""));
+	play.AddString("artist", fName->Text());
+	play.AddString(kNowPlayingItemKindField, "chapter");
+	play.AddString(kNowPlayingPrimaryOpenUriField, audiobookUri.c_str());
+	play.AddString(kNowPlayingParentUriField, audiobookUri.c_str());
+	play.AddString(kNowPlayingParentKindField, "audiobook");
+	play.AddString(kNowPlayingAudiobookIdField, fAudiobookId.c_str());
+	std::string nextUri = _NextPlayableChapterUri(uri);
+	if (!nextUri.empty())
+		play.AddString("next_queue_uri", nextUri.c_str());
+	be_app->PostMessage(&play);
+}
+
+
+void
+AudiobookWindow::_RequestChapterDetail(BMessage* message)
+{
+	const char* uri = message->GetString("uri", "");
+	std::string chapterUri = uri ? uri : "";
+	if (SpotifyItemKindForUri(chapterUri) != kSpotifyItemEpisode)
+		return;
+
+	App* app = dynamic_cast<App*>(be_app);
+	SpotifyApi* api = app ? app->GetApi() : nullptr;
+	if (!api)
+		return;
+
+	BMessenger self(this);
+	api->Content().GetChapter(SpotifyItemIdForUri(chapterUri),
+		[self](bool ok, const nlohmann::json& chapter) {
+			if (!ok || !chapter.is_object()) return;
+			BMessage detail('cDtl');
+			detail.AddString("name", chapter.value("name", "Chapter").c_str());
+			detail.AddString("description",
+				chapter.value("description", "").c_str());
+			self.SendMessage(&detail);
+		});
+}
+
+
+void
+AudiobookWindow::_ShowChapterDetail(BMessage* message)
+{
+	BAlert* alert = new BAlert(message->GetString("name", "Chapter"),
+		message->GetString("description", ""), B_TRANSLATE("OK"));
+	alert->Go();
+}
+
+
+void
+AudiobookWindow::_ToggleSaved()
+{
+	if (!fSavedKnown || fSavePending)
+		return;
+
+	App* app = dynamic_cast<App*>(be_app);
+	SpotifyApi* api = app ? app->GetApi() : nullptr;
+	if (!api)
+		return;
+
+	bool target = !fSaved;
+	fSavePending = true;
+	_UpdateSavedControls();
+	BMessenger self(this);
+	auto done = [self, target](bool ok, const nlohmann::json&) {
+		BMessage state('aSts');
+		state.AddBool("ok", ok);
+		state.AddBool("saved", target);
+		state.AddBool("changed", ok);
+		state.AddBool("show_error", !ok);
+		self.SendMessage(&state);
+	};
+	if (target)
+		api->Library().SaveAudiobook(fAudiobookId, done);
+	else
+		api->Library().RemoveSavedAudiobook(fAudiobookId, done);
+}
+
+
+void
+AudiobookWindow::_ApplyCapabilitiesChanged()
+{
+	App* app = dynamic_cast<App*>(be_app);
+	if (!app || !app->GetCapabilities()->AudiobooksEnabled())
+		PostMessage(B_QUIT_REQUESTED);
+}
+
+
 void
 AudiobookWindow::MessageReceived(BMessage* message)
 {
 	switch (message->what) {
 		case MSG_LIBRARY_CHANGED:
-		{
-			std::string uri = message->GetString("uri", "");
-			std::string operation = message->GetString("operation", "");
-			if (uri == SpotifyUriForItemKind(kSpotifyItemAudiobook,
-					fAudiobookId)
-					&& (operation == "add" || operation == "remove")) {
-				_UpdateSaved(operation == "add");
-			}
+			_ApplyLibraryChanged(message);
 			break;
-		}
 
 		case 'aDat':
-		{
-			fAudiobookUri = message->GetString("uri", "");
-			const char* name = message->GetString("name", B_TRANSLATE("Audiobook"));
-			fAudiobookName = name;
-			_ApplyTitleText();
-			BString windowTitle(B_TRANSLATE("Audiobook: "));
-			windowTitle << name;
-			SetTitle(windowTitle.String());
-			std::string description = message->GetString("description", "");
-			ApplyMediaDescription(fDescription, description);
-			fDescription->Reflow();
-			fDescription->SetLinks(MediaDescriptionLinks(description));
-			BString authors;
-			const char* person = nullptr;
-			for (int32 i = 0; message->FindString("author", i, &person) == B_OK; i++) {
-				if (!person || !person[0])
-					continue;
-				if (!authors.IsEmpty()) authors << ", ";
-				authors << person;
-			}
-			BString authorLine;
-			if (!authors.IsEmpty())
-				authorLine << B_TRANSLATE("Author(s): ") << authors;
-			fCredits->SetText(authorLine.String());
+			_ApplyAudiobookData(message);
+			break;
 
-			BString narrators;
-			for (int32 i = 0; message->FindString("narrator", i, &person) == B_OK; i++) {
-				if (!narrators.IsEmpty()) narrators << ", ";
-				narrators << person;
-			}
-			BString narratorLine;
-			if (!narrators.IsEmpty())
-				narratorLine << B_TRANSLATE("Narrator(s): ") << narrators;
-			fNarrators->SetText(narratorLine.String());
-			_LoadArtwork(message->GetString("image", ""));
-			break;
-		}
 		case 'aSts':
-		{
-			bool ok = message->GetBool("ok", true);
-			if (ok) {
-				_UpdateSaved(message->GetBool("saved", false));
-				if (message->GetBool("changed", false)) {
-					BMessage changed(MSG_LIBRARY_CHANGED);
-					changed.AddString("operation", fSaved ? "add" : "remove");
-					std::string audiobookUri = SpotifyUriForItemKind(
-						kSpotifyItemAudiobook, fAudiobookId);
-					changed.AddString("uri", audiobookUri.c_str());
-					be_app->PostMessage(&changed);
-				}
-			} else {
-				bool showError = message->GetBool("show_error", false);
-				fSavePending = false;
-				_UpdateSavedControls();
-				if (showError) {
-					BAlert* alert = new BAlert(B_TRANSLATE("Audiobook"),
-						B_TRANSLATE("The Audiobooks library could not be updated."),
-						B_TRANSLATE("OK"));
-					alert->Go();
-				}
-			}
+			_ApplySavedState(message);
 			break;
-		}
+
 		case 'aChp':
-		{
-			fLoadingChapters = false;
-			if (!message->GetBool("ok", false)) break;
-			const char* uri = nullptr;
-			for (int32 i = 0; message->FindString("uri", i, &uri) == B_OK; i++) {
-				const char* title = nullptr;
-				int32 durationMs = 0;
-				bool playable = true;
-				message->FindString("title", i, &title);
-				message->FindInt32("duration_ms", i, &durationMs);
-				message->FindBool("playable", i, &playable);
-				std::string chapterUri = uri ? uri : "";
-				std::string chapterTitle = title ? title : "Unknown";
-				int32 seconds = durationMs / 1000;
-				char duration[32];
-				snprintf(duration, sizeof(duration), "%d:%02d", seconds / 60,
-					seconds % 60);
-				std::string displayTitle = chapterTitle;
-				if (!playable) displayTitle += B_TRANSLATE(" (Unavailable)");
-				fChapterList->AddRow(new DiscoverRow(
-					{displayTitle, duration},
-					{playable ? chapterUri : "", ""},
-					{chapterTitle, ""}));
-			}
-			int32 next = message->GetInt32("next_offset", 0);
-			if (next > 0 && next < message->GetInt32("total", 0))
-				_LoadChapters(next);
+			_ApplyChapters(message);
 			break;
-		}
+
 		case 'play':
-		{
-			const char* uri = message->GetString("uri", "");
-			if (*uri) {
-				std::string audiobookUri = fAudiobookUri.empty()
-					? SpotifyUriForItemKind(kSpotifyItemAudiobook,
-						fAudiobookId) : fAudiobookUri;
-				BMessage play('play');
-				play.AddString("uri", uri);
-				play.AddString("title", message->GetString("title", ""));
-				play.AddString("artist", fName->Text());
-				play.AddString(kNowPlayingItemKindField, "chapter");
-				play.AddString(kNowPlayingPrimaryOpenUriField,
-					audiobookUri.c_str());
-				play.AddString(kNowPlayingParentUriField,
-					audiobookUri.c_str());
-				play.AddString(kNowPlayingParentKindField, "audiobook");
-				play.AddString(kNowPlayingAudiobookIdField,
-					fAudiobookId.c_str());
-				std::string nextUri = _NextPlayableChapterUri(uri);
-				if (!nextUri.empty())
-					play.AddString("next_queue_uri", nextUri.c_str());
-				be_app->PostMessage(&play);
-			}
+			_PlayChapter(message);
 			break;
-		}
+
 		case 'rClk':
-		{
-			const char* uri = message->GetString("uri", "");
-			std::string chapterUri = uri ? uri : "";
-			if (SpotifyItemKindForUri(chapterUri) != kSpotifyItemEpisode)
-				break;
-			App* app = dynamic_cast<App*>(be_app);
-			SpotifyApi* api = app ? app->GetApi() : nullptr;
-			if (!api) break;
-			BMessenger self(this);
-			api->Content().GetChapter(SpotifyItemIdForUri(chapterUri),
-				[self](bool ok, const nlohmann::json& chapter) {
-					if (!ok || !chapter.is_object()) return;
-					BMessage detail('cDtl');
-					detail.AddString("name", chapter.value("name", "Chapter").c_str());
-					detail.AddString("description",
-						chapter.value("description", "").c_str());
-					self.SendMessage(&detail);
-				});
+			_RequestChapterDetail(message);
 			break;
-		}
+
 		case 'cDtl':
-		{
-			BAlert* alert = new BAlert(message->GetString("name", "Chapter"),
-				message->GetString("description", ""), B_TRANSLATE("OK"));
-			alert->Go();
+			_ShowChapterDetail(message);
 			break;
-		}
+
 		case 'aSav':
-		{
-			if (!fSavedKnown || fSavePending)
-				break;
-			App* app = dynamic_cast<App*>(be_app);
-			SpotifyApi* api = app ? app->GetApi() : nullptr;
-			if (!api) break;
-			bool target = !fSaved;
-			fSavePending = true;
-			_UpdateSavedControls();
-			BMessenger self(this);
-			auto done = [self, target](bool ok, const nlohmann::json&) {
-				BMessage state('aSts');
-				state.AddBool("ok", ok);
-				state.AddBool("saved", target);
-				state.AddBool("changed", ok);
-				state.AddBool("show_error", !ok);
-				self.SendMessage(&state);
-			};
-			if (target) api->Library().SaveAudiobook(fAudiobookId, done);
-			else api->Library().RemoveSavedAudiobook(fAudiobookId, done);
+			_ToggleSaved();
 			break;
-		}
+
 		case MSG_SPOTIFY_CAPABILITIES_CHANGED:
-		{
-			App* app = dynamic_cast<App*>(be_app);
-			if (!app || !app->GetCapabilities()->AudiobooksEnabled())
-				PostMessage(B_QUIT_REQUESTED);
+			_ApplyCapabilitiesChanged();
 			break;
-		}
+
 		default:
 			BWindow::MessageReceived(message);
 			break;

@@ -68,6 +68,16 @@ public:
 private:
 	void				_ShowContextMenuAt(BPoint screenWhere);
 	void				_DispatchClick(bool isDouble);
+	bool				_FindClickTarget(DiscoverRow*& row, int32& column,
+							std::string& title);
+	void				_PostPlayClick(DiscoverRow* row,
+							const std::string& uri,
+							const std::string& title);
+	void				_PostOpenClick(const std::string& uri,
+							const std::string& title);
+	void				_PostRouteClick(DiscoverRow* row,
+							const std::string& uri,
+							const std::string& title);
 	int32				_ColumnAt(float x) const;
 	std::vector<ColAction>	fActions;
 	int32				fLogicalTab;

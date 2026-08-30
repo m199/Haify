@@ -622,6 +622,39 @@ CreateEpisodePageMessage(int32 offset, const nlohmann::json& data)
 }
 
 
+static bool
+IsSecondaryTrackMouseClick(BMessage* message)
+{
+	int32 buttons = 0;
+	return message && message->FindInt32("buttons", &buttons) == B_OK
+		&& (buttons & (B_SECONDARY_MOUSE_BUTTON
+			| B_TERTIARY_MOUSE_BUTTON)) != 0;
+}
+
+
+static bool
+IsTrackListContentView(BView* view)
+{
+	if (!view || dynamic_cast<BScrollBar*>(view))
+		return false;
+	return !view->Name() || strcmp(view->Name(), "header") != 0;
+}
+
+
+static bool
+FindTrackScreenPoint(BMessage* message, BView* view, BPoint& screen)
+{
+	if (message->FindPoint("screen_where", &screen) == B_OK)
+		return true;
+
+	BPoint where;
+	if (message->FindPoint("where", &where) != B_OK)
+		return false;
+	screen = view->ConvertToScreen(where);
+	return true;
+}
+
+
 class TrackListView : public BColumnListView {
 public:
 	TrackListView(const char* name, uint32 flags, border_style border, bool showHorizontalScrollbar)
@@ -636,32 +669,16 @@ public:
 		filter_result Filter(BMessage* msg, BHandler** target) override {
 			if (!fOwner || !msg || msg->what != B_MOUSE_DOWN)
 				return B_DISPATCH_MESSAGE;
-			int32 buttons = 0;
-			if (msg->FindInt32("buttons", &buttons) != B_OK
-					|| (buttons & (B_SECONDARY_MOUSE_BUTTON
-						| B_TERTIARY_MOUSE_BUTTON)) == 0)
+			if (!IsSecondaryTrackMouseClick(msg))
 				return B_DISPATCH_MESSAGE;
 			BView* view = dynamic_cast<BView*>(*target);
-			if (!view || dynamic_cast<BScrollBar*>(view))
+			if (!IsTrackListContentView(view))
 				return B_DISPATCH_MESSAGE;
-			if (view->Name() && strcmp(view->Name(), "header") == 0)
-				return B_DISPATCH_MESSAGE;
-			bool inside = false;
-			for (BView* p = view; p; p = p->Parent()) {
-				if (p == fOwner || p == fOwner->ScrollView()) {
-					inside = true;
-					break;
-				}
-			}
-			if (!inside)
+			if (!_IsInsideOwner(view))
 				return B_DISPATCH_MESSAGE;
 			BPoint screen;
-			if (msg->FindPoint("screen_where", &screen) != B_OK) {
-				BPoint where;
-				if (msg->FindPoint("where", &where) != B_OK)
-					return B_DISPATCH_MESSAGE;
-				screen = view->ConvertToScreen(where);
-			}
+			if (!FindTrackScreenPoint(msg, view, screen))
+				return B_DISPATCH_MESSAGE;
 			BMessage show('rCf!');
 			show.AddPoint("screenPt", screen);
 			if (fOwner->Looper())
@@ -669,6 +686,14 @@ public:
 			return B_SKIP_MESSAGE;
 		}
 	private:
+		bool _IsInsideOwner(BView* view) const {
+			for (BView* p = view; p; p = p->Parent()) {
+				if (p == fOwner || p == fOwner->ScrollView())
+					return true;
+			}
+			return false;
+		}
+
 		TrackListView* fOwner;
 	};
 
@@ -948,353 +973,372 @@ PlaylistWindow::PlaylistWindow(const char* playlistName, const char* uri, const 
 }
 
 
-void
-PlaylistWindow::MessageReceived(BMessage* message)
+bool
+PlaylistWindow::_HandleTrackActionMessage(BMessage* message)
 {
 	switch (message->what) {
-		case 'plRn':
-		{
-			_ShowRenamePlaylistDialog(message);
-			break;
-		}
-
-		case 'plRc':
-		{
-			_RenamePlaylist(message);
-			break;
-		}
-
 		case 'tply':
-		{
 			_PlayTrackFromMessage(message);
-			break;
-		}
-
+			return true;
 		case 'remL':
-		{
 			_RemoveTrackFromLibrary(message);
-			break;
-		}
-
+			return true;
 		case 'iCmR':
-		{
 			_ShowPlayableContextMenu(message);
-			break;
-		}
-
+			return true;
 		case MSG_PLAY_PAUSE:
-		{
 			_PlayContextUri();
-			break;
-		}
-
+			return true;
 		case MSG_TRACK_INVOKED:
-		{
 			_PlayCurrentTrack();
-			break;
-		}
-
+			return true;
 		case 'likT':
-		{
 			_SavePlayableItemToLibrary(message);
-			break;
-		}
-
+			return true;
 		case 'addP':
-		{
 			_AddMessageTrackToPlaylist(message);
-			break;
-		}
-
+			return true;
 		case 'remT':
-		{
 			_RemoveSelectedTracksFromPlaylist(message);
-			break;
-		}
-
+			return true;
 		case 'rTrR':
-		{
 			_ApplyTrackRemovalResult(message);
-			break;
-		}
-
+			return true;
 		case 'pMvR':
-		{
 			_ApplyTrackReorderResult(message);
-			break;
-		}
-
+			return true;
 		case 'pClR':
-		{
 			_ApplyClearPlaylistResult(message);
-			break;
-		}
-
+			return true;
 		case 'pAdR':
-		{
 			_ApplyPlaylistAddResult(message);
-			break;
-		}
-
+			return true;
 		case 'pRmM':
-			if (message->GetBool("ok", false)) {
-				fPlaylistSnapshotId = message->GetString("snapshot_id", "");
-				int32 total = message->GetInt32("total", -1);
-				if (total >= 0)
-					fPageTotal = total;
-				fPageHasMore = fPageOffset < fPageTotal;
-				_UpdatePlaylistTrackInfo();
-			}
-			break;
+			_ApplyPlaylistRemoveMarked(message);
+			return true;
+		case 'drpT':
+			_HandleTrackDrop(message);
+			return true;
+		default:
+			return false;
+	}
+}
 
+
+bool
+PlaylistWindow::_HandleDataMessage(BMessage* message)
+{
+	switch (message->what) {
 		case 'lddt':
-			if (!fTrackReorderPending && !fPlaylistClearPending)
-				_LoadData();
-			break;
-
+			_ReloadDataIfIdle();
+			return true;
 		case 'rfEp':
-			if (SpotifyItemKindForUri(fUri) == kSpotifyItemShow) {
-				_DeleteCache();
-				_LoadData(true);
-			}
-			break;
-
+			_RefreshEpisodes();
+			return true;
 		case kMsgCheckLazyLoad:
 			_CheckLazyLoad();
 			_UpdatePlaylistMenuState();
-			break;
-
+			return true;
 		case kMsgSaveCache:
-			delete fCacheSaveRunner;
-			fCacheSaveRunner = nullptr;
-			_WriteCacheNow();
-			break;
-
+			_SaveCacheNowFromMessage();
+			return true;
 		case 'pLdF':
-		{
 			_ApplyPageLoadFailure(message);
-			break;
-		}
+			return true;
+		case 'pLdt':
+			_ApplyTrackPage(message);
+			return true;
+		case 'uTtl':
+			_ApplyTitleUpdate(message);
+			return true;
+		case 'pStU':
+			_ApplyPlayingTrackUpdate(message);
+			return true;
+		case 'uCov':
+			_ApplyCoverUpdate(message);
+			return true;
+		case kMsgToggleAlbumSaved:
+			_ToggleAlbumSaved();
+			return true;
+		case kMsgReloadArtwork:
+			_ReloadArtwork();
+			return true;
+		case MSG_LIBRARY_CHANGED:
+			_ApplyLibraryChange(message);
+			return true;
+		case kMsgAlbumSavedState:
+			_ApplyAlbumSavedState(message);
+			return true;
+		default:
+			return false;
+	}
+}
 
-		case 'drpT':
-		{
-			_HandleTrackDrop(message);
-			break;
-		}
 
+bool
+PlaylistWindow::_HandlePlaylistEditMessage(BMessage* message)
+{
+	switch (message->what) {
+		case 'plRn':
+			_ShowRenamePlaylistDialog(message);
+			return true;
+		case 'plRc':
+			_RenamePlaylist(message);
+			return true;
+		case 'plMt':
+			_ApplyPlaylistMetadata(message);
+			return true;
+		case 'plUs':
+			_ApplyPlaylistUserState(message);
+			return true;
+		case kMsgEditPlaylist:
+			_ShowPlaylistDetailsDialog();
+			return true;
+		case kMsgPlaylistDetails:
+			_UpdatePlaylistDetails(message);
+			return true;
+		case 'pEdR':
+			_ApplyPlaylistEditResult(message);
+			return true;
+		case kMsgChoosePlaylistCover:
+			_ChoosePlaylistCover();
+			return true;
+		case kMsgPlaylistCoverSelected:
+			_UploadPlaylistCoverFromMessage(message);
+			return true;
+		case 'pCvR':
+			_ApplyPlaylistCoverUploadResult(message);
+			return true;
+		case kMsgClearPlaylist:
+			_ClearPlaylist();
+			return true;
+		case kMsgMovePlaylistItemUp:
+			_MoveSelectedItem(-1);
+			return true;
+		case kMsgMovePlaylistItemDown:
+			_MoveSelectedItem(1);
+			return true;
+		case 'pSnC':
+			_ShowPlaylistSnapshotConflict();
+			return true;
+		default:
+			return false;
+	}
+}
+
+
+bool
+PlaylistWindow::_HandlePlaylistMenuMessage(BMessage* message)
+{
+	switch (message->what) {
+		case kMsgShowAlbumMenu:
+			_ShowAlbumMenuFromMessage(message);
+			return true;
+		case kMsgShowPlaylistMenu:
+			_ShowPlaylistMenuFromMessage(message);
+			return true;
+		case kMsgDeletePlaylist:
+			_DeletePlaylist();
+			return true;
+		case kMsgPlaylistDeleted:
+			_NotifyPlaylistDeleted();
+			return true;
+		case kMsgPlaylistDeleteFailed:
+			_ApplyPlaylistDeleteFailed();
+			return true;
+		default:
+			return false;
+	}
+}
+
+
+bool
+PlaylistWindow::_HandlePodcastMessage(BMessage* message)
+{
+	switch (message->what) {
+		case 'pEpL':
+			_ApplyEpisodePage(message);
+			return true;
+		case 'pEpR':
+			_ApplyPodcastHeadPage(message);
+			return true;
+		case 'subU':
+			_ApplySubscriptionState(message);
+			return true;
+		case 'subS':
+			_TogglePodcastSubscription();
+			return true;
+		case 'srch':
+			_ScheduleEpisodeSearch();
+			return true;
+		case kMsgApplyEpisodeSearch:
+			_ApplyEpisodeSearch(message);
+			return true;
+		case kMsgRetryEpisodeSearch:
+			_RetryEpisodeSearch(message);
+			return true;
+		case 'epSl':
+			_ApplyEpisodeSelection(message);
+			return true;
+		default:
+			return false;
+	}
+}
+
+
+bool
+PlaylistWindow::_HandleAppForwardMessage(BMessage* message)
+{
+	switch (message->what) {
 		case MSG_OPEN_BROWSER:
 		case MSG_OPEN_PLAYLIST:
 		case MSG_INIT_AUTH:
 			be_app->PostMessage(message);
-			break;
-
+			return true;
 		case 'sout':
 			be_app->PostMessage('sout');
-			break;
-
-		case 'pLdt':
-		{
-			_ApplyTrackPage(message);
-			break;
-		}
-
-		case 'uTtl':
-		{
-			const char* title;
-			if (message->FindString("title", &title) == B_OK) {
-				SetTitle((std::string(PlaylistWindowTitlePrefix(fUri))
-					+ title).c_str());
-				fPlaylistName->SetText(title);
-			}
-			break;
-		}
-
-		case 'plMt':
-		{
-			_ApplyPlaylistMetadata(message);
-			break;
-		}
-
-		case 'plUs':
-			_ApplyPlaylistUserState(message);
-			break;
-
-		case kMsgEditPlaylist:
-			_ShowPlaylistDetailsDialog();
-			break;
-
-		case kMsgPlaylistDetails:
-		{
-			_UpdatePlaylistDetails(message);
-			break;
-		}
-
-		case 'pEdR':
-			_ApplyPlaylistEditResult(message);
-			break;
-
-		case kMsgChoosePlaylistCover:
-			_ChoosePlaylistCover();
-			break;
-
-		case kMsgPlaylistCoverSelected:
-		{
-			entry_ref ref;
-			if (message->FindRef("refs", &ref) == B_OK)
-				_UploadPlaylistCover(ref);
-			break;
-		}
-
-		case 'pCvR':
-			_ApplyPlaylistCoverUploadResult(message);
-			break;
-
-		case kMsgClearPlaylist:
-			_ClearPlaylist();
-			break;
-
-		case kMsgMovePlaylistItemUp:
-			_MoveSelectedItem(-1);
-			break;
-
-		case kMsgMovePlaylistItemDown:
-			_MoveSelectedItem(1);
-			break;
-
-		case 'pSnC':
-		{
-			BAlert* alert = new BAlert("", B_TRANSLATE(
-				"The playlist changed on Spotify. Haify will reload it before you try again."),
-				B_TRANSLATE("OK"), nullptr, nullptr, B_WIDTH_AS_USUAL,
-				B_INFO_ALERT);
-			alert->Go();
-			PostMessage('lddt');
-			break;
-		}
-
-		case 'pStU':
-		{
-			const char* trackUri;
-			if (message->FindString("trackUri", &trackUri) == B_OK) {
-				SetPlayingTrack(trackUri);
-			}
-			break;
-		}
-
-		case 'uCov':
-		{
-			const char* url;
-			if (message->FindString("url", &url) != B_OK) break;
-			fCoverUrl = url;
-			if (fCoverView)
-				((ArtworkView*)fCoverView)->LoadUrl(fCoverUrl);
-			break;
-		}
-
-		case kMsgToggleAlbumSaved:
-			_ToggleAlbumSaved();
-			break;
-
-		case kMsgReloadArtwork:
-			_ReloadArtwork();
-			break;
-
-		case MSG_LIBRARY_CHANGED:
-		{
-			_ApplyLibraryChange(message);
-			break;
-		}
-
-		case kMsgAlbumSavedState:
-		{
-			_ApplyAlbumSavedState(message);
-			break;
-		}
-
-		case kMsgShowAlbumMenu:
-		{
-			BPoint screenWhere;
-			if (message->FindPoint("screen_where", &screenWhere) == B_OK)
-				_ShowAlbumContextMenu(screenWhere);
-			break;
-		}
-
-		case kMsgShowPlaylistMenu:
-		{
-			BPoint screenWhere;
-			if (message->FindPoint("screen_where", &screenWhere) == B_OK)
-				_ShowPlaylistContextMenu(screenWhere);
-			break;
-		}
-
-		case kMsgDeletePlaylist:
-			_DeletePlaylist();
-			break;
-
-		case kMsgPlaylistDeleted:
-		{
-			_NotifyPlaylistDeleted();
-			break;
-		}
-
-		case kMsgPlaylistDeleteFailed:
-			fPlaylistDeletePending = false;
-			if (fPlaylistDeleteItem)
-				fPlaylistDeleteItem->SetEnabled(true);
-			break;
-
-		case 'pEpL':
-		{
-			_ApplyEpisodePage(message);
-			break;
-		}
-
-		case 'pEpR':
-		{
-			_ApplyPodcastHeadPage(message);
-			break;
-		}
-
-		case 'subU':
-		{
-			_ApplySubscriptionState(message);
-			break;
-		}
-
-		case 'subS':
-		{
-			_TogglePodcastSubscription();
-			break;
-		}
-
-		case 'srch':
-			_ScheduleEpisodeSearch();
-			break;
-
-		case kMsgApplyEpisodeSearch:
-		{
-			_ApplyEpisodeSearch(message);
-			break;
-		}
-
-		case kMsgRetryEpisodeSearch:
-		{
-			_RetryEpisodeSearch(message);
-			break;
-		}
-
-		case 'epSl':
-		{
-			_ApplyEpisodeSelection(message);
-			break;
-		}
-
+			return true;
 		default:
-			BWindow::MessageReceived(message);
-			break;
+			return false;
 	}
 }
 
+
+void
+PlaylistWindow::_ApplyPlaylistRemoveMarked(BMessage* message)
+{
+	if (!message->GetBool("ok", false))
+		return;
+
+	fPlaylistSnapshotId = message->GetString("snapshot_id", "");
+	int32 total = message->GetInt32("total", -1);
+	if (total >= 0)
+		fPageTotal = total;
+	fPageHasMore = fPageOffset < fPageTotal;
+	_UpdatePlaylistTrackInfo();
+}
+
+
+void
+PlaylistWindow::_ReloadDataIfIdle()
+{
+	if (!fTrackReorderPending && !fPlaylistClearPending)
+		_LoadData();
+}
+
+
+void
+PlaylistWindow::_RefreshEpisodes()
+{
+	if (SpotifyItemKindForUri(fUri) != kSpotifyItemShow)
+		return;
+
+	_DeleteCache();
+	_LoadData(true);
+}
+
+
+void
+PlaylistWindow::_SaveCacheNowFromMessage()
+{
+	delete fCacheSaveRunner;
+	fCacheSaveRunner = nullptr;
+	_WriteCacheNow();
+}
+
+
+void
+PlaylistWindow::_ApplyTitleUpdate(BMessage* message)
+{
+	const char* title;
+	if (message->FindString("title", &title) == B_OK) {
+		SetTitle((std::string(PlaylistWindowTitlePrefix(fUri)) + title).c_str());
+		fPlaylistName->SetText(title);
+	}
+}
+
+
+void
+PlaylistWindow::_UploadPlaylistCoverFromMessage(BMessage* message)
+{
+	entry_ref ref;
+	if (message->FindRef("refs", &ref) == B_OK)
+		_UploadPlaylistCover(ref);
+}
+
+
+void
+PlaylistWindow::_ShowPlaylistSnapshotConflict()
+{
+	BAlert* alert = new BAlert("", B_TRANSLATE(
+		"The playlist changed on Spotify. Haify will reload it before you try again."),
+		B_TRANSLATE("OK"), nullptr, nullptr, B_WIDTH_AS_USUAL, B_INFO_ALERT);
+	alert->Go();
+	PostMessage('lddt');
+}
+
+
+void
+PlaylistWindow::_ApplyPlayingTrackUpdate(BMessage* message)
+{
+	const char* trackUri;
+	if (message->FindString("trackUri", &trackUri) == B_OK)
+		SetPlayingTrack(trackUri);
+}
+
+
+void
+PlaylistWindow::_ApplyCoverUpdate(BMessage* message)
+{
+	const char* url;
+	if (message->FindString("url", &url) != B_OK)
+		return;
+	fCoverUrl = url;
+	if (fCoverView)
+		((ArtworkView*)fCoverView)->LoadUrl(fCoverUrl);
+}
+
+
+void
+PlaylistWindow::_ShowAlbumMenuFromMessage(BMessage* message)
+{
+	BPoint screenWhere;
+	if (message->FindPoint("screen_where", &screenWhere) == B_OK)
+		_ShowAlbumContextMenu(screenWhere);
+}
+
+
+void
+PlaylistWindow::_ShowPlaylistMenuFromMessage(BMessage* message)
+{
+	BPoint screenWhere;
+	if (message->FindPoint("screen_where", &screenWhere) == B_OK)
+		_ShowPlaylistContextMenu(screenWhere);
+}
+
+
+void
+PlaylistWindow::_ApplyPlaylistDeleteFailed()
+{
+	fPlaylistDeletePending = false;
+	if (fPlaylistDeleteItem)
+		fPlaylistDeleteItem->SetEnabled(true);
+}
+
+
+void
+PlaylistWindow::MessageReceived(BMessage* message)
+{
+	if (_HandleTrackActionMessage(message) || _HandleDataMessage(message)
+			|| _HandlePlaylistEditMessage(message)
+			|| _HandlePlaylistMenuMessage(message)
+			|| _HandlePodcastMessage(message)
+			|| _HandleAppForwardMessage(message)) {
+		return;
+	}
+
+	BWindow::MessageReceived(message);
+}
 
 void
 PlaylistWindow::_ShowRenamePlaylistDialog(BMessage* message)

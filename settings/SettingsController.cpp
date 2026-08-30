@@ -214,6 +214,79 @@ std::string SettingsController::DefaultCachePath()
     return destination;
 }
 
+static BPath
+LibrespotCredentialsPath(const std::string& directory, const char* fileName)
+{
+    BPath path(directory.c_str());
+    path.Append(fileName);
+    return path;
+}
+
+static void
+RestoreLibrespotBackupIfNeeded(const char* credentialsPath,
+    const char* backupPath)
+{
+    struct stat backupStat;
+    if (stat(backupPath, &backupStat) != 0)
+        return;
+
+    struct stat credentialsStat;
+    if (stat(credentialsPath, &credentialsStat) == 0)
+        unlink(backupPath);
+    else
+        std::rename(backupPath, credentialsPath);
+}
+
+static bool
+UseExistingLibrespotCredentials(const char* credentialsPath)
+{
+    struct stat st;
+    if (stat(credentialsPath, &st) != 0)
+        return false;
+    chmod(credentialsPath, S_IRUSR | S_IWUSR);
+    return true;
+}
+
+static bool
+IsRegularFile(const char* path)
+{
+    struct stat st;
+    return stat(path, &st) == 0 && S_ISREG(st.st_mode);
+}
+
+static bool
+CopyLibrespotCredentials(const char* sourcePath, const char* destinationPath)
+{
+    std::ifstream input(sourcePath, std::ios::binary);
+    std::ofstream output(destinationPath, std::ios::binary | std::ios::trunc);
+    if (input.is_open() && output.is_open()) {
+        output << input.rdbuf();
+        output.flush();
+        if ((input.good() || input.eof()) && output.good()) {
+            output.close();
+            chmod(destinationPath, S_IRUSR | S_IWUSR);
+            unlink(sourcePath);
+            return true;
+        }
+    }
+    output.close();
+    unlink(destinationPath);
+    return false;
+}
+
+static bool
+MoveLibrespotCredentials(const char* sourcePath, const char* destinationPath)
+{
+    if (std::rename(sourcePath, destinationPath) == 0) {
+        chmod(destinationPath, S_IRUSR | S_IWUSR);
+        return true;
+    }
+
+    // A custom cache may live on another volume, where rename() cannot move
+    // the file. Copy it privately and only remove the old file after success.
+    return CopyLibrespotCredentials(sourcePath, destinationPath);
+}
+
 std::string SettingsController::LibrespotSystemCachePath(
     const HaifySettings& settings)
 {
@@ -221,59 +294,26 @@ std::string SettingsController::LibrespotSystemCachePath(
     if (destination.empty())
         return "";
 
-    BPath credentialsPath(destination.c_str());
-    credentialsPath.Append("credentials.json");
-    BPath backupPath(destination.c_str());
-    backupPath.Append("credentials.json.oauth-backup");
-    struct stat st;
+    BPath credentialsPath = LibrespotCredentialsPath(destination,
+        "credentials.json");
+    BPath backupPath = LibrespotCredentialsPath(destination,
+        "credentials.json.oauth-backup");
 
-    // Recover an interrupted registration. If OAuth already produced new
-    // credentials, the old backup is no longer needed.
-    struct stat backupStat;
-    if (stat(backupPath.Path(), &backupStat) == 0) {
-        if (stat(credentialsPath.Path(), &st) == 0)
-            unlink(backupPath.Path());
-        else
-            std::rename(backupPath.Path(), credentialsPath.Path());
-    }
-
-    if (stat(credentialsPath.Path(), &st) == 0) {
-        chmod(credentialsPath.Path(), S_IRUSR | S_IWUSR);
+    RestoreLibrespotBackupIfNeeded(credentialsPath.Path(), backupPath.Path());
+    if (UseExistingLibrespotCredentials(credentialsPath.Path()))
         return destination;
-    }
 
     std::string oldCache = settings.librespotCachePath.empty()
         ? DefaultCachePath() : settings.librespotCachePath;
     if (oldCache.empty() || oldCache == destination)
         return destination;
 
-    BPath oldCredentialsPath(oldCache.c_str());
-    oldCredentialsPath.Append("credentials.json");
-    if (stat(oldCredentialsPath.Path(), &st) != 0 || !S_ISREG(st.st_mode))
+    BPath oldCredentialsPath = LibrespotCredentialsPath(oldCache,
+        "credentials.json");
+    if (!IsRegularFile(oldCredentialsPath.Path()))
         return destination;
 
-    if (std::rename(oldCredentialsPath.Path(), credentialsPath.Path()) == 0) {
-        chmod(credentialsPath.Path(), S_IRUSR | S_IWUSR);
-        return destination;
-    }
-
-    // A custom cache may live on another volume, where rename() cannot move
-    // the file. Copy it privately and only remove the old file after success.
-    std::ifstream input(oldCredentialsPath.Path(), std::ios::binary);
-    std::ofstream output(credentialsPath.Path(),
-        std::ios::binary | std::ios::trunc);
-    if (input.is_open() && output.is_open()) {
-        output << input.rdbuf();
-        output.flush();
-        if ((input.good() || input.eof()) && output.good()) {
-            output.close();
-            chmod(credentialsPath.Path(), S_IRUSR | S_IWUSR);
-            unlink(oldCredentialsPath.Path());
-            return destination;
-        }
-    }
-    output.close();
-    unlink(credentialsPath.Path());
+    MoveLibrespotCredentials(oldCredentialsPath.Path(), credentialsPath.Path());
     return destination;
 }
 

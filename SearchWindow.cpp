@@ -279,207 +279,53 @@ SearchWindow::MessageReceived(BMessage* message)
 			break;
 
 		case kMsgChkAll:
-		{
-			if (fUpdatingAll) break;
-			_SetAllMode();
+			if (!fUpdatingAll)
+				_SetAllMode();
 			break;
-		}
 
 		case kMsgChkType:
-		{
-			if (fUpdatingAll) break;
-			fUpdatingAll = true;
-			fChkAll->SetValue(B_CONTROL_OFF);
-			fUpdatingAll = false;
-			_EnsureValidSelection();
+			_ApplyTypeSelection();
 			break;
-		}
 
 		case MSG_SPOTIFY_CAPABILITIES_CHANGED:
-			_UpdateCapabilityFilters();
-			_EnsureValidSelection();
+			_ApplyCapabilityChange();
 			break;
 
 		case kMsgResults:
-		{
-			if (message->GetInt32("generation", -1) != fSearchGeneration)
-				break;
-			fList->Clear();
-			int32 count = 0;
-			message->FindInt32("count", &count);
-			if (count < 0) {
-				fStatusLabel->SetText(B_TRANSLATE("Search failed — check connection or sign in."));
-				break;
-			}
-
-			const char* s;
-			int32 i = 0;
-			while (message->FindString("name", i, &s) == B_OK) {
-				const char* type     = message->FindString("type",     i);
-				const char* artist   = message->FindString("artist",   i);
-				const char* album    = message->FindString("album",    i);
-				const char* uri      = message->FindString("uri",      i);
-				const char* artUri   = message->FindString("artUri",   i);
-				const char* albUri   = message->FindString("albUri",   i);
-
-				std::string nameStr   = s       ? s       : "";
-				std::string typeStr   = type    ? type    : "";
-				std::string artStr    = artist  ? artist  : "";
-				std::string albStr    = album   ? album   : "";
-				std::string uriStr    = uri     ? uri     : "";
-				std::string artUriStr = artUri  ? artUri  : "";
-				std::string albUriStr = albUri  ? albUri  : "";
-
-				fList->AddRow(new DiscoverRow(
-					{ nameStr, typeStr, artStr, albStr },
-					{ uriStr,  "",      artUriStr, albUriStr },
-					{ nameStr, "",      artStr,    albStr    }
-				));
-				i++;
-			}
-			if (!fCurrentTrackUri.empty())
-				((DiscoverListView*)fList)->SetPlayingUri(fCurrentTrackUri);
-
-			char buf[64];
-			snprintf(buf, sizeof(buf), B_TRANSLATE("%d result(s)"), count);
-			fStatusLabel->SetText(buf);
+			_ApplyResults(message);
 			break;
-		}
 
 		case 'pStU':
-		{
-			const char* uri = nullptr;
-			if (message->FindString("trackUri", &uri) == B_OK && uri) {
-				fCurrentTrackUri = uri;
-				((DiscoverListView*)fList)->SetPlayingUri(uri);
-			}
+			_ApplyPlayingTrack(message);
 			break;
-		}
 
 		case 'open':
-		{
-			const char* uri   = nullptr;
-			const char* title = nullptr;
-			message->FindString("uri",   &uri);
-			message->FindString("title", &title);
-			if (uri && uri[0]) {
-				BMessage fwd('open');
-				fwd.AddString("uri",   uri);
-				fwd.AddString("title", title ? title : "");
-				be_app->PostMessage(&fwd);
-			}
+			_ForwardOpen(message);
 			break;
-		}
 
 		case 'rClk':
-		{
-			const char* uri = nullptr;
-			const char* title = nullptr;
-			BPoint screenPt;
-			if (message->FindString("uri",      &uri)      != B_OK) break;
-			message->FindString("title", &title);
-			if (message->FindPoint ("screenPt", &screenPt) != B_OK) break;
-			if (!uri || !uri[0]) break;
-			std::string uriStr = uri;
-			SpotifyItemKind kind = SpotifyItemKindForUri(uriStr);
-			if (kind == kSpotifyItemUnknown) break;
-			if (kind == kSpotifyItemAudiobook && !_AudiobooksEnabled()) {
-				fStatusLabel->SetText(B_TRANSLATE(
-					"Audiobooks are not available for this account or market."));
-				break;
-			}
-			App* app = dynamic_cast<App*>(be_app);
-			SpotifyApi* api = app ? app->GetApi() : nullptr;
-			if (!api) break;
-			BMessenger self(this);
-			std::string titleStr = title ? title : "";
-			api->Library().CheckLibraryItems({uriStr}, [self, uriStr,
-					titleStr, screenPt](bool ok,
-					const nlohmann::json& data) {
-				BMessage result('sCmR');
-				result.AddString("uri", uriStr.c_str());
-				result.AddString("title", titleStr.c_str());
-				result.AddPoint("screen_point", screenPt);
-				result.AddBool("known", ok);
-				result.AddBool("saved", ok && data.is_array()
-					&& !data.empty() && data[0].is_boolean()
-					&& data[0].get<bool>());
-				self.SendMessage(&result);
-			});
+			_PrepareContextMenu(message);
 			break;
-		}
 
 		case 'sCmR':
-		{
-			if (!message->GetBool("known", false)) {
-				fStatusLabel->SetText(B_TRANSLATE(
-					"Spotify could not check this item's library status."));
-				break;
-			}
-			std::string uri = message->GetString("uri", "");
-			if (SpotifyItemKindForUri(uri) == kSpotifyItemAudiobook
-					&& !_AudiobooksEnabled()) {
-				fStatusLabel->SetText(B_TRANSLATE(
-					"Audiobooks are not available for this account or market."));
-				break;
-			}
-			App* app = dynamic_cast<App*>(be_app);
-			ShowSearchItemContextMenu(uri,
-				message->GetString("title", ""),
-				message->GetBool("saved", false),
-				message->GetPoint("screen_point", BPoint()), BMessenger(this),
-				app ? app->GetApi() : nullptr);
+			_ShowContextMenu(message);
 			break;
-		}
 
 		case 'sAct':
-		{
-			bool ok = message->GetBool("ok", false);
-			fStatusLabel->SetText(ok
-				? (message->GetBool("add", false)
-					? B_TRANSLATE("Added to your Spotify library.")
-					: B_TRANSLATE("Removed from your Spotify library."))
-				: B_TRANSLATE("Spotify could not update your library."));
-			if (ok) {
-				BMessage changed(MSG_LIBRARY_CHANGED);
-				changed.AddString("operation",
-					message->GetBool("add", false) ? "add" : "remove");
-				changed.AddString("uri", message->GetString("uri", ""));
-				be_app->PostMessage(&changed);
-			}
+			_ApplyLibraryActionResult(message);
 			break;
-		}
 
 		case 'sPlR':
-		{
-			bool ok = message->GetBool("ok", false);
-			fStatusLabel->SetText(ok
-				? B_TRANSLATE("Added to playlist.")
-				: B_TRANSLATE("Spotify could not update the playlist."));
+			_ApplyPlaylistActionResult(message);
 			break;
-		}
 
 		case 'tply':
-		{
-			const char* uri = message->GetString("trackUri", "");
-			if (*uri) {
-				BMessage fwd('play');
-				fwd.AddString("uri", uri);
-				be_app->PostMessage(&fwd);
-			}
+			_PlayTrackFromMessage(message);
 			break;
-		}
 
 		case 'play':
-		{
-			const char* uri = nullptr;
-			if (message->FindString("uri", &uri) == B_OK && uri) {
-				BMessage fwd('play');
-				fwd.AddString("uri", uri);
-				be_app->PostMessage(&fwd);
-			}
+			_ForwardPlay(message);
 			break;
-		}
 
 		default:
 			BWindow::MessageReceived(message);
@@ -488,21 +334,258 @@ SearchWindow::MessageReceived(BMessage* message)
 }
 
 
+void
+SearchWindow::_ApplyTypeSelection()
+{
+	if (fUpdatingAll)
+		return;
+
+	fUpdatingAll = true;
+	fChkAll->SetValue(B_CONTROL_OFF);
+	fUpdatingAll = false;
+	_EnsureValidSelection();
+}
+
+
+void
+SearchWindow::_ApplyCapabilityChange()
+{
+	_UpdateCapabilityFilters();
+	_EnsureValidSelection();
+}
+
+
+void
+SearchWindow::_ApplyResults(BMessage* message)
+{
+	if (message->GetInt32("generation", -1) != fSearchGeneration)
+		return;
+
+	fList->Clear();
+	int32 count = 0;
+	message->FindInt32("count", &count);
+	if (count < 0) {
+		fStatusLabel->SetText(B_TRANSLATE(
+			"Search failed - check connection or sign in."));
+		return;
+	}
+
+	const char* name;
+	int32 index = 0;
+	while (message->FindString("name", index, &name) == B_OK) {
+		const char* type = message->FindString("type", index);
+		const char* artist = message->FindString("artist", index);
+		const char* album = message->FindString("album", index);
+		const char* uri = message->FindString("uri", index);
+		const char* artistUri = message->FindString("artUri", index);
+		const char* albumUri = message->FindString("albUri", index);
+
+		std::string nameStr = name ? name : "";
+		std::string typeStr = type ? type : "";
+		std::string artistStr = artist ? artist : "";
+		std::string albumStr = album ? album : "";
+		std::string uriStr = uri ? uri : "";
+		std::string artistUriStr = artistUri ? artistUri : "";
+		std::string albumUriStr = albumUri ? albumUri : "";
+
+		fList->AddRow(new DiscoverRow(
+			{ nameStr, typeStr, artistStr, albumStr },
+			{ uriStr, "", artistUriStr, albumUriStr },
+			{ nameStr, "", artistStr, albumStr }
+		));
+		index++;
+	}
+	if (!fCurrentTrackUri.empty())
+		((DiscoverListView*)fList)->SetPlayingUri(fCurrentTrackUri);
+
+	char buf[64];
+	snprintf(buf, sizeof(buf), B_TRANSLATE("%d result(s)"), count);
+	fStatusLabel->SetText(buf);
+}
+
+
+void
+SearchWindow::_ApplyPlayingTrack(BMessage* message)
+{
+	const char* uri = nullptr;
+	if (message->FindString("trackUri", &uri) == B_OK && uri) {
+		fCurrentTrackUri = uri;
+		((DiscoverListView*)fList)->SetPlayingUri(uri);
+	}
+}
+
+
+void
+SearchWindow::_ForwardOpen(BMessage* message)
+{
+	const char* uri = nullptr;
+	const char* title = nullptr;
+	message->FindString("uri", &uri);
+	message->FindString("title", &title);
+	if (!uri || !uri[0])
+		return;
+
+	BMessage forward('open');
+	forward.AddString("uri", uri);
+	forward.AddString("title", title ? title : "");
+	be_app->PostMessage(&forward);
+}
+
+
+void
+SearchWindow::_PrepareContextMenu(BMessage* message)
+{
+	const char* uri = nullptr;
+	const char* title = nullptr;
+	BPoint screenPt;
+	if (message->FindString("uri", &uri) != B_OK)
+		return;
+	message->FindString("title", &title);
+	if (message->FindPoint("screenPt", &screenPt) != B_OK)
+		return;
+	if (!uri || !uri[0])
+		return;
+
+	std::string uriStr = uri;
+	SpotifyItemKind kind = SpotifyItemKindForUri(uriStr);
+	if (kind == kSpotifyItemUnknown)
+		return;
+	if (kind == kSpotifyItemAudiobook && !_AudiobooksEnabled()) {
+		fStatusLabel->SetText(B_TRANSLATE(
+			"Audiobooks are not available for this account or market."));
+		return;
+	}
+
+	App* app = dynamic_cast<App*>(be_app);
+	SpotifyApi* api = app ? app->GetApi() : nullptr;
+	if (!api)
+		return;
+
+	BMessenger self(this);
+	std::string titleStr = title ? title : "";
+	api->Library().CheckLibraryItems({uriStr}, [self, uriStr, titleStr,
+			screenPt](bool ok, const nlohmann::json& data) {
+		BMessage result('sCmR');
+		result.AddString("uri", uriStr.c_str());
+		result.AddString("title", titleStr.c_str());
+		result.AddPoint("screen_point", screenPt);
+		result.AddBool("known", ok);
+		result.AddBool("saved", ok && data.is_array()
+			&& !data.empty() && data[0].is_boolean()
+			&& data[0].get<bool>());
+		self.SendMessage(&result);
+	});
+}
+
+
+void
+SearchWindow::_ShowContextMenu(BMessage* message)
+{
+	if (!message->GetBool("known", false)) {
+		fStatusLabel->SetText(B_TRANSLATE(
+			"Spotify could not check this item's library status."));
+		return;
+	}
+
+	std::string uri = message->GetString("uri", "");
+	if (SpotifyItemKindForUri(uri) == kSpotifyItemAudiobook
+			&& !_AudiobooksEnabled()) {
+		fStatusLabel->SetText(B_TRANSLATE(
+			"Audiobooks are not available for this account or market."));
+		return;
+	}
+
+	App* app = dynamic_cast<App*>(be_app);
+	ShowSearchItemContextMenu(uri,
+		message->GetString("title", ""),
+		message->GetBool("saved", false),
+		message->GetPoint("screen_point", BPoint()), BMessenger(this),
+		app ? app->GetApi() : nullptr);
+}
+
+
+void
+SearchWindow::_ApplyLibraryActionResult(BMessage* message)
+{
+	bool ok = message->GetBool("ok", false);
+	fStatusLabel->SetText(ok
+		? (message->GetBool("add", false)
+			? B_TRANSLATE("Added to your Spotify library.")
+			: B_TRANSLATE("Removed from your Spotify library."))
+		: B_TRANSLATE("Spotify could not update your library."));
+	if (!ok)
+		return;
+
+	BMessage changed(MSG_LIBRARY_CHANGED);
+	changed.AddString("operation",
+		message->GetBool("add", false) ? "add" : "remove");
+	changed.AddString("uri", message->GetString("uri", ""));
+	be_app->PostMessage(&changed);
+}
+
+
+void
+SearchWindow::_ApplyPlaylistActionResult(BMessage* message)
+{
+	bool ok = message->GetBool("ok", false);
+	fStatusLabel->SetText(ok
+		? B_TRANSLATE("Added to playlist.")
+		: B_TRANSLATE("Spotify could not update the playlist."));
+}
+
+
+void
+SearchWindow::_PlayTrackFromMessage(BMessage* message)
+{
+	const char* uri = message->GetString("trackUri", "");
+	if (!*uri)
+		return;
+
+	BMessage forward('play');
+	forward.AddString("uri", uri);
+	be_app->PostMessage(&forward);
+}
+
+
+void
+SearchWindow::_ForwardPlay(BMessage* message)
+{
+	const char* uri = nullptr;
+	if (message->FindString("uri", &uri) != B_OK || !uri)
+		return;
+
+	BMessage forward('play');
+	forward.AddString("uri", uri);
+	be_app->PostMessage(&forward);
+}
+
+
 std::string
 SearchWindow::_BuildTypeParam() const
 {
+	struct SearchTypeControl {
+		const BCheckBox* checkbox;
+		const char* type;
+	};
+
 	std::string types;
 	auto add = [&](const char* t) {
 		if (!types.empty()) types += ',';
 		types += t;
 	};
 	bool all = fChkAll->Value() == B_CONTROL_ON;
-	if (all || fChkTracks->Value()     == B_CONTROL_ON) add("track");
-	if (all || fChkArtists->Value()    == B_CONTROL_ON) add("artist");
-	if (all || fChkAlbums->Value()     == B_CONTROL_ON) add("album");
-	if (all || fChkPlaylists->Value()  == B_CONTROL_ON) add("playlist");
-	if (all || fChkShows->Value()      == B_CONTROL_ON) add("show");
-	if (all || fChkEpisodes->Value()   == B_CONTROL_ON) add("episode");
+	const SearchTypeControl controls[] = {
+		{ fChkTracks, "track" },
+		{ fChkArtists, "artist" },
+		{ fChkAlbums, "album" },
+		{ fChkPlaylists, "playlist" },
+		{ fChkShows, "show" },
+		{ fChkEpisodes, "episode" }
+	};
+	for (const SearchTypeControl& control : controls) {
+		if (all || control.checkbox->Value() == B_CONTROL_ON)
+			add(control.type);
+	}
 	if (!fChkAudiobooks->IsHidden()
 			&& (all || fChkAudiobooks->Value() == B_CONTROL_ON))
 		add("audiobook");

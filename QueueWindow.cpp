@@ -27,6 +27,35 @@
 
 static const uint32 kMsgTabSelected = 'tabS';
 
+static bool
+IsSecondaryMouseClick(BMessage* message)
+{
+	int32 buttons = 0;
+	return message && message->FindInt32("buttons", &buttons) == B_OK
+		&& (buttons & (B_SECONDARY_MOUSE_BUTTON
+			| B_TERTIARY_MOUSE_BUTTON)) != 0;
+}
+
+static bool
+IsListContentView(BView* view)
+{
+	if (!view || dynamic_cast<BScrollBar*>(view))
+		return false;
+	return !view->Name() || strcmp(view->Name(), "header") != 0;
+}
+
+static bool
+FindScreenPoint(BMessage* message, BView* view, BPoint& screen)
+{
+	if (message->FindPoint("screen_where", &screen) == B_OK)
+		return true;
+
+	BPoint where;
+	if (message->FindPoint("where", &where) != B_OK)
+		return false;
+	screen = view->ConvertToScreen(where);
+	return true;
+}
 
 
 class QueueRow : public BRow {
@@ -79,32 +108,16 @@ public:
 		filter_result Filter(BMessage* msg, BHandler** target) override {
 			if (!fOwner || !msg || msg->what != B_MOUSE_DOWN)
 				return B_DISPATCH_MESSAGE;
-			int32 buttons = 0;
-			if (msg->FindInt32("buttons", &buttons) != B_OK
-					|| (buttons & (B_SECONDARY_MOUSE_BUTTON
-						| B_TERTIARY_MOUSE_BUTTON)) == 0)
+			if (!IsSecondaryMouseClick(msg))
 				return B_DISPATCH_MESSAGE;
 			BView* view = dynamic_cast<BView*>(*target);
-			if (!view || dynamic_cast<BScrollBar*>(view))
+			if (!IsListContentView(view))
 				return B_DISPATCH_MESSAGE;
-			if (view->Name() && strcmp(view->Name(), "header") == 0)
-				return B_DISPATCH_MESSAGE;
-			bool inside = false;
-			for (BView* p = view; p; p = p->Parent()) {
-				if (p == fOwner || p == fOwner->ScrollView()) {
-					inside = true;
-					break;
-				}
-			}
-			if (!inside)
+			if (!_IsInsideOwner(view))
 				return B_DISPATCH_MESSAGE;
 			BPoint screen;
-			if (msg->FindPoint("screen_where", &screen) != B_OK) {
-				BPoint where;
-				if (msg->FindPoint("where", &where) != B_OK)
-					return B_DISPATCH_MESSAGE;
-				screen = view->ConvertToScreen(where);
-			}
+			if (!FindScreenPoint(msg, view, screen))
+				return B_DISPATCH_MESSAGE;
 			BMessage show('rCf!');
 			show.AddPoint("screenPt", screen);
 			if (fOwner->Looper())
@@ -112,6 +125,14 @@ public:
 			return B_SKIP_MESSAGE;
 		}
 	private:
+		bool _IsInsideOwner(BView* view) const {
+			for (BView* p = view; p; p = p->Parent()) {
+				if (p == fOwner || p == fOwner->ScrollView())
+					return true;
+			}
+			return false;
+		}
+
 		QueueListView* fOwner;
 	};
 
@@ -322,139 +343,34 @@ QueueWindow::MessageReceived(BMessage* message)
 		{
 			int32 tab = 0;
 			message->FindInt32("tab", &tab);
-			if (tab == 1 && !fRecentLoaded)
-				_LoadRecent();
+			_LoadRecentIfNeeded(tab);
 			break;
 		}
 
 		case 'qRfr':
 		case 'lddt':
-			_LoadQueue();
-			if (fRecentLoaded) {
-				fRecentLoaded = false;
-				if (fTabView && fTabView->Selection() == 1)
-					_LoadRecent();
-			}
+			_RefreshQueueAndRecent();
 			break;
 
 		case 'pStU':
-		{
-			const char* uri;
-			if (message->FindString("trackUri", &uri) == B_OK)
-				SetPlayingTrack(uri);
+			_ApplyPlayingTrack(message);
 			break;
-		}
 
 		case 'qItm':
-		{
-			int32 incomingCount = 0;
-			const char* incomingUri = nullptr;
-			while (message->FindString("uri", incomingCount,
-					&incomingUri) == B_OK)
-				incomingCount++;
-			bool sameSequence = incomingCount == fList->CountRows();
-			for (int32 i = 0; sameSequence && i < incomingCount; i++) {
-				QueueRow* row = dynamic_cast<QueueRow*>(fList->RowAt(i));
-				const char* uri = message->FindString("uri", i);
-				sameSequence = row && uri && row->fUri == uri;
-			}
-			if (sameSequence) {
-				for (int32 i = 0; i < incomingCount; i++) {
-					QueueRow* row = dynamic_cast<QueueRow*>(fList->RowAt(i));
-					const char* title = message->FindString("title", i);
-					const char* artist = message->FindString("artist", i);
-					const char* duration = message->FindString("duration", i);
-					bool playing = false;
-					message->FindBool("playing", i, &playing);
-					row->fIsPlaying = playing;
-					if (QueueTitleField* field = dynamic_cast<QueueTitleField*>(
-							row->GetField(0))) {
-						field->SetString(title ? title : "");
-						field->fIsPlaying = playing;
-					}
-					if (BStringField* field = dynamic_cast<BStringField*>(
-							row->GetField(1)))
-						field->SetString(artist ? artist : "");
-					if (BStringField* field = dynamic_cast<BStringField*>(
-							row->GetField(2)))
-						field->SetString(duration ? duration : "");
-					fList->UpdateRow(row);
-				}
-				if (!fCurrentUri.empty())
-					SetPlayingTrack(fCurrentUri.c_str());
-				break;
-			}
-
-			fList->Clear();
-
-			const char* s;
-			for (int32 i = 0; message->FindString("uri", i, &s) == B_OK; i++) {
-				const char* title    = message->FindString("title",    i);
-				const char* artist   = message->FindString("artist",   i);
-				const char* duration = message->FindString("duration", i);
-				bool        playing  = false;
-				message->FindBool("playing", i, &playing);
-
-				QueueRow* row = new QueueRow(s);
-				row->fIsPlaying = playing;
-				QueueTitleField* tf = new QueueTitleField(title ? title : "");
-				tf->fIsPlaying = playing;
-				row->SetField(tf,                                               0);
-				row->SetField(new BStringField(artist   ? artist   : ""),       1);
-				row->SetField(new BStringField(duration ? duration : ""),       2);
-				fList->AddRow(row);
-			}
-			if (!fCurrentUri.empty())
-				SetPlayingTrack(fCurrentUri.c_str());
+			_ApplyQueueItems(message);
 			break;
-		}
 
 		case 'rRow':
-		{
-
-			fRecentList->Clear();
-			const char* s;
-			for (int32 i = 0; message->FindString("tUri", i, &s) == B_OK; i++) {
-				const char* tName  = message->FindString("tName",  i);
-				const char* aName  = message->FindString("aName",  i);
-				const char* aUri   = message->FindString("aUri",   i);
-				const char* lName  = message->FindString("lName",  i);
-				const char* lUri   = message->FindString("lUri",   i);
-				fRecentList->AddRow(new DiscoverRow(
-					{ tName  ? tName  : "",
-					  aName  ? aName  : "",
-					  lName  ? lName  : "" },
-					{ s,
-					  aUri   ? aUri   : "",
-					  lUri   ? lUri   : "" },
-					{ tName  ? tName  : "",
-					  aName  ? aName  : "",
-					  lName  ? lName  : "" }
-				));
-			}
-			if (!fCurrentUri.empty())
-				((DiscoverListView*)fRecentList)->SetPlayingUri(fCurrentUri);
+			_ApplyRecentRows(message);
 			break;
-		}
 
 		case 'tply':
-		{
-			const char* uri = message->GetString("trackUri", "");
-			if (*uri) {
-				BMessage play('play');
-				play.AddString("uri", uri);
-				be_app->PostMessage(&play);
-			}
+			_PlayTrackFromMessage(message);
 			break;
-		}
 
 		case 'play':
-		{
-			const char* uri = nullptr;
-			if (message->FindString("uri", &uri) == B_OK && uri)
-				be_app->PostMessage(message);
+			_ForwardPlayMessage(message);
 			break;
-		}
 
 		case 'open':
 			be_app->PostMessage(message);
@@ -464,6 +380,186 @@ QueueWindow::MessageReceived(BMessage* message)
 			BWindow::MessageReceived(message);
 			break;
 	}
+}
+
+
+void
+QueueWindow::_LoadRecentIfNeeded(int32 tab)
+{
+	if (tab == 1 && !fRecentLoaded)
+		_LoadRecent();
+}
+
+
+void
+QueueWindow::_RefreshQueueAndRecent()
+{
+	_LoadQueue();
+	if (!fRecentLoaded)
+		return;
+
+	fRecentLoaded = false;
+	if (fTabView && fTabView->Selection() == 1)
+		_LoadRecent();
+}
+
+
+void
+QueueWindow::_ApplyPlayingTrack(BMessage* message)
+{
+	const char* uri;
+	if (message->FindString("trackUri", &uri) == B_OK)
+		SetPlayingTrack(uri);
+}
+
+
+void
+QueueWindow::_ApplyQueueItems(BMessage* message)
+{
+	int32 incomingCount = _QueueMessageCount(message);
+	if (_CanUpdateQueueRows(message, incomingCount))
+		_UpdateQueueRows(message, incomingCount);
+	else
+		_RebuildQueueRows(message);
+	_ApplyCurrentPlayingTrack();
+}
+
+
+int32
+QueueWindow::_QueueMessageCount(BMessage* message) const
+{
+	int32 incomingCount = 0;
+	const char* incomingUri = nullptr;
+	while (message->FindString("uri", incomingCount, &incomingUri) == B_OK)
+		incomingCount++;
+	return incomingCount;
+}
+
+
+bool
+QueueWindow::_CanUpdateQueueRows(BMessage* message, int32 count) const
+{
+	if (count != fList->CountRows())
+		return false;
+
+	for (int32 i = 0; i < count; i++) {
+		QueueRow* row = dynamic_cast<QueueRow*>(fList->RowAt(i));
+		const char* uri = message->FindString("uri", i);
+		if (!row || !uri || row->fUri != uri)
+			return false;
+	}
+	return true;
+}
+
+
+void
+QueueWindow::_UpdateQueueRows(BMessage* message, int32 count)
+{
+	for (int32 i = 0; i < count; i++) {
+		QueueRow* row = dynamic_cast<QueueRow*>(fList->RowAt(i));
+		const char* title = message->FindString("title", i);
+		const char* artist = message->FindString("artist", i);
+		const char* duration = message->FindString("duration", i);
+		bool playing = false;
+		message->FindBool("playing", i, &playing);
+
+		row->fIsPlaying = playing;
+		if (QueueTitleField* field = dynamic_cast<QueueTitleField*>(
+				row->GetField(0))) {
+			field->SetString(title ? title : "");
+			field->fIsPlaying = playing;
+		}
+		if (BStringField* field = dynamic_cast<BStringField*>(
+				row->GetField(1)))
+			field->SetString(artist ? artist : "");
+		if (BStringField* field = dynamic_cast<BStringField*>(
+				row->GetField(2)))
+			field->SetString(duration ? duration : "");
+		fList->UpdateRow(row);
+	}
+}
+
+
+void
+QueueWindow::_RebuildQueueRows(BMessage* message)
+{
+	fList->Clear();
+
+	const char* uri;
+	for (int32 i = 0; message->FindString("uri", i, &uri) == B_OK; i++) {
+		const char* title = message->FindString("title", i);
+		const char* artist = message->FindString("artist", i);
+		const char* duration = message->FindString("duration", i);
+		bool playing = false;
+		message->FindBool("playing", i, &playing);
+
+		QueueRow* row = new QueueRow(uri);
+		row->fIsPlaying = playing;
+		QueueTitleField* titleField = new QueueTitleField(title ? title : "");
+		titleField->fIsPlaying = playing;
+		row->SetField(titleField, 0);
+		row->SetField(new BStringField(artist ? artist : ""), 1);
+		row->SetField(new BStringField(duration ? duration : ""), 2);
+		fList->AddRow(row);
+	}
+}
+
+
+void
+QueueWindow::_ApplyCurrentPlayingTrack()
+{
+	if (!fCurrentUri.empty())
+		SetPlayingTrack(fCurrentUri.c_str());
+}
+
+
+void
+QueueWindow::_ApplyRecentRows(BMessage* message)
+{
+	fRecentList->Clear();
+	const char* uri;
+	for (int32 i = 0; message->FindString("tUri", i, &uri) == B_OK; i++) {
+		const char* trackName = message->FindString("tName", i);
+		const char* artistName = message->FindString("aName", i);
+		const char* artistUri = message->FindString("aUri", i);
+		const char* albumName = message->FindString("lName", i);
+		const char* albumUri = message->FindString("lUri", i);
+		fRecentList->AddRow(new DiscoverRow(
+			{ trackName ? trackName : "",
+			  artistName ? artistName : "",
+			  albumName ? albumName : "" },
+			{ uri,
+			  artistUri ? artistUri : "",
+			  albumUri ? albumUri : "" },
+			{ trackName ? trackName : "",
+			  artistName ? artistName : "",
+			  albumName ? albumName : "" }
+		));
+	}
+	if (!fCurrentUri.empty())
+		((DiscoverListView*)fRecentList)->SetPlayingUri(fCurrentUri);
+}
+
+
+void
+QueueWindow::_PlayTrackFromMessage(BMessage* message)
+{
+	const char* uri = message->GetString("trackUri", "");
+	if (!*uri)
+		return;
+
+	BMessage play('play');
+	play.AddString("uri", uri);
+	be_app->PostMessage(&play);
+}
+
+
+void
+QueueWindow::_ForwardPlayMessage(BMessage* message)
+{
+	const char* uri = nullptr;
+	if (message->FindString("uri", &uri) == B_OK && uri)
+		be_app->PostMessage(message);
 }
 
 

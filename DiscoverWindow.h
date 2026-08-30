@@ -9,6 +9,7 @@
 #include <vector>
 
 class BMenuBar;
+class BPopUpMenu;
 class BTab;
 class BTabView;
 class BColumnListView;
@@ -32,12 +33,112 @@ public:
 								BHandler* target);
 
 private:
+	struct RowUpdateData {
+		int32					tab = -1;
+		int32					cols = 0;
+		bool					fromCache = false;
+		bool					cacheLast = true;
+		bool					snapshotMessage = false;
+		int32					nRows = 0;
+		std::vector<std::string>	allV;
+		std::vector<std::string>	allU;
+		std::vector<std::string>	allT;
+		std::set<std::string>	snapshotUris;
+		std::vector<std::string>	snapshotOrder;
+	};
+
 	void					_InitMenu();
 	void					_InitLayout();
 	BColumnListView*		_MakeList(int32 logicalTab);
 	void					_LoadTab(int32 logicalTab,
 								bool nextPage = false);
 	void					_CheckLazyLoad();
+	void					_ToggleTabVisibility(BMessage* message);
+	void					_ResetTabOrder();
+	void					_ApplySpotifyCapabilities();
+	void					_SelectTab(BMessage* message);
+	void					_ApplyPageDone(BMessage* message);
+	bool					_HandleTabMessage(BMessage* message);
+	bool					_HandleDataMessage(BMessage* message);
+	bool					_HandlePlaybackOpenMessage(BMessage* message);
+	bool					_HandleLibraryActionMessage(BMessage* message);
+	bool					_HandlePlaylistActionMessage(BMessage* message);
+	bool					_HandleAppForwardMessage(BMessage* message);
+	void					_SaveCacheNowFromMessage();
+	void					_ApplyDiscoverRows(BMessage* message);
+	bool					_ReadRowUpdate(BMessage* message,
+								RowUpdateData& update);
+	bool					_ApplyCacheRowUpdateStart(BMessage* message,
+								RowUpdateData& update);
+	bool					_ApplyFreshRowUpdateStart(BMessage* message,
+								const RowUpdateData& update);
+	void					_CollectRowUpdateStrings(BMessage* message,
+								RowUpdateData& update);
+	void					_ApplyRowUpdateRows(BMessage* message,
+								RowUpdateData& update);
+	void					_ApplyRowUpdateRow(BMessage* message,
+								RowUpdateData& update, int32 rowIndex);
+	bool					_RowUpdateColumnsAvailable(
+								const RowUpdateData& update,
+								int32 rowIndex) const;
+	bool					_AcceptRowUpdatePrimaryUri(
+								RowUpdateData& update,
+								const std::string& uri);
+	bool					_ApplyExistingRowUpdateIfPresent(
+								const RowUpdateData& update,
+								int32 rowIndex, bool writable, bool owned);
+	bool					_ShouldSkipPlaceholderRowUpdate(
+								const RowUpdateData& update,
+								const std::string& uri) const;
+	void					_AddRowUpdateRow(const RowUpdateData& update,
+								int32 rowIndex, bool writable, bool owned);
+	bool					_RowUpdateHasRealRow(int32 tab) const;
+	void					_ApplyExistingRowUpdate(DiscoverRow* row,
+								const RowUpdateData& update, int32 rowIndex,
+								bool writable, bool owned);
+	void					_PruneSnapshotRows(
+								const RowUpdateData& update);
+	void					_ReorderSnapshotRows(
+								const RowUpdateData& update);
+	void					_FinishRowUpdate(BMessage* message,
+								const RowUpdateData& update);
+	void					_ForwardPlayback(BMessage* message);
+	void					_ForwardOpenRequest(BMessage* message);
+	void					_ApplyPlayingTrackUpdate(BMessage* message);
+	void					_ShowDiscoverContextMenu(BMessage* message);
+	void					_RequestPlayableLibraryState(
+								const std::string& uri);
+	void					_ShowBrowsableItemContextMenu(
+								const std::string& uri,
+								const std::string& title, int32 sourceTab,
+								BPoint screen);
+	void					_AddAlbumContextActions(BPopUpMenu* menu,
+								const std::string& uri, int32 sourceTab);
+	void					_AddLibraryRemovalContextAction(BPopUpMenu* menu,
+								const std::string& uri, int32 sourceTab);
+	void					_ShowPlayableContextMenu(BMessage* message);
+	void					_ApplyLibraryStateCached(BMessage* message);
+	void					_HandleDiscoverDrop(BMessage* message);
+	void					_ApplyPlaylistDropResult(BMessage* message);
+	void					_ApplyLibraryStatusResult(BMessage* message);
+	void					_ApplyLibraryAddResult(BMessage* message);
+	void					_SaveAlbumFromMessage(BMessage* message);
+	void					_RemoveAlbumFromMessage(BMessage* message);
+	void					_RemoveFollowedItem(BMessage* message);
+	void					_ApplyRemoveFollowedItemResult(BMessage* message);
+	void					_RemovePlayableFromLibrary(BMessage* message);
+	void					_PlayTrackFromMessage(BMessage* message);
+	void					_ShowNewPlaylistDialog();
+	void					_CreatePlaylist(BMessage* message);
+	void					_ApplyPlaylistCreateResult(BMessage* message);
+	void					_ShowRenamePlaylistDialog(BMessage* message);
+	void					_RenamePlaylist(BMessage* message);
+	void					_ApplyPlaylistRenameResult(BMessage* message);
+	void					_DeletePlaylist(BMessage* message);
+	void					_ApplyPlaylistDeleteResult(BMessage* message);
+	void					_ApplyPlaylistsChanged(BMessage* message);
+	void					_ApplyLibraryChanged(BMessage* message);
+	void					_ReloadTabFromMessage(BMessage* message);
 	void					_InvalidateTabCache(int32 logicalTab);
 	void					_LoadPersistentCache(int32 logicalTab);
 	void					_ScheduleCacheSave();

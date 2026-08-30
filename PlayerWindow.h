@@ -11,6 +11,7 @@ class BMenuBar;
 class BMenuItem;
 class BMessageRunner;
 class PlayerBarView;
+class SpotifyApi;
 
 class PlayerWindow : public BWindow {
 public:
@@ -31,7 +32,35 @@ private:
 	void					_ScheduleVerifyPoll(bigtime_t delay);
 	void					_ApplyPredictedNext();
 	void					_ApplyPlaybackMessage(BMessage* message);
+	bool					_HandlePlaybackMessage(BMessage* message);
+	bool					_HandleTransportMessage(BMessage* message);
+	bool					_HandleInterfaceMessage(BMessage* message);
+	bool					_ForwardAppMessage(BMessage* message);
+	bool					_HandleAccountDeviceMessage(BMessage* message);
+	void					_ApplyPlaybackPollResult(BMessage* message);
+	void					_ApplyAudiobookContextResult(BMessage* message);
 	void					_PlayUri(BMessage* message);
+	void					_ApplyQueuePrediction(BMessage* message);
+	void					_ApplyVerifyPoll();
+	void					_TogglePlayPause();
+	void					_SkipNextTrack();
+	void					_SkipPreviousTrack();
+	void					_SetVolumeFromMessage(BMessage* message);
+	void					_ToggleMute();
+	bool					_RestoreMutedVolumeIfNeeded(SpotifyApi* api);
+	void					_ApplyMuteToggle(BMessage* message);
+	void					_ToggleShuffle();
+	void					_ToggleRepeat();
+	void					_ToggleLibrespotAutostart();
+	void					_SeekFromMessage(BMessage* message);
+	void					_ApplySeekBarColor(BMessage* message);
+	void					_ApplyDroppedSeekBarColor(BMessage* message);
+	void					_SaveCurrentTrack();
+	void					_PrepareAddTrackMenu(BMessage* message);
+	void					_ShowAddTrackMenuFromMessage(BMessage* message);
+	void					_ApplyAuthStatus(BMessage* message);
+	void					_ApplyDeviceList(BMessage* message);
+	void					_TransferToDevice(BMessage* message);
 	void					_ApplyOptimisticPlay(BMessage* message);
 	void					_ResolveAudiobookContextForPlayback(
 								const std::string& trackUri,

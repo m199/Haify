@@ -42,6 +42,22 @@ private:
 	void						_BroadcastSeekbarColor();
 	void						_UpdateReplicantPreview();
 	void						_BroadcastReplicantAppearance();
+	bool						_HandleGeneralMessage(BMessage* message);
+	bool						_HandleAppearanceMessage(BMessage* message);
+	bool						_HandlePathLibrespotMessage(BMessage* message);
+	bool						_HandleSpotifyMessage(BMessage* message);
+	void						_RevertCurrentCategory();
+	void						_ResetSeekbarColor();
+	void						_ResetReplicantColor();
+	void						_ApplyDroppedSeekbarColor(BMessage* message);
+	void						_ApplyPanelResult(BMessage* message,
+									BTextControl* target);
+	void						_StartLibrespotFromSettings();
+	void						_RegisterLibrespotFromSettings();
+	void						_ClearImageCache();
+	void						_RetryAudiobookCapabilities();
+	void						_ApplySpotifyProfile(BMessage* message);
+	void						_OpenSpotifyProfile();
 
 	BListView*					fCategoryList		= nullptr;
 	BCardLayout*				fCardLayout		= nullptr;

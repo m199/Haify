@@ -356,296 +356,922 @@ App::_RemoveDeskbarReplicant()
 
 
 void
-App::MessageReceived(BMessage* message)
+App::_ToggleDeskbarReplicant(BMessage* message)
+{
+	if (message->GetBool("enabled", true))
+		_InstallDeskbarReplicant();
+	else
+		_RemoveDeskbarReplicant();
+}
+
+
+void
+App::_ShowSettingsWindow()
+{
+	SettingsWindow* settings = FindOpenWindow<SettingsWindow>(this);
+	if (settings) {
+		settings->Activate();
+		return;
+	}
+	SettingsWindow* window = new SettingsWindow();
+	window->Show();
+}
+
+
+void
+App::_ShowDiscoverWindow()
+{
+	DiscoverWindow* window = FindOpenWindow<DiscoverWindow>(this);
+	if (window)
+		window->Activate();
+	else {
+		window = new DiscoverWindow();
+		window->Show();
+	}
+	_SendCurrentTrackTo(window);
+}
+
+
+void
+App::_OpenPlaylistWindow(BMessage* message)
+{
+	const char* name = "Rock Classics";
+	const char* uri = "";
+	const char* coverUrl = "";
+	message->FindString("name", &name);
+	message->FindString("uri", &uri);
+	message->FindString("coverUrl", &coverUrl);
+	std::string uriString = uri ? uri : "";
+	PlaylistWindow* window = FindOpenWindow<PlaylistWindow>(this,
+		[&](PlaylistWindow* candidate) {
+			return candidate->GetUri() == uriString;
+		});
+	if (window)
+		window->Activate();
+	else {
+		window = new PlaylistWindow(name, uri, coverUrl);
+		window->Show();
+	}
+	_SendCurrentTrackTo(window);
+}
+
+
+void
+App::_BroadcastPlaylistsChanged(BMessage* message)
+{
+	for (int32 i = 0; i < CountWindows(); i++) {
+		DiscoverWindow* window = dynamic_cast<DiscoverWindow*>(WindowAt(i));
+		if (window)
+			window->PostMessage(message);
+	}
+}
+
+
+void
+App::_BroadcastLibraryChanged(BMessage* message)
+{
+	const char* operation = nullptr;
+	const char* uri = nullptr;
+	bool isDelta = message->FindString("operation", &operation) == B_OK
+		&& message->FindString("uri", &uri) == B_OK;
+	for (int32 i = 0; i < CountWindows(); i++) {
+		BWindow* window = WindowAt(i);
+		if (DiscoverWindow* discover =
+				dynamic_cast<DiscoverWindow*>(window)) {
+			if (isDelta)
+				discover->PostMessage(message);
+			else
+				discover->PostMessage('lddt');
+		} else if (isDelta
+				&& (dynamic_cast<ArtistWindow*>(window)
+					|| dynamic_cast<PlaylistWindow*>(window)
+					|| dynamic_cast<AudiobookWindow*>(window)
+					|| dynamic_cast<EpisodeWindow*>(window))) {
+			window->PostMessage(message);
+		}
+	}
+}
+
+
+void
+App::_ApplySpotifyCapabilitiesMessage(BMessage* message)
+{
+	if (message->GetBool("probe_result", false))
+		_BroadcastSpotifyCapabilities();
+	else
+		RefreshSpotifyCapabilities(message->GetBool("force", false));
+}
+
+
+void
+App::_ApplySpotifyAccount(BMessage* message)
+{
+	std::string accountId = message->GetString("account_id", "");
+	if (accountId.empty())
+		return;
+	std::string providerAccountId =
+		message->GetString("provider_account_id", "");
+	HaifySettings settings = SettingsController::Load();
+	bool changed = !settings.spotifyAccountId.empty()
+		&& settings.spotifyAccountId != accountId
+		&& (providerAccountId.empty()
+			|| settings.spotifyAccountId != providerAccountId);
+	SettingsController::Update([&](HaifySettings& value) {
+		value.spotifyAccountId = accountId;
+	});
+	if (changed) {
+		fApi->ClearSession();
+		fApi->SetAccountId(accountId);
+		fApi->SetAccessToken(settings.accessToken);
+		fCapabilities.Reset();
+		RefreshSpotifyCapabilities(true);
+		for (int32 i = 0; i < CountWindows(); i++) {
+			BWindow* window = WindowAt(i);
+			if (window)
+				window->PostMessage('lddt');
+		}
+	} else {
+		fApi->SetAccountId(accountId);
+	}
+
+	// GetPlaylists may have completed before the profile ID was known.
+	// Rebuild its writable-playlist cache now with the resolved identity.
+	BMessenger application(this);
+	fApi->Playlists().GetPlaylists([application](bool ok,
+			const nlohmann::json&) {
+		if (!ok)
+			return;
+		BMessage refreshed(MSG_PLAYLISTS_CHANGED);
+		application.SendMessage(&refreshed);
+	});
+}
+
+
+void
+App::_ShowArtistWindow(BMessage* message)
+{
+	const char* id = "";
+	message->FindString("id", &id);
+	if (!id || !id[0])
+		return;
+	std::string idString = id;
+	ArtistWindow* window = FindOpenWindow<ArtistWindow>(this,
+		[&](ArtistWindow* candidate) {
+			return candidate->GetArtistId() == idString;
+		});
+	if (window)
+		window->Activate();
+	else {
+		window = new ArtistWindow(idString);
+		window->Show();
+	}
+	_SendCurrentTrackTo(window);
+}
+
+
+void
+App::_RegisterReplicant(BMessage* message)
+{
+	BMessenger messenger;
+	if (message->FindMessenger("messenger", &messenger) != B_OK
+			|| !messenger.IsValid())
+		return;
+	bool external = message->GetBool("external", true);
+	bool known = false;
+	for (auto& registration : fReplicants) {
+		if (registration.messenger == messenger) {
+			registration.external = external;
+			known = true;
+			break;
+		}
+	}
+	if (!known)
+		fReplicants.push_back({messenger, external});
+	if (!fLastReplicantState.IsEmpty())
+		messenger.SendMessage(&fLastReplicantState);
+	HaifySettings settings = SettingsController::Load();
+	BMessage colorMessage(MSG_SEEKBAR_COLOR_CHANGED);
+	colorMessage.AddBool("use_system", settings.seekBarUseSystemColor);
+	colorMessage.AddInt32("red", settings.seekBarColorRed);
+	colorMessage.AddInt32("green", settings.seekBarColorGreen);
+	colorMessage.AddInt32("blue", settings.seekBarColorBlue);
+	colorMessage.AddInt32("alpha", settings.seekBarColorAlpha);
+	messenger.SendMessage(&colorMessage);
+	BMessage appearance(MSG_REPLICANT_APPEARANCE_CHANGED);
+	appearance.AddBool("appearance_automatic",
+		settings.replicantUseAutomaticColor);
+	appearance.AddInt32("appearance_red", settings.replicantColorRed);
+	appearance.AddInt32("appearance_green", settings.replicantColorGreen);
+	appearance.AddInt32("appearance_blue", settings.replicantColorBlue);
+	appearance.AddInt32("appearance_alpha", settings.replicantColorAlpha);
+	appearance.AddBool("automatic", settings.replicantUseAutomaticColor);
+	appearance.AddInt32("red", settings.replicantColorRed);
+	appearance.AddInt32("green", settings.replicantColorGreen);
+	appearance.AddInt32("blue", settings.replicantColorBlue);
+	appearance.AddInt32("alpha", settings.replicantColorAlpha);
+	messenger.SendMessage(&appearance);
+	if (fPlayerWindow)
+		fPlayerWindow->PostMessage(MSG_SYNC_REPLICANT_STATE);
+}
+
+
+void
+App::_BroadcastReplicantSettings(BMessage* message)
+{
+	if (fPlayerWindow)
+		fPlayerWindow->PostMessage(message);
+	for (auto& registration : fReplicants) {
+		if (registration.messenger.IsValid())
+			registration.messenger.SendMessage(message);
+	}
+}
+
+
+void
+App::_UnregisterReplicant(BMessage* message)
+{
+	BMessenger messenger;
+	if (message->FindMessenger("messenger", &messenger) != B_OK)
+		return;
+	for (auto it = fReplicants.begin(); it != fReplicants.end();) {
+		if (it->messenger == messenger)
+			it = fReplicants.erase(it);
+		else
+			++it;
+	}
+}
+
+
+void
+App::_ApplyReplicantState(BMessage* message)
+{
+	std::string oldTrackUri = fLastReplicantState.GetString("track_uri", "");
+	fLastReplicantState = *message;
+	std::string newTrackUri = fLastReplicantState.GetString("track_uri", "");
+	if (!newTrackUri.empty() && newTrackUri != oldTrackUri)
+		_BroadcastPlayingTrack(newTrackUri.c_str());
+	for (auto& registration : fReplicants) {
+		if (registration.messenger.IsValid())
+			registration.messenger.SendMessage(message);
+		else
+			registration.messenger = BMessenger();
+	}
+	for (int32 i = 0; i < CountWindows(); i++) {
+		BWindow* window = WindowAt(i);
+		if (window && window != fPlayerWindow)
+			window->PostMessage(message);
+	}
+}
+
+
+void
+App::_ForwardPlayerCommand(BMessage* message)
+{
+	if (message->what == 'play') {
+		const char* uri = message->GetString("uri", "");
+		if ((!uri || !uri[0]))
+			uri = message->GetString("trackUri", "");
+		if (uri && SpotifyItemIsPlayable(SpotifyItemKindForUri(uri)))
+			_BroadcastPlayingTrack(uri);
+	}
+	if (fPlayerWindow)
+		fPlayerWindow->PostMessage(message);
+}
+
+
+void
+App::_ForwardPlaybackPoll(BMessage* message)
+{
+	delete fLibrespotPlaybackPollTimer;
+	fLibrespotPlaybackPollTimer = nullptr;
+	if (fPlayerWindow)
+		fPlayerWindow->PostMessage(message);
+}
+
+
+void
+App::_ShowQueueWindow()
+{
+	QueueWindow* window = FindOpenWindow<QueueWindow>(this);
+	if (window)
+		window->Activate();
+	else {
+		window = new QueueWindow();
+		window->Show();
+	}
+	_SendCurrentTrackTo(window);
+}
+
+
+void
+App::_ShowSearchWindow()
+{
+	SearchWindow* window = FindOpenWindow<SearchWindow>(this);
+	if (window)
+		window->Activate();
+	else {
+		window = new SearchWindow();
+		window->Show();
+	}
+	_SendCurrentTrackTo(window);
+}
+
+
+void
+App::_OpenSpotifyUri(BMessage* message)
+{
+	const char* uri = nullptr;
+	const char* title = nullptr;
+	message->FindString("uri", &uri);
+	message->FindString("title", &title);
+	if (!uri || !uri[0])
+		return;
+	std::string uriString = uri;
+	std::string titleString = title ? title : "";
+	SpotifyItemKind kind = SpotifyItemKindForUri(uriString);
+	if (kind == kSpotifyItemArtist)
+		_OpenArtistUri(SpotifyItemIdForUri(uriString));
+	else if (kind == kSpotifyItemEpisode)
+		_OpenEpisodeUri(SpotifyItemIdForUri(uriString));
+	else if (kind == kSpotifyItemAudiobook)
+		_OpenAudiobookUri(SpotifyItemIdForUri(uriString));
+	else if (kind == kSpotifyItemTrack) {
+		BMessage play('play');
+		play.AddString("uri", uriString.c_str());
+		PostMessage(&play);
+	} else if (_ShouldResolveShowAsAudiobook(message, kind)) {
+		_ResolveShowOrAudiobook(uriString, titleString);
+	} else if (_CanOpenPlaylistStyleUri(uriString, kind)) {
+		_OpenCollectionWindow(uriString, titleString);
+	} else {
+		_ShowUnsupportedSpotifyItemAlert();
+	}
+}
+
+
+bool
+App::_ShouldResolveShowAsAudiobook(BMessage* message, SpotifyItemKind kind) const
+{
+	return kind == kSpotifyItemShow
+		&& !message->GetBool("skip_audiobook_resolution", false)
+		&& fCapabilities.AudiobooksEnabled() && fApi;
+}
+
+
+bool
+App::_CanOpenPlaylistStyleUri(const std::string& uri, SpotifyItemKind kind) const
+{
+	return uri == "spotify:collection" || kind == kSpotifyItemAlbum
+		|| kind == kSpotifyItemPlaylist || kind == kSpotifyItemShow;
+}
+
+
+void
+App::_OpenArtistUri(const std::string& id)
+{
+	if (id.empty())
+		return;
+	ArtistWindow* window = FindOpenWindow<ArtistWindow>(this,
+		[&](ArtistWindow* candidate) {
+			return candidate->GetArtistId() == id;
+		});
+	if (window)
+		window->Activate();
+	else {
+		window = new ArtistWindow(id);
+		window->Show();
+	}
+	_SendCurrentTrackTo(window);
+}
+
+
+void
+App::_OpenEpisodeUri(const std::string& id)
+{
+	if (id.empty())
+		return;
+	EpisodeWindow* window = FindOpenWindow<EpisodeWindow>(this,
+		[&](EpisodeWindow* candidate) {
+			return candidate->GetEpisodeId() == id;
+		});
+	if (window)
+		window->Activate();
+	else {
+		window = new EpisodeWindow(id);
+		window->Show();
+	}
+}
+
+
+void
+App::_OpenAudiobookUri(const std::string& id)
+{
+	if (!fCapabilities.AudiobooksEnabled()) {
+		BAlert* alert = new BAlert("", B_TRANSLATE(
+			"Audiobooks are not available for this account or market."),
+			B_TRANSLATE("OK"));
+		alert->Go();
+		return;
+	}
+	if (id.empty())
+		return;
+	AudiobookWindow* window = FindOpenWindow<AudiobookWindow>(this,
+		[&](AudiobookWindow* candidate) {
+			return candidate->GetAudiobookId() == id;
+		});
+	if (window)
+		window->Activate();
+	else {
+		window = new AudiobookWindow(id);
+		window->Show();
+	}
+}
+
+
+void
+App::_ResolveShowOrAudiobook(const std::string& uri, const std::string& title)
+{
+	std::string id = SpotifyItemIdForUri(uri);
+	if (id.empty()) {
+		BMessage retry('open');
+		retry.AddString("uri", uri.c_str());
+		retry.AddString("title", title.c_str());
+		retry.AddBool("skip_audiobook_resolution", true);
+		PostMessage(&retry);
+		return;
+	}
+	BMessenger app(this);
+	fApi->Content().GetAudiobook(id, [app, uri, id, title](bool ok,
+			const nlohmann::json& book) {
+		BMessage resolved('open');
+		if (ok && book.is_object()) {
+			std::string audiobookUri;
+			if (book.contains("uri") && book["uri"].is_string())
+				audiobookUri = book["uri"].get<std::string>();
+			if (SpotifyItemKindForUri(audiobookUri) != kSpotifyItemAudiobook)
+				audiobookUri = SpotifyUriForItemKind(kSpotifyItemAudiobook, id);
+			resolved.AddString("uri", audiobookUri.c_str());
+		} else {
+			resolved.AddString("uri", uri.c_str());
+			resolved.AddBool("skip_audiobook_resolution", true);
+		}
+		resolved.AddString("title", title.c_str());
+		app.SendMessage(&resolved);
+	});
+}
+
+
+void
+App::_OpenCollectionWindow(const std::string& uri, const std::string& title)
+{
+	PlaylistWindow* window = FindOpenWindow<PlaylistWindow>(this,
+		[&](PlaylistWindow* candidate) {
+			return candidate->GetUri() == uri;
+		});
+	if (window)
+		window->Activate();
+	else {
+		window = new PlaylistWindow(title.c_str(), uri.c_str(), "");
+		window->Show();
+	}
+	_SendCurrentTrackTo(window);
+}
+
+
+void
+App::_ShowUnsupportedSpotifyItemAlert()
+{
+	BAlert* alert = new BAlert("", B_TRANSLATE(
+		"This Spotify item type is not supported."), B_TRANSLATE("OK"));
+	alert->Go();
+}
+
+
+void
+App::_ShowAlbumWindow(BMessage* message)
+{
+	const char* id = "";
+	message->FindString("id", &id);
+	if (!id || !id[0])
+		return;
+	std::string uri = SpotifyUriForItemKind(kSpotifyItemAlbum, id);
+	PlaylistWindow* window = FindOpenWindow<PlaylistWindow>(this,
+		[&](PlaylistWindow* candidate) {
+			return candidate->GetUri() == uri;
+		});
+	if (window)
+		window->Activate();
+	else {
+		window = new PlaylistWindow("Album", uri.c_str(), "");
+		window->Show();
+	}
+	_SendCurrentTrackTo(window);
+}
+
+
+void
+App::_ApplyAuthComplete(BMessage* message)
+{
+	bool ok = message->GetBool("ok", false);
+	bool silent = message->GetBool("silent", false);
+	bool refreshRequest = message->GetBool("refresh_request", false);
+	if (!_AcceptAuthCompletionGeneration(message, refreshRequest))
+		return;
+
+	std::string error = message->GetString("error", "");
+	std::string errorDescription =
+		message->GetString("error_description", "");
+	std::string operation = message->GetString("operation",
+		refreshRequest ? "token_refresh" : "authorization");
+
+	if (ok)
+		ok = _StoreAuthTokens(message, error, errorDescription);
+	if (ok)
+		_FinishSuccessfulAuth(silent);
+	else
+		_FinishFailedAuth(message, silent, refreshRequest, error,
+			errorDescription, operation);
+	if (refreshRequest)
+		_CompleteTokenRefresh(ok);
+}
+
+
+bool
+App::_AcceptAuthCompletionGeneration(BMessage* message, bool refreshRequest)
+{
+	int32 messageGeneration;
+	if (message->FindInt32("token_generation", &messageGeneration) != B_OK)
+		return true;
+	BAutolock lock(&fTokenLock);
+	if (messageGeneration == fTokenGeneration)
+		return true;
+	lock.Unlock();
+	if (refreshRequest)
+		_CompleteTokenRefresh(false);
+	return false;
+}
+
+
+bool
+App::_StoreAuthTokens(BMessage* message, std::string& error,
+	std::string& errorDescription)
+{
+	const char* access = message->GetString("access_token", "");
+	const char* refresh = message->GetString("refresh_token", "");
+	const char* scopes = message->GetString("scopes", "");
+	int32 expiresIn = message->GetInt32("expires_in", 3600);
+	HaifySettings previousSettings = SettingsController::Load();
+	std::string effectiveScopes = scopes[0]
+		? scopes : previousSettings.grantedScopes;
+	if (!HasAllScopes(effectiveScopes, SPOTIFY_REQUIRED_SCOPES)) {
+		error = "insufficient_scope";
+		errorDescription = "Spotify did not grant all required permissions.";
+		return false;
+	}
+	status_t saveStatus = SettingsController::Update([&](HaifySettings& s) {
+		if (access[0]) s.accessToken = access;
+		if (refresh[0]) s.refreshToken = refresh;
+		s.grantedScopes = effectiveScopes;
+		s.accessTokenExpiresAt = time(nullptr) + expiresIn;
+		s.authScopeVersion = HAIFY_AUTH_SCOPE_VERSION;
+	});
+	if (saveStatus != B_OK) {
+		error = "settings_write_failed";
+		errorDescription = "Could not save Spotify credentials.";
+		return false;
+	}
+	if (!access[0]) {
+		error = "missing_access_token";
+		return false;
+	}
+	fApi->SetAccessToken(access);
+	fIsAuthenticated = true;
+	_ScheduleTokenRefresh(expiresIn);
+	return true;
+}
+
+
+void
+App::_FinishSuccessfulAuth(bool silent)
+{
+	_SendAuthStateToPlayer(true);
+	_ReloadAllWindows();
+
+	if (fLibrespotPid > 0) {
+		fLibrespotTransferAttempts = 0;
+		_ScheduleLibrespotTransfer(0);
+	}
+
+	RefreshSpotifyCapabilities(false);
+	_RefreshSpotifyAccount();
+
+	if (!silent) {
+		BAlert* alert = new BAlert("Auth",
+			"Successfully connected to Spotify!", "OK");
+		alert->Go();
+	}
+}
+
+
+void
+App::_FinishFailedAuth(BMessage* message, bool silent, bool refreshRequest,
+	const std::string& error, const std::string& errorDescription,
+	const std::string& operation)
+{
+	bool invalidGrant = error == "invalid_grant";
+	DEBUG_PRINT("Spotify %s failed (HTTP %ld): %s (%s)\n",
+		operation.c_str(), (long)message->GetInt32("http_status", -1),
+		error.c_str(), errorDescription.c_str());
+	if (invalidGrant)
+		_ClearAuthSession();
+	if (refreshRequest && !invalidGrant)
+		_ScheduleTokenRefresh(90);
+	if (!silent)
+		_ShowAuthFailureAlert(error, errorDescription);
+}
+
+
+void
+App::_ClearAuthSession()
+{
+	SettingsController::Update([](HaifySettings& s) {
+		s.accessToken.clear();
+		s.refreshToken.clear();
+		s.grantedScopes.clear();
+		s.accessTokenExpiresAt = 0;
+	});
+	fApi->ClearSession();
+	fIsAuthenticated = false;
+	fCapabilities.Reset();
+	_BroadcastSpotifyCapabilities();
+	_SendAuthStateToPlayer(false);
+}
+
+
+void
+App::_SendAuthStateToPlayer(bool ok)
+{
+	BMessage authMsg('aust');
+	authMsg.AddBool("ok", ok);
+	if (fPlayerWindow)
+		fPlayerWindow->PostMessage(&authMsg);
+}
+
+
+void
+App::_ReloadAllWindows()
+{
+	for (int32 i = 0; i < CountWindows(); i++) {
+		BWindow* window = WindowAt(i);
+		if (window)
+			window->PostMessage('lddt');
+	}
+}
+
+
+void
+App::_ShowAuthFailureAlert(const std::string& error,
+	const std::string& errorDescription)
+{
+	std::string text = "Error connecting to Spotify.";
+	if (!error.empty())
+		text += std::string("\n\n") + error;
+	if (!errorDescription.empty())
+		text += std::string(": ") + errorDescription;
+	BAlert* alert = new BAlert("Auth", text.c_str(), "OK", NULL, NULL,
+		B_WIDTH_AS_USUAL, B_WARNING_ALERT);
+	alert->Go();
+}
+
+
+void
+App::_SignOut()
+{
+	{
+		BAutolock lock(&fTokenLock);
+		fTokenGeneration++;
+	}
+	_CompleteTokenRefresh(false);
+	_ClearAuthSession();
+	delete fTokenRefreshTimer;
+	fTokenRefreshTimer = nullptr;
+
+	BAlert* alert = new BAlert("Auth", "Successfully signed out.", "OK");
+	alert->Go();
+}
+
+
+void
+App::_StartLibrespotFromMessage(BMessage* message)
+{
+	if (message->GetBool("restart", false))
+		_StopLibrespot();
+	_StartLibrespot(kLibrespotTransferAlways);
+}
+
+
+void
+App::_RegisterLibrespotOAuth()
+{
+	_StopLibrespot();
+	_StartLibrespot(kLibrespotTransferAlways, true);
+}
+
+
+void
+App::_StopLibrespotFromMessage()
+{
+	_StopLibrespot();
+}
+
+
+void
+App::_ToggleLibrespotRunning()
+{
+	_ReapLibrespot(false);
+	if (fLibrespotPid > 0)
+		_StopLibrespot();
+	else
+		_StartLibrespot(kLibrespotTransferAlways);
+}
+
+
+void
+App::_ApplyLibrespotDevicePollResult(BMessage* message)
+{
+	if (message->GetBool("found", false)) {
+		if (fLibrespotOAuthRegistration) {
+			SettingsController::FinishLibrespotOAuthRegistration();
+			fLibrespotOAuthRegistration = false;
+			for (int32 i = 0; i < CountWindows(); i++) {
+				SettingsWindow* settings =
+					dynamic_cast<SettingsWindow*>(WindowAt(i));
+				if (settings)
+					settings->PostMessage('lbOk');
+			}
+		}
+		const char* deviceId = message->GetString("device_id", "");
+		if (GetApi() && fLibrespotPid > 0 && deviceId && deviceId[0])
+			_TransferPlaybackToLibrespotDevice(deviceId);
+	} else if (fLibrespotPid > 0
+			&& fLibrespotTransferAttempts
+				< (fLibrespotOAuthRegistration ? 150 : 5)) {
+		_ScheduleLibrespotTransfer(
+			fLibrespotOAuthRegistration ? 2000000LL : 1000000LL);
+	}
+}
+
+
+void
+App::_ApplyLibrespotPlaybackDecision(BMessage* message)
+{
+	const char* deviceId = message->GetString("device_id", "");
+	if (message->GetBool("transfer", false) && GetApi()
+			&& fLibrespotPid > 0 && deviceId && deviceId[0]) {
+		BMessenger app(this);
+		fApi->Playback().TransferPlayback(deviceId,
+			[app](bool ok, const nlohmann::json&) {
+			if (!ok)
+				return;
+			BMessage transferred(kMsgLibrespotPlaybackTransferred);
+			app.SendMessage(&transferred);
+		});
+	}
+}
+
+
+bool
+App::_HandleWindowMessage(BMessage* message)
 {
 	switch (message->what) {
 		case MSG_DESKBAR_REPLICANT_CHANGED:
-			if (message->GetBool("enabled", true))
-				_InstallDeskbarReplicant();
-			else
-				_RemoveDeskbarReplicant();
-			break;
+			_ToggleDeskbarReplicant(message);
+			return true;
 
 		case MSG_SHOW_PLAYER_WINDOW:
 			_ShowPlayerWindow();
-			break;
+			return true;
 
 		case MSG_HIDE_PLAYER_WINDOW:
 			_HidePlayerWindow();
-			break;
+			return true;
 
 		case MSG_TOGGLE_PLAYER_WINDOW:
 			_TogglePlayerWindow();
-			break;
+			return true;
 
 		case MSG_OPEN_ARTWORK:
 			_ShowArtworkWindow();
-			break;
+			return true;
 
 		case MSG_OPEN_SETTINGS:
-		{
-			SettingsWindow* settings = FindOpenWindow<SettingsWindow>(this);
-			if (settings) {
-				settings->Activate();
-				break;
-			}
-			SettingsWindow* sw = new SettingsWindow();
-			sw->Show();
-			break;
-		}
+			_ShowSettingsWindow();
+			return true;
 
 		case MSG_QUIT_APP:
 			PostMessage(B_QUIT_REQUESTED);
-			break;
+			return true;
 
 		case MSG_OPEN_BROWSER:
-		{
-			DiscoverWindow* window = FindOpenWindow<DiscoverWindow>(this);
-			if (window)
-				window->Activate();
-			else {
-				window = new DiscoverWindow();
-				window->Show();
-			}
-			_SendCurrentTrackTo(window);
-			break;
-		}
+			_ShowDiscoverWindow();
+			return true;
 
 		case MSG_OPEN_PLAYLIST:
-		{
-			const char* name = "Rock Classics";
-			const char* uri = "";
-			const char* coverUrl = "";
-			message->FindString("name", &name);
-			message->FindString("uri", &uri);
-			message->FindString("coverUrl", &coverUrl);
-			std::string uriStr = uri ? uri : "";
-			PlaylistWindow* window = FindOpenWindow<PlaylistWindow>(this,
-				[&](PlaylistWindow* candidate) {
-					return candidate->GetUri() == uriStr;
-				});
-			if (window)
-				window->Activate();
-			else {
-				window = new PlaylistWindow(name, uri, coverUrl);
-				window->Show();
-			}
-			_SendCurrentTrackTo(window);
-			break;
-		}
+			_OpenPlaylistWindow(message);
+			return true;
+
+		case MSG_OPEN_QUEUE:
+			_ShowQueueWindow();
+			return true;
+
+		case MSG_OPEN_SEARCH:
+			_ShowSearchWindow();
+			return true;
+
+		case MSG_SHOW_ALBUM:
+			_ShowAlbumWindow(message);
+			return true;
+
+		default:
+			return false;
+	}
+}
+
+
+bool
+App::_HandleStateMessage(BMessage* message)
+{
+	switch (message->what) {
 
 		case MSG_PLAYLISTS_CHANGED:
-		{
-			for (int32 i = 0; i < CountWindows(); i++) {
-				DiscoverWindow* win =
-					dynamic_cast<DiscoverWindow*>(WindowAt(i));
-				if (win)
-					win->PostMessage(message);
-			}
-			break;
-		}
+			_BroadcastPlaylistsChanged(message);
+			return true;
 
 		case MSG_LIBRARY_CHANGED:
-		{
-			const char* operation = nullptr;
-			const char* uri = nullptr;
-			bool isDelta = message->FindString("operation", &operation) == B_OK
-				&& message->FindString("uri", &uri) == B_OK;
-			for (int32 i = 0; i < CountWindows(); i++) {
-				BWindow* window = WindowAt(i);
-				if (DiscoverWindow* discover =
-						dynamic_cast<DiscoverWindow*>(window)) {
-					if (isDelta)
-						discover->PostMessage(message);
-					else
-						discover->PostMessage('lddt');
-				} else if (isDelta
-						&& (dynamic_cast<ArtistWindow*>(window)
-							|| dynamic_cast<PlaylistWindow*>(window)
-							|| dynamic_cast<AudiobookWindow*>(window)
-							|| dynamic_cast<EpisodeWindow*>(window))) {
-					window->PostMessage(message);
-				}
-			}
-			break;
-		}
+			_BroadcastLibraryChanged(message);
+			return true;
 
 		case MSG_SPOTIFY_CAPABILITIES_CHANGED:
-			if (message->GetBool("probe_result", false))
-				_BroadcastSpotifyCapabilities();
-			else
-				RefreshSpotifyCapabilities(
-					message->GetBool("force", false));
-			break;
+			_ApplySpotifyCapabilitiesMessage(message);
+			return true;
 
 		case 'spAc':
-		{
-			std::string accountId = message->GetString("account_id", "");
-			if (accountId.empty()) break;
-			std::string providerAccountId = message->GetString(
-				"provider_account_id", "");
-			HaifySettings settings = SettingsController::Load();
-			bool changed = !settings.spotifyAccountId.empty()
-				&& settings.spotifyAccountId != accountId
-				&& (providerAccountId.empty()
-					|| settings.spotifyAccountId != providerAccountId);
-			SettingsController::Update([&](HaifySettings& value) {
-				value.spotifyAccountId = accountId;
-			});
-			if (changed) {
-				fApi->ClearSession();
-				fApi->SetAccountId(accountId);
-				fApi->SetAccessToken(settings.accessToken);
-				fCapabilities.Reset();
-				RefreshSpotifyCapabilities(true);
-				for (int32 i = 0; i < CountWindows(); i++) {
-					BWindow* window = WindowAt(i);
-					if (window) window->PostMessage('lddt');
-				}
-			} else {
-				fApi->SetAccountId(accountId);
-			}
-
-			// GetPlaylists may have completed before the profile ID was known.
-			// Rebuild its writable-playlist cache now with the resolved identity.
-			BMessenger application(this);
-			fApi->Playlists().GetPlaylists([application](bool ok,
-					const nlohmann::json&) {
-				if (!ok) return;
-				BMessage refreshed(MSG_PLAYLISTS_CHANGED);
-				application.SendMessage(&refreshed);
-			});
-			break;
-		}
+			_ApplySpotifyAccount(message);
+			return true;
 
 		case MSG_SHOW_ARTIST:
-		{
-			const char* id = "";
-			message->FindString("id", &id);
-			if (id && id[0]) {
-				std::string idStr = id;
-				ArtistWindow* window = FindOpenWindow<ArtistWindow>(this,
-					[&](ArtistWindow* candidate) {
-						return candidate->GetArtistId() == idStr;
-					});
-				if (window)
-					window->Activate();
-				else {
-					window = new ArtistWindow(idStr);
-					window->Show();
-				}
-				_SendCurrentTrackTo(window);
-			}
-			break;
-		}
+			_ShowArtistWindow(message);
+			return true;
 
 		case 'pStU':
-		{
 			_BroadcastPlayingTrack(message->GetString("trackUri", ""));
-			break;
-		}
+			return true;
+
+		case 'open':
+			_OpenSpotifyUri(message);
+			return true;
+
+		default:
+			return false;
+	}
+}
+
+
+bool
+App::_HandleReplicantMessage(BMessage* message)
+{
+	switch (message->what) {
 
 		case MSG_REGISTER_REPLICANT:
-		{
-			BMessenger m;
-			if (message->FindMessenger("messenger", &m) == B_OK && m.IsValid()) {
-				bool external = message->GetBool("external", true);
-				bool known = false;
-				for (auto& r : fReplicants) {
-					if (r.messenger == m) {
-						r.external = external;
-						known = true;
-						break;
-					}
-				}
-				if (!known)
-					fReplicants.push_back({m, external});
-				if (!fLastReplicantState.IsEmpty())
-					m.SendMessage(&fLastReplicantState);
-				HaifySettings settings = SettingsController::Load();
-				BMessage colorMessage(MSG_SEEKBAR_COLOR_CHANGED);
-				colorMessage.AddBool("use_system",
-					settings.seekBarUseSystemColor);
-				colorMessage.AddInt32("red", settings.seekBarColorRed);
-				colorMessage.AddInt32("green", settings.seekBarColorGreen);
-				colorMessage.AddInt32("blue", settings.seekBarColorBlue);
-				colorMessage.AddInt32("alpha", settings.seekBarColorAlpha);
-				m.SendMessage(&colorMessage);
-				BMessage appearance(MSG_REPLICANT_APPEARANCE_CHANGED);
-				appearance.AddBool("appearance_automatic",
-					settings.replicantUseAutomaticColor);
-				appearance.AddInt32("appearance_red", settings.replicantColorRed);
-				appearance.AddInt32("appearance_green", settings.replicantColorGreen);
-				appearance.AddInt32("appearance_blue", settings.replicantColorBlue);
-				appearance.AddInt32("appearance_alpha", settings.replicantColorAlpha);
-				appearance.AddBool("automatic",
-					settings.replicantUseAutomaticColor);
-				appearance.AddInt32("red", settings.replicantColorRed);
-				appearance.AddInt32("green", settings.replicantColorGreen);
-				appearance.AddInt32("blue", settings.replicantColorBlue);
-				appearance.AddInt32("alpha", settings.replicantColorAlpha);
-				m.SendMessage(&appearance);
-				if (fPlayerWindow)
-					fPlayerWindow->PostMessage(MSG_SYNC_REPLICANT_STATE);
-			}
-			break;
-		}
+			_RegisterReplicant(message);
+			return true;
 
 		case MSG_SEEKBAR_COLOR_CHANGED:
-		{
-			if (fPlayerWindow)
-				fPlayerWindow->PostMessage(message);
-			for (auto& r : fReplicants) {
-				if (r.messenger.IsValid())
-					r.messenger.SendMessage(message);
-			}
-			break;
-		}
+			_BroadcastReplicantSettings(message);
+			return true;
 
 		case MSG_REPLICANT_APPEARANCE_CHANGED:
-		{
-			if (fPlayerWindow)
-				fPlayerWindow->PostMessage(message);
-			for (auto& r : fReplicants) {
-				if (r.messenger.IsValid())
-					r.messenger.SendMessage(message);
-			}
-			break;
-		}
+			_BroadcastReplicantSettings(message);
+			return true;
 
 		case MSG_UNREGISTER_REPLICANT:
-		{
-			BMessenger m;
-			if (message->FindMessenger("messenger", &m) == B_OK) {
-				for (auto it = fReplicants.begin(); it != fReplicants.end(); ) {
-					if (it->messenger == m) it = fReplicants.erase(it);
-					else ++it;
-				}
-			}
-			break;
-		}
+			_UnregisterReplicant(message);
+			return true;
 
 		case MSG_REPLICANT_STATE:
-		{
-			std::string oldTrackUri =
-				fLastReplicantState.GetString("track_uri", "");
-			fLastReplicantState = *message;
-			std::string newTrackUri =
-				fLastReplicantState.GetString("track_uri", "");
-			if (!newTrackUri.empty() && newTrackUri != oldTrackUri)
-				_BroadcastPlayingTrack(newTrackUri.c_str());
-			for (auto& r : fReplicants) {
-				if (r.messenger.IsValid()) r.messenger.SendMessage(message);
-				else r.messenger = BMessenger();
-			}
-			for (int32 i = 0; i < CountWindows(); i++) {
-				BWindow* window = WindowAt(i);
-				if (window && window != fPlayerWindow)
-					window->PostMessage(message);
-			}
-			break;
-		}
+			_ApplyReplicantState(message);
+			return true;
 
+		default:
+			return false;
+	}
+}
+
+
+bool
+App::_HandlePlayerMessage(BMessage* message)
+{
+	switch (message->what) {
 		case MSG_PLAY_PAUSE:
 		case MSG_NEXT_TRACK:
 		case MSG_PREV_TRACK:
@@ -658,431 +1284,91 @@ App::MessageReceived(BMessage* message)
 		case MSG_SEEK_REQUEST:
 		case MSG_SEEKBAR_COLOR_DROPPED:
 		case 'play':
-		{
-			if (message->what == 'play') {
-				const char* uri = message->GetString("uri", "");
-				if ((!uri || !uri[0]))
-					uri = message->GetString("trackUri", "");
-				if (uri && SpotifyItemIsPlayable(SpotifyItemKindForUri(uri)))
-					_BroadcastPlayingTrack(uri);
-			}
-			if (fPlayerWindow)
-				fPlayerWindow->PostMessage(message);
-			break;
-		}
+			_ForwardPlayerCommand(message);
+			return true;
 
 		case 'poll':
-			delete fLibrespotPlaybackPollTimer;
-			fLibrespotPlaybackPollTimer = nullptr;
-			if (fPlayerWindow)
-				fPlayerWindow->PostMessage(message);
-			break;
+			_ForwardPlaybackPoll(message);
+			return true;
 
-		case MSG_OPEN_QUEUE:
-		{
-			QueueWindow* window = FindOpenWindow<QueueWindow>(this);
-			if (window)
-				window->Activate();
-			else {
-				window = new QueueWindow();
-				window->Show();
-			}
-			_SendCurrentTrackTo(window);
-			break;
-		}
+		default:
+			return false;
+	}
+}
 
-		case MSG_OPEN_SEARCH:
-		{
-			SearchWindow* window = FindOpenWindow<SearchWindow>(this);
-			if (window)
-				window->Activate();
-			else {
-				window = new SearchWindow();
-				window->Show();
-			}
-			_SendCurrentTrackTo(window);
-			break;
-		}
 
-		case 'open':
-		{
-			const char* uri   = nullptr;
-			const char* title = nullptr;
-			message->FindString("uri",   &uri);
-			message->FindString("title", &title);
-			if (!uri || !uri[0]) break;
-			std::string uriStr = uri;
-			SpotifyItemKind kind = SpotifyItemKindForUri(uriStr);
-			if (kind == kSpotifyItemArtist) {
-				std::string id = SpotifyItemIdForUri(uriStr);
-				ArtistWindow* window = FindOpenWindow<ArtistWindow>(this,
-					[&](ArtistWindow* candidate) {
-						return candidate->GetArtistId() == id;
-					});
-				if (window)
-					window->Activate();
-				else {
-					window = new ArtistWindow(id);
-					window->Show();
-				}
-				_SendCurrentTrackTo(window);
-			} else if (kind == kSpotifyItemEpisode) {
-				std::string id = SpotifyItemIdForUri(uriStr);
-				EpisodeWindow* window = FindOpenWindow<EpisodeWindow>(this,
-					[&](EpisodeWindow* candidate) {
-						return candidate->GetEpisodeId() == id;
-					});
-				if (window)
-					window->Activate();
-				else {
-					window = new EpisodeWindow(id);
-					window->Show();
-				}
-			} else if (kind == kSpotifyItemAudiobook) {
-				if (!fCapabilities.AudiobooksEnabled()) {
-					BAlert* alert = new BAlert("", B_TRANSLATE(
-						"Audiobooks are not available for this account or market."),
-						B_TRANSLATE("OK"));
-					alert->Go();
-					break;
-				}
-				std::string id = SpotifyItemIdForUri(uriStr);
-				AudiobookWindow* window = FindOpenWindow<AudiobookWindow>(this,
-					[&](AudiobookWindow* candidate) {
-						return candidate->GetAudiobookId() == id;
-					});
-				if (window)
-					window->Activate();
-				else {
-					window = new AudiobookWindow(id);
-					window->Show();
-				}
-			} else if (kind == kSpotifyItemTrack) {
-				BMessage play('play');
-				play.AddString("uri", uriStr.c_str());
-				PostMessage(&play);
-			} else if (kind == kSpotifyItemShow
-					&& !message->GetBool("skip_audiobook_resolution", false)
-					&& fCapabilities.AudiobooksEnabled() && fApi) {
-				std::string id = SpotifyItemIdForUri(uriStr);
-				std::string t = title ? title : "";
-				if (id.empty()) {
-					BMessage retry('open');
-					retry.AddString("uri", uriStr.c_str());
-					retry.AddString("title", t.c_str());
-					retry.AddBool("skip_audiobook_resolution", true);
-					PostMessage(&retry);
-					break;
-				}
-				BMessenger app(this);
-				fApi->Content().GetAudiobook(id, [app, uriStr, id, t](bool ok,
-						const nlohmann::json& book) {
-					BMessage resolved('open');
-					if (ok && book.is_object()) {
-						std::string audiobookUri;
-						if (book.contains("uri") && book["uri"].is_string())
-							audiobookUri = book["uri"].get<std::string>();
-						if (SpotifyItemKindForUri(audiobookUri)
-								!= kSpotifyItemAudiobook) {
-							audiobookUri = SpotifyUriForItemKind(
-								kSpotifyItemAudiobook, id);
-						}
-						resolved.AddString("uri", audiobookUri.c_str());
-					} else {
-						resolved.AddString("uri", uriStr.c_str());
-						resolved.AddBool("skip_audiobook_resolution", true);
-					}
-					resolved.AddString("title", t.c_str());
-					app.SendMessage(&resolved);
-				});
-			} else if (uriStr == "spotify:collection"
-					|| kind == kSpotifyItemAlbum
-					|| kind == kSpotifyItemPlaylist
-					|| kind == kSpotifyItemShow) {
-				std::string t = title ? title : "";
-				PlaylistWindow* window = FindOpenWindow<PlaylistWindow>(this,
-					[&](PlaylistWindow* candidate) {
-						return candidate->GetUri() == uriStr;
-					});
-				if (window)
-					window->Activate();
-				else {
-					window = new PlaylistWindow(t.c_str(), uriStr.c_str(), "");
-					window->Show();
-				}
-				_SendCurrentTrackTo(window);
-			} else {
-				BAlert* alert = new BAlert("", B_TRANSLATE(
-					"This Spotify item type is not supported."),
-					B_TRANSLATE("OK"));
-				alert->Go();
-			}
-			break;
-		}
-
-		case MSG_SHOW_ALBUM:
-		{
-			const char* id = "";
-			message->FindString("id", &id);
-			if (id && id[0]) {
-				std::string uri = SpotifyUriForItemKind(kSpotifyItemAlbum, id);
-				PlaylistWindow* window = FindOpenWindow<PlaylistWindow>(this,
-					[&](PlaylistWindow* candidate) {
-						return candidate->GetUri() == uri;
-					});
-				if (window)
-					window->Activate();
-				else {
-					window = new PlaylistWindow("Album", uri.c_str(), "");
-					window->Show();
-				}
-				_SendCurrentTrackTo(window);
-			}
-			break;
-		}
-
+bool
+App::_HandleAuthLibrespotMessage(BMessage* message)
+{
+	switch (message->what) {
 		case MSG_INIT_AUTH:
 			_InitAuth(false);
-			break;
+			return true;
 
 		case kMsgRefreshAccessToken:
 			delete fTokenRefreshTimer;
 			fTokenRefreshTimer = nullptr;
 			_RefreshAccessToken(nullptr, true);
-			break;
+			return true;
 
 		case MSG_AUTH_COMPLETE:
-		{
-			bool ok = message->GetBool("ok", false);
-			bool silent = message->GetBool("silent", false);
-			bool refreshRequest = message->GetBool("refresh_request", false);
-			int32 messageGeneration;
-			if (message->FindInt32("token_generation", &messageGeneration) == B_OK) {
-				BAutolock lock(&fTokenLock);
-				if (messageGeneration != fTokenGeneration) {
-					lock.Unlock();
-					if (refreshRequest)
-						_CompleteTokenRefresh(false);
-					break;
-				}
-			}
-			std::string error = message->GetString("error", "");
-			std::string errorDescription =
-				message->GetString("error_description", "");
-			std::string operation = message->GetString("operation",
-				refreshRequest ? "token_refresh" : "authorization");
-
-			if (ok) {
-				const char* access = message->GetString("access_token", "");
-				const char* refresh = message->GetString("refresh_token", "");
-				const char* scopes = message->GetString("scopes", "");
-				int32 expiresIn = message->GetInt32("expires_in", 3600);
-				HaifySettings previousSettings = SettingsController::Load();
-				std::string effectiveScopes = scopes[0]
-					? scopes : previousSettings.grantedScopes;
-				if (!HasAllScopes(effectiveScopes, SPOTIFY_REQUIRED_SCOPES)) {
-					ok = false;
-					error = "insufficient_scope";
-					errorDescription = "Spotify did not grant all required permissions.";
-				}
-				status_t saveStatus = ok ? SettingsController::Update(
-					[&](HaifySettings& s) {
-						if (access[0]) s.accessToken = access;
-						if (refresh[0]) s.refreshToken = refresh;
-						s.grantedScopes = effectiveScopes;
-						s.accessTokenExpiresAt = time(nullptr) + expiresIn;
-						s.authScopeVersion = HAIFY_AUTH_SCOPE_VERSION;
-					}) : B_NOT_ALLOWED;
-				if (ok && saveStatus != B_OK) {
-					ok = false;
-					error = "settings_write_failed";
-					errorDescription = "Could not save Spotify credentials.";
-				} else if (ok && !access[0]) {
-					ok = false;
-					error = "missing_access_token";
-				}
-				if (ok) {
-					fApi->SetAccessToken(access);
-					fIsAuthenticated = true;
-					_ScheduleTokenRefresh(expiresIn);
-				}
-			}
-
-			if (ok) {
-
-				{
-					BMessage authMsg('aust');
-					authMsg.AddBool("ok", true);
-					if (fPlayerWindow) fPlayerWindow->PostMessage(&authMsg);
-				}
-
-				for (int32 i = 0; i < CountWindows(); i++) {
-					BWindow* win = WindowAt(i);
-					if (win) win->PostMessage('lddt');
-				}
-
-				if (fLibrespotPid > 0) {
-					fLibrespotTransferAttempts = 0;
-					_ScheduleLibrespotTransfer(0);
-				}
-
-				RefreshSpotifyCapabilities(false);
-				_RefreshSpotifyAccount();
-
-				if (!silent) {
-					BAlert* alert = new BAlert("Auth", "Successfully connected to Spotify!", "OK");
-					alert->Go();
-				}
-			} else {
-				bool invalidGrant = error == "invalid_grant";
-				DEBUG_PRINT("Spotify %s failed (HTTP %ld): %s (%s)\n",
-					operation.c_str(),
-					(long)message->GetInt32("http_status", -1),
-					error.c_str(), errorDescription.c_str());
-				if (invalidGrant) {
-					SettingsController::Update([](HaifySettings& s) {
-						s.accessToken.clear();
-						s.refreshToken.clear();
-						s.grantedScopes.clear();
-						s.accessTokenExpiresAt = 0;
-					});
-					fApi->ClearSession();
-					fIsAuthenticated = false;
-					fCapabilities.Reset();
-					_BroadcastSpotifyCapabilities();
-					BMessage authMsg('aust');
-					authMsg.AddBool("ok", false);
-					if (fPlayerWindow)
-						fPlayerWindow->PostMessage(&authMsg);
-				}
-				if (refreshRequest && !invalidGrant)
-					_ScheduleTokenRefresh(90);
-				if (!silent) {
-					std::string text = "Error connecting to Spotify.";
-					if (!error.empty())
-						text += std::string("\n\n") + error;
-					if (!errorDescription.empty())
-						text += std::string(": ") + errorDescription;
-					BAlert* alert = new BAlert("Auth", text.c_str(), "OK", NULL,
-						NULL, B_WIDTH_AS_USUAL, B_WARNING_ALERT);
-					alert->Go();
-				}
-			}
-			if (refreshRequest)
-				_CompleteTokenRefresh(ok);
-			break;
-		}
+			_ApplyAuthComplete(message);
+			return true;
 
 		case 'sout':
-		{
-			{
-				BAutolock lock(&fTokenLock);
-				fTokenGeneration++;
-			}
-			_CompleteTokenRefresh(false);
-			SettingsController::Update([](HaifySettings& s) {
-				s.accessToken.clear();
-				s.refreshToken.clear();
-				s.grantedScopes.clear();
-				s.accessTokenExpiresAt = 0;
-			});
-
-			fIsAuthenticated = false;
-			fApi->ClearSession();
-			fCapabilities.Reset();
-			_BroadcastSpotifyCapabilities();
-			delete fTokenRefreshTimer;
-			fTokenRefreshTimer = nullptr;
-
-			{
-				BMessage authMsg('aust');
-				authMsg.AddBool("ok", false);
-				if (fPlayerWindow) fPlayerWindow->PostMessage(&authMsg);
-			}
-
-			BAlert* alert = new BAlert("Auth", "Successfully signed out.", "OK");
-			alert->Go();
-			break;
-		}
+			_SignOut();
+			return true;
 
 		case 'lbSt':
-			if (message->GetBool("restart", false))
-				_StopLibrespot();
-			_StartLibrespot(kLibrespotTransferAlways);
-			break;
+			_StartLibrespotFromMessage(message);
+			return true;
 
 		case 'lbRg':
-			_StopLibrespot();
-			_StartLibrespot(kLibrespotTransferAlways, true);
-			break;
+			_RegisterLibrespotOAuth();
+			return true;
 
 		case 'lbSp':
-			_StopLibrespot();
-			break;
+			_StopLibrespotFromMessage();
+			return true;
 
 		case MSG_TOGGLE_LIBRESPOT_RUNNING:
-			_ReapLibrespot(false);
-			if (fLibrespotPid > 0)
-				_StopLibrespot();
-			else
-				_StartLibrespot(kLibrespotTransferAlways);
-			break;
+			_ToggleLibrespotRunning();
+			return true;
 
 		case kMsgTransferLibrespotPlayback:
 			_TryTransferPlaybackToLibrespot();
-			break;
+			return true;
 
 		case kMsgLibrespotDevicePollResult:
-		{
-			if (message->GetBool("found", false)) {
-				if (fLibrespotOAuthRegistration) {
-					SettingsController::FinishLibrespotOAuthRegistration();
-					fLibrespotOAuthRegistration = false;
-					for (int32 i = 0; i < CountWindows(); i++) {
-						SettingsWindow* settings
-							= dynamic_cast<SettingsWindow*>(WindowAt(i));
-						if (settings)
-							settings->PostMessage('lbOk');
-					}
-				}
-				const char* deviceId = message->GetString("device_id", "");
-				if (GetApi() && fLibrespotPid > 0 && deviceId && deviceId[0])
-					_TransferPlaybackToLibrespotDevice(deviceId);
-			} else if (fLibrespotPid > 0
-					&& fLibrespotTransferAttempts
-						< (fLibrespotOAuthRegistration ? 150 : 5)) {
-				_ScheduleLibrespotTransfer(
-					fLibrespotOAuthRegistration ? 2000000LL : 1000000LL);
-			}
-			break;
-		}
+			_ApplyLibrespotDevicePollResult(message);
+			return true;
 
 		case kMsgLibrespotPlaybackDecision:
-		{
-			const char* deviceId = message->GetString("device_id", "");
-			if (message->GetBool("transfer", false) && GetApi()
-					&& fLibrespotPid > 0 && deviceId && deviceId[0]) {
-				BMessenger app(this);
-				fApi->Playback().TransferPlayback(deviceId,
-					[app](bool ok, const nlohmann::json&) {
-					if (!ok)
-						return;
-					BMessage transferred(kMsgLibrespotPlaybackTransferred);
-					app.SendMessage(&transferred);
-				});
-			}
-			break;
-		}
+			_ApplyLibrespotPlaybackDecision(message);
+			return true;
 
 		case kMsgLibrespotPlaybackTransferred:
 			_SchedulePlaybackPollAfterLibrespotTransfer(
 				kLibrespotPlaybackPollDelay);
-			break;
+			return true;
 
 		default:
-			BApplication::MessageReceived(message);
-			break;
+			return false;
 	}
+}
+
+
+void
+App::MessageReceived(BMessage* message)
+{
+	if (_HandleWindowMessage(message) || _HandleStateMessage(message)
+			|| _HandleReplicantMessage(message)
+			|| _HandlePlayerMessage(message)
+			|| _HandleAuthLibrespotMessage(message)) {
+		return;
+	}
+
+	BApplication::MessageReceived(message);
 }
 
 void

@@ -20,6 +20,12 @@ private:
     void _Load();
     void _LoadArtwork(const std::string& url);
     void _UpdateSaved(bool saved);
+    void _ApplyLibraryChanged(BMessage* message);
+    void _ApplyEpisodeData(BMessage* message);
+    void _PlayEpisode();
+    void _OpenShow();
+    void _QueueEpisode();
+    void _ToggleSaved();
 
     std::string fEpisodeId;
     std::string fEpisodeUri;

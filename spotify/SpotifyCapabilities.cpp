@@ -27,6 +27,37 @@ AllItemsMarketBlocked(const nlohmann::json& items)
     return true;
 }
 
+static bool
+SavedAudiobooksProbeState(const nlohmann::json& data,
+    AudiobookCapabilityState& state)
+{
+    if (!data.contains("items") || !data["items"].is_array()
+            || data["items"].empty()) {
+        return false;
+    }
+
+    state = AllItemsMarketBlocked(data["items"])
+        ? kAudiobookUnavailable : kAudiobookAvailable;
+    return true;
+}
+
+static bool
+SearchAudiobooksAvailable(const nlohmann::json& searchData)
+{
+    if (!searchData.contains("audiobooks")
+            || !searchData["audiobooks"].is_object()) {
+        return false;
+    }
+
+    const auto& books = searchData["audiobooks"];
+    bool available = books.value("total", 0) > 0
+        || (books.contains("items") && books["items"].is_array()
+            && !books["items"].empty());
+    if (books.contains("items") && AllItemsMarketBlocked(books["items"]))
+        return false;
+    return available;
+}
+
 SpotifyCapabilities::SpotifyCapabilities(SpotifyApi* api)
     : fApi(api), fLock("Spotify capabilities")
 {
@@ -146,10 +177,9 @@ void SpotifyCapabilities::ProbeAudiobooks(
                 _FinishAudiobookProbe(_FailureState(data));
                 return;
             }
-            if (data.contains("items") && data["items"].is_array()
-                    && !data["items"].empty()) {
-                _FinishAudiobookProbe(AllItemsMarketBlocked(data["items"])
-                    ? kAudiobookUnavailable : kAudiobookAvailable);
+            AudiobookCapabilityState savedState;
+            if (SavedAudiobooksProbeState(data, savedState)) {
+                _FinishAudiobookProbe(savedState);
                 return;
             }
             api->Content().Search("a", "audiobook",
@@ -158,18 +188,7 @@ void SpotifyCapabilities::ProbeAudiobooks(
                         _FinishAudiobookProbe(_FailureState(searchData));
                         return;
                     }
-                    bool available = false;
-                    if (searchData.contains("audiobooks")
-                            && searchData["audiobooks"].is_object()) {
-                        const auto& books = searchData["audiobooks"];
-                        available = books.value("total", 0) > 0
-                            || (books.contains("items")
-                                && books["items"].is_array()
-                                && !books["items"].empty());
-                        if (books.contains("items")
-                                && AllItemsMarketBlocked(books["items"]))
-                            available = false;
-                    }
+                    bool available = SearchAudiobooksAvailable(searchData);
                     _FinishAudiobookProbe(available
                         ? kAudiobookAvailable : kAudiobookUnavailable);
                 });

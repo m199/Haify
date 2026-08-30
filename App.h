@@ -12,6 +12,7 @@
 #include <sys/types.h>
 
 #include "spotify/SpotifyCapabilities.h"
+#include "spotify/SpotifyUri.h"
 
 class PlayerWindow;
 class ArtworkWindow;
@@ -50,7 +51,68 @@ private:
 	void					_ShowPlayerWindow();
 	void					_HidePlayerWindow();
 	void					_TogglePlayerWindow();
+	bool					_HandleWindowMessage(BMessage* message);
+	bool					_HandleStateMessage(BMessage* message);
+	bool					_HandleReplicantMessage(BMessage* message);
+	bool					_HandlePlayerMessage(BMessage* message);
+	bool					_HandleAuthLibrespotMessage(BMessage* message);
 	void					_ShowArtworkWindow();
+	void					_ToggleDeskbarReplicant(BMessage* message);
+	void					_ShowSettingsWindow();
+	void					_ShowDiscoverWindow();
+	void					_OpenPlaylistWindow(BMessage* message);
+	void					_BroadcastPlaylistsChanged(BMessage* message);
+	void					_BroadcastLibraryChanged(BMessage* message);
+	void					_ApplySpotifyCapabilitiesMessage(BMessage* message);
+	void					_ApplySpotifyAccount(BMessage* message);
+	void					_ShowArtistWindow(BMessage* message);
+	void					_RegisterReplicant(BMessage* message);
+	void					_BroadcastReplicantSettings(BMessage* message);
+	void					_UnregisterReplicant(BMessage* message);
+	void					_ApplyReplicantState(BMessage* message);
+	void					_ForwardPlayerCommand(BMessage* message);
+	void					_ForwardPlaybackPoll(BMessage* message);
+	void					_ShowQueueWindow();
+	void					_ShowSearchWindow();
+	void					_OpenSpotifyUri(BMessage* message);
+	bool					_ShouldResolveShowAsAudiobook(
+								BMessage* message, SpotifyItemKind kind) const;
+	bool					_CanOpenPlaylistStyleUri(
+								const std::string& uri,
+								SpotifyItemKind kind) const;
+	void					_OpenArtistUri(const std::string& id);
+	void					_OpenEpisodeUri(const std::string& id);
+	void					_OpenAudiobookUri(const std::string& id);
+	void					_ResolveShowOrAudiobook(const std::string& uri,
+								const std::string& title);
+	void					_OpenCollectionWindow(const std::string& uri,
+								const std::string& title);
+	void					_ShowUnsupportedSpotifyItemAlert();
+	void					_ShowAlbumWindow(BMessage* message);
+	void					_ApplyAuthComplete(BMessage* message);
+	bool					_AcceptAuthCompletionGeneration(
+								BMessage* message, bool refreshRequest);
+	bool					_StoreAuthTokens(BMessage* message,
+								std::string& error,
+								std::string& errorDescription);
+	void					_FinishSuccessfulAuth(bool silent);
+	void					_FinishFailedAuth(BMessage* message, bool silent,
+								bool refreshRequest,
+								const std::string& error,
+								const std::string& errorDescription,
+								const std::string& operation);
+	void					_ClearAuthSession();
+	void					_SendAuthStateToPlayer(bool ok);
+	void					_ReloadAllWindows();
+	void					_ShowAuthFailureAlert(const std::string& error,
+								const std::string& errorDescription);
+	void					_SignOut();
+	void					_StartLibrespotFromMessage(BMessage* message);
+	void					_RegisterLibrespotOAuth();
+	void					_StopLibrespotFromMessage();
+	void					_ToggleLibrespotRunning();
+	void					_ApplyLibrespotDevicePollResult(BMessage* message);
+	void					_ApplyLibrespotPlaybackDecision(BMessage* message);
 	void					_SendCurrentTrackTo(BWindow* window);
 	void					_BroadcastPlayingTrack(const char* trackUri);
 	void					_InstallDeskbarReplicant();

@@ -1069,195 +1069,301 @@ SettingsWindow::_BrowseCachePath()
 void
 SettingsWindow::MessageReceived(BMessage* message)
 {
+	if (_HandleGeneralMessage(message) || _HandleAppearanceMessage(message)
+			|| _HandlePathLibrespotMessage(message)
+			|| _HandleSpotifyMessage(message)) {
+		return;
+	}
+
+	BWindow::MessageReceived(message);
+}
+
+
+bool
+SettingsWindow::_HandleGeneralMessage(BMessage* message)
+{
 	switch (message->what) {
 		case kMsgSave:
 			if (_Save())
 				Quit();
-			break;
+			return true;
 
 		case kMsgRevert:
-		{
-			int32 category = CategoryForListIndex(
-				fCategoryList->CurrentSelection());
-			_LoadCategory(category, SettingsController::Load());
-			break;
-		}
+			_RevertCurrentCategory();
+			return true;
 
 		case kMsgCategorySelected:
 			_SelectCategory(fCategoryList->CurrentSelection());
-			break;
+			return true;
 
+		case kMsgClearImageCache:
+			_ClearImageCache();
+			return true;
+
+		default:
+			return false;
+	}
+}
+
+
+bool
+SettingsWindow::_HandleAppearanceMessage(BMessage* message)
+{
+	switch (message->what) {
 		case kMsgSeekbarColor:
 			fUseSystemSeekbarColorCheck->SetValue(B_CONTROL_OFF);
 			_UpdateSeekbarPreview();
-			break;
+			return true;
 
 		case kMsgSeekbarUseSystem:
 			_UpdateSeekbarPreview();
-			break;
+			return true;
 
 		case kMsgSeekbarDefault:
-			fUseSystemSeekbarColorCheck->SetValue(B_CONTROL_OFF);
-			fSeekbarColorControl->SetValue((rgb_color) {
-				(uint8)kDefaultSeekBarColorRed,
-				(uint8)kDefaultSeekBarColorGreen,
-				(uint8)kDefaultSeekBarColorBlue,
-				(uint8)kDefaultSeekBarColorAlpha
-			});
-			_UpdateSeekbarPreview();
-			break;
+			_ResetSeekbarColor();
+			return true;
 
 		case kMsgReplicantColor:
 			fUseAutomaticReplicantColorCheck->SetValue(B_CONTROL_OFF);
 			_UpdateReplicantPreview();
-			break;
+			return true;
 
 		case kMsgReplicantAuto:
 			_UpdateReplicantPreview();
-			break;
+			return true;
 
 		case kMsgReplicantDefault:
-			fUseAutomaticReplicantColorCheck->SetValue(B_CONTROL_ON);
-			fReplicantColorControl->SetValue((rgb_color) {
-				(uint8)kDefaultReplicantColorRed,
-				(uint8)kDefaultReplicantColorGreen,
-				(uint8)kDefaultReplicantColorBlue,
-				(uint8)kDefaultReplicantColorAlpha
-			});
-			_UpdateReplicantPreview();
-			break;
+			_ResetReplicantColor();
+			return true;
 
 		case MSG_SEEKBAR_COLOR_DROPPED:
-		{
-			const rgb_color* color = nullptr;
-			ssize_t colorSize = 0;
-			if (message->FindData("color", B_RGB_COLOR_TYPE,
-					(const void**)&color, &colorSize) == B_OK
-					&& colorSize == sizeof(rgb_color)) {
-				fUseSystemSeekbarColorCheck->SetValue(B_CONTROL_OFF);
-				fSeekbarColorControl->SetValue(*color);
-				_UpdateSeekbarPreview();
-			}
-			break;
-		}
+			_ApplyDroppedSeekbarColor(message);
+			return true;
 
 		case B_COLORS_UPDATED:
 			_UpdateSeekbarPreview();
 			_UpdateReplicantPreview();
 			BWindow::MessageReceived(message);
-			break;
+			return true;
 
+		default:
+			return false;
+	}
+}
+
+
+bool
+SettingsWindow::_HandlePathLibrespotMessage(BMessage* message)
+{
+	switch (message->what) {
 		case kMsgBrowse:
 			_BrowseLibrespot();
-			break;
+			return true;
 
 		case kMsgBrowseCache:
 			_BrowseCachePath();
-			break;
+			return true;
 
 		case kMsgPanelResult:
-		{
-			entry_ref ref;
-			if (message->FindRef("refs", &ref) == B_OK) {
-				BEntry entry(&ref);
-				BPath path;
-				if (entry.GetPath(&path) == B_OK)
-					fPathControl->SetText(path.Path());
-			}
-			break;
-		}
+			_ApplyPanelResult(message, fPathControl);
+			return true;
 
 		case kMsgCachePanelResult:
-		{
-			entry_ref ref;
-			if (message->FindRef("refs", &ref) == B_OK) {
-				BEntry entry(&ref);
-				BPath path;
-				if (entry.GetPath(&path) == B_OK)
-					fCachePathControl->SetText(path.Path());
-			}
-			break;
-		}
+			_ApplyPanelResult(message, fCachePathControl);
+			return true;
 
 		case kMsgStartLibrespot:
-			if (_Save()) {
-				BMessage start(kMsgStartLibrespot);
-				start.AddBool("restart", true);
-				be_app->PostMessage(&start);
-			}
-			break;
+			_StartLibrespotFromSettings();
+			return true;
 
 		case kMsgRegisterLibrespot:
-			if (_Save()) {
-				be_app->PostMessage(kMsgRegisterLibrespot);
-				fOAuthStatusView->SetText(
-					B_TRANSLATE("Complete registration in your browser"));
-			}
-			break;
+			_RegisterLibrespotFromSettings();
+			return true;
 
 		case 'lbOk':
 			fOAuthStatusView->SetText(B_TRANSLATE("Account registered"));
-			break;
+			return true;
 
 		case kMsgStopLibrespot:
 			be_app->PostMessage(kMsgStopLibrespot);
-			break;
-
-		case kMsgClearImageCache:
-		{
-			status_t status = ImageCache::Clear();
-			if (status == B_OK) {
-				BAlert* alert = new BAlert("Haify",
-					B_TRANSLATE("Image cache cleared."), B_TRANSLATE("OK"));
-				alert->Go();
-			} else {
-				BAlert* alert = new BAlert("Haify",
-					B_TRANSLATE("Could not clear the image cache."),
-					B_TRANSLATE("OK"), nullptr, nullptr, B_WIDTH_AS_USUAL,
-					B_WARNING_ALERT);
-				alert->Go();
-			}
-			break;
-		}
-
-		case MSG_SPOTIFY_CAPABILITIES_CHANGED:
-			_UpdateAudiobookState();
-			break;
-
-		case 'abRp':
-		{
-			BMessage capabilities(MSG_SPOTIFY_CAPABILITIES_CHANGED);
-			capabilities.AddBool("force", true);
-			be_app->PostMessage(&capabilities);
-			break;
-		}
-
-		case 'spPf':
-			if (message->GetBool("ok", false)) {
-				BString label(B_TRANSLATE("Connected account: "));
-				const char* name = message->GetString("name", "Spotify");
-				const char* accountId = message->GetString("account_id", "");
-				label << name;
-				if (accountId[0] && strcmp(name, accountId) != 0)
-					label << " (" << accountId << ")";
-				fSpotifyAccountView->SetText(label.String());
-				fSpotifyProfileUrl = message->GetString("url", "");
-				fOpenSpotifyButton->SetEnabled(!fSpotifyProfileUrl.empty());
-			} else {
-				fSpotifyAccountView->SetText(
-					B_TRANSLATE("Connected account: unavailable"));
-			}
-			break;
-
-		case 'spOp':
-			if (!fSpotifyProfileUrl.empty()) {
-				BUrl url(fSpotifyProfileUrl.c_str(), false);
-				url.OpenWithPreferredApplication(false);
-			}
-			break;
+			return true;
 
 		default:
-			BWindow::MessageReceived(message);
-			break;
+			return false;
 	}
+}
+
+
+bool
+SettingsWindow::_HandleSpotifyMessage(BMessage* message)
+{
+	switch (message->what) {
+		case MSG_SPOTIFY_CAPABILITIES_CHANGED:
+			_UpdateAudiobookState();
+			return true;
+
+		case 'abRp':
+			_RetryAudiobookCapabilities();
+			return true;
+
+		case 'spPf':
+			_ApplySpotifyProfile(message);
+			return true;
+
+		case 'spOp':
+			_OpenSpotifyProfile();
+			return true;
+
+		default:
+			return false;
+	}
+}
+
+
+void
+SettingsWindow::_RevertCurrentCategory()
+{
+	int32 category = CategoryForListIndex(fCategoryList->CurrentSelection());
+	_LoadCategory(category, SettingsController::Load());
+}
+
+
+void
+SettingsWindow::_ResetSeekbarColor()
+{
+	fUseSystemSeekbarColorCheck->SetValue(B_CONTROL_OFF);
+	fSeekbarColorControl->SetValue((rgb_color) {
+		(uint8)kDefaultSeekBarColorRed,
+		(uint8)kDefaultSeekBarColorGreen,
+		(uint8)kDefaultSeekBarColorBlue,
+		(uint8)kDefaultSeekBarColorAlpha
+	});
+	_UpdateSeekbarPreview();
+}
+
+
+void
+SettingsWindow::_ResetReplicantColor()
+{
+	fUseAutomaticReplicantColorCheck->SetValue(B_CONTROL_ON);
+	fReplicantColorControl->SetValue((rgb_color) {
+		(uint8)kDefaultReplicantColorRed,
+		(uint8)kDefaultReplicantColorGreen,
+		(uint8)kDefaultReplicantColorBlue,
+		(uint8)kDefaultReplicantColorAlpha
+	});
+	_UpdateReplicantPreview();
+}
+
+
+void
+SettingsWindow::_ApplyDroppedSeekbarColor(BMessage* message)
+{
+	const rgb_color* color = nullptr;
+	ssize_t colorSize = 0;
+	if (message->FindData("color", B_RGB_COLOR_TYPE, (const void**)&color,
+			&colorSize) != B_OK || colorSize != sizeof(rgb_color)) {
+		return;
+	}
+
+	fUseSystemSeekbarColorCheck->SetValue(B_CONTROL_OFF);
+	fSeekbarColorControl->SetValue(*color);
+	_UpdateSeekbarPreview();
+}
+
+
+void
+SettingsWindow::_ApplyPanelResult(BMessage* message, BTextControl* target)
+{
+	entry_ref ref;
+	if (message->FindRef("refs", &ref) != B_OK)
+		return;
+
+	BEntry entry(&ref);
+	BPath path;
+	if (entry.GetPath(&path) == B_OK)
+		target->SetText(path.Path());
+}
+
+
+void
+SettingsWindow::_StartLibrespotFromSettings()
+{
+	if (!_Save())
+		return;
+
+	BMessage start(kMsgStartLibrespot);
+	start.AddBool("restart", true);
+	be_app->PostMessage(&start);
+}
+
+
+void
+SettingsWindow::_RegisterLibrespotFromSettings()
+{
+	if (!_Save())
+		return;
+
+	be_app->PostMessage(kMsgRegisterLibrespot);
+	fOAuthStatusView->SetText(
+		B_TRANSLATE("Complete registration in your browser"));
+}
+
+
+void
+SettingsWindow::_ClearImageCache()
+{
+	status_t status = ImageCache::Clear();
+	if (status == B_OK) {
+		BAlert* alert = new BAlert("Haify",
+			B_TRANSLATE("Image cache cleared."), B_TRANSLATE("OK"));
+		alert->Go();
+		return;
+	}
+
+	BAlert* alert = new BAlert("Haify",
+		B_TRANSLATE("Could not clear the image cache."), B_TRANSLATE("OK"),
+		nullptr, nullptr, B_WIDTH_AS_USUAL, B_WARNING_ALERT);
+	alert->Go();
+}
+
+
+void
+SettingsWindow::_RetryAudiobookCapabilities()
+{
+	BMessage capabilities(MSG_SPOTIFY_CAPABILITIES_CHANGED);
+	capabilities.AddBool("force", true);
+	be_app->PostMessage(&capabilities);
+}
+
+
+void
+SettingsWindow::_ApplySpotifyProfile(BMessage* message)
+{
+	if (!message->GetBool("ok", false)) {
+		fSpotifyAccountView->SetText(
+			B_TRANSLATE("Connected account: unavailable"));
+		return;
+	}
+
+	BString label(B_TRANSLATE("Connected account: "));
+	const char* name = message->GetString("name", "Spotify");
+	const char* accountId = message->GetString("account_id", "");
+	label << name;
+	if (accountId[0] && strcmp(name, accountId) != 0)
+		label << " (" << accountId << ")";
+	fSpotifyAccountView->SetText(label.String());
+	fSpotifyProfileUrl = message->GetString("url", "");
+	fOpenSpotifyButton->SetEnabled(!fSpotifyProfileUrl.empty());
+}
+
+
+void
+SettingsWindow::_OpenSpotifyProfile()
+{
+	if (fSpotifyProfileUrl.empty())
+		return;
+
+	BUrl url(fSpotifyProfileUrl.c_str(), false);
+	url.OpenWithPreferredApplication(false);
 }

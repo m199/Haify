@@ -29,6 +29,15 @@ private:
 	void _UpdateSaved(bool saved);
 	void _UpdateSavedControls();
 	std::string _NextPlayableChapterUri(const std::string& currentUri) const;
+	void _ApplyLibraryChanged(BMessage* message);
+	void _ApplyAudiobookData(BMessage* message);
+	void _ApplySavedState(BMessage* message);
+	void _ApplyChapters(BMessage* message);
+	void _PlayChapter(BMessage* message);
+	void _RequestChapterDetail(BMessage* message);
+	void _ShowChapterDetail(BMessage* message);
+	void _ToggleSaved();
+	void _ApplyCapabilitiesChanged();
 
 	std::string fAudiobookId;
 	std::string fAudiobookUri;

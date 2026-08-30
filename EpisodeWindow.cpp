@@ -44,6 +44,74 @@ EpisodeJsonBool(const nlohmann::json& object, const char* key,
     return object[key].get<bool>();
 }
 
+static void
+AddEpisodeShowFields(BMessage& message, const nlohmann::json& episode)
+{
+    if (!episode.contains("show") || !episode["show"].is_object())
+        return;
+
+    message.AddString("show",
+        EpisodeJsonString(episode["show"], "name").c_str());
+    std::string showId = EpisodeJsonString(episode["show"], "id");
+    message.AddString("show_uri", (!showId.empty()
+        ? SpotifyUriForItemKind(kSpotifyItemShow, showId)
+        : EpisodeJsonString(episode["show"], "uri")).c_str());
+}
+
+static void
+AddEpisodeImageField(BMessage& message, const nlohmann::json& episode)
+{
+    if (episode.contains("images") && episode["images"].is_array()
+            && !episode["images"].empty()) {
+        message.AddString("image",
+            EpisodeJsonString(episode["images"][0], "url").c_str());
+    }
+}
+
+static void
+AddEpisodeRestrictionField(BMessage& message, const nlohmann::json& episode)
+{
+    if (episode.contains("restrictions")
+            && episode["restrictions"].is_object()) {
+        message.AddString("restriction",
+            EpisodeJsonString(episode["restrictions"], "reason").c_str());
+    }
+}
+
+static void
+SendEpisodeDataMessage(BMessenger self, const std::string& episodeId,
+    const nlohmann::json& episode)
+{
+    if (!episode.is_object())
+        return;
+
+    BMessage message('eDat');
+    message.AddString("name",
+        EpisodeJsonString(episode, "name", "Unknown").c_str());
+    message.AddString("description",
+        EpisodeJsonString(episode, "description").c_str());
+    std::string episodeUri = SpotifyUriForItemKind(
+        kSpotifyItemEpisode, episodeId);
+    message.AddString("uri", episodeUri.c_str());
+    AddEpisodeShowFields(message, episode);
+    AddEpisodeImageField(message, episode);
+    message.AddBool("playable", EpisodeJsonBool(episode,
+        "is_playable", true));
+    AddEpisodeRestrictionField(message, episode);
+    self.SendMessage(&message);
+}
+
+static void
+SendEpisodeSavedMessage(BMessenger self, bool ok, const nlohmann::json& data)
+{
+    if (!ok || !data.is_array() || data.empty())
+        return;
+
+    BMessage message('eSts');
+    message.AddBool("saved", data[0].is_boolean() && data[0].get<bool>());
+    self.SendMessage(&message);
+}
+
 EpisodeWindow::EpisodeWindow(const std::string& episodeId)
     : BWindow(BRect(160, 120, 720, 540), B_TRANSLATE("Episode"),
         B_DOCUMENT_WINDOW, B_ASYNCHRONOUS_CONTROLS | B_AUTO_UPDATE_SIZE_LIMITS),
@@ -110,44 +178,13 @@ void EpisodeWindow::_Load()
     std::string episodeId = fEpisodeId;
     api->Content().GetEpisode(fEpisodeId, [self, episodeId](bool ok,
             const nlohmann::json& episode) {
-        if (!ok || !episode.is_object()) return;
-        BMessage message('eDat');
-        message.AddString("name",
-            EpisodeJsonString(episode, "name", "Unknown").c_str());
-        message.AddString("description",
-            EpisodeJsonString(episode, "description").c_str());
-        std::string episodeUri = SpotifyUriForItemKind(
-            kSpotifyItemEpisode, episodeId);
-        message.AddString("uri", episodeUri.c_str());
-        if (episode.contains("show") && episode["show"].is_object()) {
-            message.AddString("show",
-                EpisodeJsonString(episode["show"], "name").c_str());
-            std::string showId = EpisodeJsonString(episode["show"], "id");
-            message.AddString("show_uri", (!showId.empty()
-                ? SpotifyUriForItemKind(kSpotifyItemShow, showId)
-                : EpisodeJsonString(episode["show"], "uri")).c_str());
-        }
-        if (episode.contains("images") && episode["images"].is_array()
-                && !episode["images"].empty()) {
-            message.AddString("image",
-                EpisodeJsonString(episode["images"][0], "url").c_str());
-        }
-        message.AddBool("playable", EpisodeJsonBool(episode,
-            "is_playable", true));
-        if (episode.contains("restrictions")
-                && episode["restrictions"].is_object())
-            message.AddString("restriction",
-                EpisodeJsonString(episode["restrictions"], "reason").c_str());
-        self.SendMessage(&message);
+        if (ok)
+            SendEpisodeDataMessage(self, episodeId, episode);
     });
     api->Library().CheckLibraryItems(
         {SpotifyUriForItemKind(kSpotifyItemEpisode, fEpisodeId)},
         [self](bool ok, const nlohmann::json& data) {
-            if (!ok || !data.is_array() || data.empty()) return;
-            BMessage message('eSts');
-            message.AddBool("saved", data[0].is_boolean()
-                && data[0].get<bool>());
-            self.SendMessage(&message);
+            SendEpisodeSavedMessage(self, ok, data);
         });
 }
 
@@ -164,109 +201,140 @@ void EpisodeWindow::_UpdateSaved(bool saved)
         fSave->SetLabel(saved ? B_TRANSLATE("Remove") : B_TRANSLATE("Save"));
 }
 
+void EpisodeWindow::_ApplyLibraryChanged(BMessage* message)
+{
+    std::string uri = message->GetString("uri", "");
+    std::string operation = message->GetString("operation", "");
+    if (uri == SpotifyUriForItemKind(kSpotifyItemEpisode, fEpisodeId)
+            && (operation == "add" || operation == "remove")) {
+        _UpdateSaved(operation == "add");
+    }
+}
+
+void EpisodeWindow::_ApplyEpisodeData(BMessage* message)
+{
+    fEpisodeUri = message->GetString("uri", "");
+    fShowName = message->GetString("show", "");
+    fShowUri = message->GetString("show_uri", "");
+    fName->SetText(message->GetString("name", "Unknown"));
+    fShow->SetText(fShowName.c_str());
+    bool playable = message->GetBool("playable", true);
+    BString description(message->GetString("description", ""));
+    const char* restriction = message->GetString("restriction", "");
+    if (!playable && restriction[0]) {
+        BString prefix(B_TRANSLATE("Unavailable: "));
+        prefix << restriction << "\n\n" << description;
+        description = prefix;
+    }
+    fDescription->SetText(description.String());
+    fPlay->SetEnabled(playable);
+    fQueue->SetEnabled(playable);
+    fOpenShow->SetEnabled(!fShowUri.empty());
+    SetTitle(message->GetString("name", B_TRANSLATE("Episode")));
+    _LoadArtwork(message->GetString("image", ""));
+}
+
+void EpisodeWindow::_PlayEpisode()
+{
+    if (fEpisodeUri.empty())
+        return;
+
+    BMessage play('play');
+    play.AddString("uri", fEpisodeUri.c_str());
+    play.AddString("title", fName->Text());
+    if (!fShowName.empty())
+        play.AddString("artist", fShowName.c_str());
+    if (!fShowUri.empty()) {
+        play.AddString("context_uri", fShowUri.c_str());
+        play.AddString(kNowPlayingPrimaryOpenUriField, fShowUri.c_str());
+        play.AddString(kNowPlayingParentUriField, fShowUri.c_str());
+        play.AddString(kNowPlayingParentKindField, "show");
+        if (SpotifyItemKindForUri(fShowUri) == kSpotifyItemShow) {
+            play.AddString(kNowPlayingShowIdField,
+                SpotifyItemIdForUri(fShowUri).c_str());
+        }
+    }
+    play.AddString(kNowPlayingItemKindField, "episode");
+    be_app->PostMessage(&play);
+}
+
+void EpisodeWindow::_OpenShow()
+{
+    if (fShowUri.empty())
+        return;
+
+    BMessage open('open');
+    open.AddString("uri", fShowUri.c_str());
+    be_app->PostMessage(&open);
+}
+
+void EpisodeWindow::_QueueEpisode()
+{
+    App* app = dynamic_cast<App*>(be_app);
+    SpotifyApi* api = app ? app->GetApi() : nullptr;
+    if (api && !fEpisodeUri.empty())
+        api->Playback().AddToQueue(fEpisodeUri, nullptr);
+}
+
+void EpisodeWindow::_ToggleSaved()
+{
+    App* app = dynamic_cast<App*>(be_app);
+    SpotifyApi* api = app ? app->GetApi() : nullptr;
+    if (!api)
+        return;
+
+    bool target = !fSaved;
+    BMessenger self(this);
+    std::string episodeUri = SpotifyUriForItemKind(
+        kSpotifyItemEpisode, fEpisodeId);
+    auto done = [self, target, episodeUri](bool ok, const nlohmann::json&) {
+        if (!ok) return;
+        BMessage state('eSts');
+        state.AddBool("saved", target);
+        self.SendMessage(&state);
+        BMessage changed(MSG_LIBRARY_CHANGED);
+        changed.AddString("operation", target ? "add" : "remove");
+        changed.AddString("uri", episodeUri.c_str());
+        be_app->PostMessage(&changed);
+    };
+    std::vector<std::string> uris = {episodeUri};
+    if (target)
+        api->Library().SaveLibraryItems(uris, done);
+    else
+        api->Library().RemoveLibraryItems(uris, done);
+}
+
 void EpisodeWindow::MessageReceived(BMessage* message)
 {
     switch (message->what) {
         case MSG_LIBRARY_CHANGED:
-        {
-            std::string uri = message->GetString("uri", "");
-            std::string operation = message->GetString("operation", "");
-            if (uri == SpotifyUriForItemKind(kSpotifyItemEpisode, fEpisodeId)
-                    && (operation == "add" || operation == "remove")) {
-                _UpdateSaved(operation == "add");
-            }
+            _ApplyLibraryChanged(message);
             break;
-        }
 
         case 'eDat':
-        {
-            fEpisodeUri = message->GetString("uri", "");
-            fShowName = message->GetString("show", "");
-            fShowUri = message->GetString("show_uri", "");
-            fName->SetText(message->GetString("name", "Unknown"));
-            fShow->SetText(fShowName.c_str());
-            bool playable = message->GetBool("playable", true);
-            BString description(message->GetString("description", ""));
-            const char* restriction = message->GetString("restriction", "");
-            if (!playable && restriction[0]) {
-                BString prefix(B_TRANSLATE("Unavailable: "));
-                prefix << restriction << "\n\n" << description;
-                description = prefix;
-            }
-            fDescription->SetText(description.String());
-            fPlay->SetEnabled(playable);
-            fQueue->SetEnabled(playable);
-            fOpenShow->SetEnabled(!fShowUri.empty());
-            SetTitle(message->GetString("name", B_TRANSLATE("Episode")));
-            _LoadArtwork(message->GetString("image", ""));
+            _ApplyEpisodeData(message);
             break;
-        }
+
         case 'eSts':
             _UpdateSaved(message->GetBool("saved", false));
             break;
+
         case 'ePly':
-            if (!fEpisodeUri.empty()) {
-                BMessage play('play');
-                play.AddString("uri", fEpisodeUri.c_str());
-                play.AddString("title", fName->Text());
-                if (!fShowName.empty())
-                    play.AddString("artist", fShowName.c_str());
-                if (!fShowUri.empty()) {
-                    play.AddString("context_uri", fShowUri.c_str());
-                    play.AddString(kNowPlayingPrimaryOpenUriField,
-                        fShowUri.c_str());
-                    play.AddString(kNowPlayingParentUriField,
-                        fShowUri.c_str());
-                    play.AddString(kNowPlayingParentKindField, "show");
-                    if (SpotifyItemKindForUri(fShowUri) == kSpotifyItemShow) {
-                        play.AddString(kNowPlayingShowIdField,
-                            SpotifyItemIdForUri(fShowUri).c_str());
-                    }
-                }
-                play.AddString(kNowPlayingItemKindField, "episode");
-                be_app->PostMessage(&play);
-            }
+            _PlayEpisode();
             break;
+
         case 'eShw':
-            if (!fShowUri.empty()) {
-                BMessage open('open');
-                open.AddString("uri", fShowUri.c_str());
-                be_app->PostMessage(&open);
-            }
+            _OpenShow();
             break;
+
         case 'eQue':
-        {
-            App* app = dynamic_cast<App*>(be_app);
-            SpotifyApi* api = app ? app->GetApi() : nullptr;
-            if (api && !fEpisodeUri.empty())
-                api->Playback().AddToQueue(fEpisodeUri, nullptr);
+            _QueueEpisode();
             break;
-        }
+
         case 'eSav':
-        {
-            App* app = dynamic_cast<App*>(be_app);
-            SpotifyApi* api = app ? app->GetApi() : nullptr;
-            if (!api) break;
-            bool target = !fSaved;
-            BMessenger self(this);
-            std::string episodeUri = SpotifyUriForItemKind(
-                kSpotifyItemEpisode, fEpisodeId);
-            auto done = [self, target, episodeUri](bool ok,
-                    const nlohmann::json&) {
-                if (!ok) return;
-                BMessage state('eSts');
-                state.AddBool("saved", target);
-                self.SendMessage(&state);
-                BMessage changed(MSG_LIBRARY_CHANGED);
-                changed.AddString("operation", target ? "add" : "remove");
-                changed.AddString("uri", episodeUri.c_str());
-                be_app->PostMessage(&changed);
-            };
-            std::vector<std::string> uris = {episodeUri};
-            if (target) api->Library().SaveLibraryItems(uris, done);
-            else api->Library().RemoveLibraryItems(uris, done);
+            _ToggleSaved();
             break;
-        }
+
         default:
             BWindow::MessageReceived(message);
             break;

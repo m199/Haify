@@ -88,6 +88,24 @@ private:
 	void					_ApplyEpisodeSearch(BMessage* message);
 	void					_RetryEpisodeSearch(BMessage* message);
 	void					_ApplyEpisodeSelection(BMessage* message);
+	bool					_HandleTrackActionMessage(BMessage* message);
+	bool					_HandleDataMessage(BMessage* message);
+	bool					_HandlePlaylistEditMessage(BMessage* message);
+	bool					_HandlePlaylistMenuMessage(BMessage* message);
+	bool					_HandlePodcastMessage(BMessage* message);
+	bool					_HandleAppForwardMessage(BMessage* message);
+	void					_ApplyPlaylistRemoveMarked(BMessage* message);
+	void					_ReloadDataIfIdle();
+	void					_RefreshEpisodes();
+	void					_SaveCacheNowFromMessage();
+	void					_ApplyTitleUpdate(BMessage* message);
+	void					_UploadPlaylistCoverFromMessage(BMessage* message);
+	void					_ShowPlaylistSnapshotConflict();
+	void					_ApplyPlayingTrackUpdate(BMessage* message);
+	void					_ApplyCoverUpdate(BMessage* message);
+	void					_ShowAlbumMenuFromMessage(BMessage* message);
+	void					_ShowPlaylistMenuFromMessage(BMessage* message);
+	void					_ApplyPlaylistDeleteFailed();
 	bool					_CollectPendingTrackRemovals(
 								std::vector<std::pair<std::string, int>>&
 									items);

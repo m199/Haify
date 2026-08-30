@@ -23,6 +23,17 @@ private:
 	void						_EnsureValidSelection();
 	void						_UpdateCapabilityFilters();
 	bool						_AudiobooksEnabled() const;
+	void						_ApplyTypeSelection();
+	void						_ApplyCapabilityChange();
+	void						_ApplyResults(BMessage* message);
+	void						_ApplyPlayingTrack(BMessage* message);
+	void						_ForwardOpen(BMessage* message);
+	void						_PrepareContextMenu(BMessage* message);
+	void						_ShowContextMenu(BMessage* message);
+	void						_ApplyLibraryActionResult(BMessage* message);
+	void						_ApplyPlaylistActionResult(BMessage* message);
+	void						_PlayTrackFromMessage(BMessage* message);
+	void						_ForwardPlay(BMessage* message);
 
 	BTextControl*				fSearchBar		= nullptr;
 	BCheckBox*					fChkAll			= nullptr;

@@ -706,309 +706,428 @@ void ArtistWindow::ShowTrackContextMenu(BPoint local, BPoint screen)
 }
 
 
-void ArtistWindow::MessageReceived(BMessage* message)
+bool
+ArtistWindow::_HandleArtistStateMessage(BMessage* message)
 {
 	switch (message->what) {
 	case MSG_LIBRARY_CHANGED:
-	{
-		std::string uri = message->GetString("uri", "");
-		std::string operation = message->GetString("operation", "");
-		if (uri != SpotifyUriForItemKind(kSpotifyItemArtist, fArtistId)
-				|| (operation != "add" && operation != "remove")) {
-			break;
-		}
-		fFollowing = operation == "add";
-		if (fFollowButton) {
-			fFollowButton->SetLabel(fFollowing
-				? B_TRANSLATE("Unfollow") : B_TRANSLATE("Follow"));
-		}
-		break;
-	}
-
+		_ApplyLibraryChanged(message);
+		return true;
 	case 'lddt':
 		_LoadData();
-		break;
-
+		return true;
 	case 'afst':
-		fFollowing = message->GetBool("following", false);
-		if (fFollowButton)
-			fFollowButton->SetLabel(fFollowing
-				? B_TRANSLATE("Unfollow") : B_TRANSLATE("Follow"));
-		break;
-
+		_UpdateFollowing(message->GetBool("following", false));
+		return true;
 	case 'afol':
-	{
-		App* app = dynamic_cast<App*>(be_app);
-		SpotifyApi* api = app ? app->GetApi() : nullptr;
-		if (!api) break;
-		bool target = !fFollowing;
-		BMessenger self(this);
-		std::string artistUri = SpotifyUriForItemKind(kSpotifyItemArtist,
-			fArtistId);
-		auto done = [self, target, artistUri](bool ok, const nlohmann::json&) {
-			if (!ok) return;
-			BMessage state('afst');
-			state.AddBool("following", target);
-			self.SendMessage(&state);
-			BMessage changed(MSG_LIBRARY_CHANGED);
-			changed.AddString("operation", target ? "add" : "remove");
-			changed.AddString("uri", artistUri.c_str());
-			be_app->PostMessage(&changed);
-		};
-		if (target)
-			api->Library().FollowArtist(fArtistId, done);
-		else
-			api->Library().UnfollowArtist(fArtistId, done);
-		break;
-	}
-
+		_ToggleFollowing();
+		return true;
 	case kMsgArtistMetadata:
-	{
-		const char* name   = message->GetString("name", "");
-		int32 followers    = message->GetInt32("followers", 0);
-		const char* imgUrl = message->GetString("imageUrl", "");
-		if (fNameView) { fNameView->SetText(name); SetTitle(name); }
-		if (fFollowersView)
-			fFollowersView->SetText(FormatFollowers(followers).c_str());
-		_LoadArtwork(imgUrl);
-		break;
-	}
-
+		_ApplyArtistMetadata(message);
+		return true;
 	case kMsgArtistTopTracks:
-	{
-		if (!fTrackList) break;
-		int32 generation = message->GetInt32("generation", 0);
-		if (generation != fTopTracksGeneration)
-			break;
-		if (!message->GetBool("ok", false)) {
-			_ScheduleTopTracksRetry(generation);
-			break;
-		}
-		if (fTracksLabel) {
-			fTracksLabel->SetText(ArtistTopTracksLabel(
-				message->GetInt32("source", kArtistTopTracksOfficial)));
-		}
-		fTrackList->Clear();
-		const char *uri, *title, *album, *albumUri;
-		int32 num, ms;
-		int32 rowsAdded = 0;
-		for (int i = 0; i < 10 &&
-		     message->FindString("uri",      i, &uri)      == B_OK &&
-		     message->FindString("title",    i, &title)    == B_OK &&
-		     message->FindInt32 ("num",      i, &num)      == B_OK &&
-		     message->FindInt32 ("ms",       i, &ms)       == B_OK &&
-		     message->FindString("album",    i, &album)    == B_OK &&
-		     message->FindString("albumUri", i, &albumUri) == B_OK;
-		     i++)
-		{
-			char numBuf[8];
-			snprintf(numBuf, sizeof(numBuf), "%d", (int)num);
-			TrackArtistRow* row = new TrackArtistRow(uri);
-			row->fAlbumUri = albumUri;
-			row->SetField(new BStringField(numBuf),               0);
-			row->SetField(new TrackArtistStringField(title),       1);
-			row->SetField(new TrackArtistStringField(album),       2);
-			row->SetField(new TrackArtistStringField(FormatMs(ms).c_str()), 3);
-			fTrackList->AddRow(row);
-			rowsAdded++;
-		}
-		if (!fCurrentPlayingTrackUri.empty())
-			_SetPlayingTrack(fCurrentPlayingTrackUri.c_str());
-		if (rowsAdded == 0)
-			_ScheduleTopTracksRetry(generation);
-		break;
-	}
-
+		_ApplyTopTracks(message);
+		return true;
 	case kMsgArtistAlbums:
-	{
-		if (!fAlbumList) break;
-		fAlbumList->Clear();
-		const char *id, *name, *year, *type, *cover;
-		for (int i = 0;
-		     message->FindString("id",    i, &id)    == B_OK &&
-		     message->FindString("name",  i, &name)  == B_OK &&
-		     message->FindString("year",  i, &year)  == B_OK &&
-		     message->FindString("type",  i, &type)  == B_OK &&
-		     message->FindString("cover", i, &cover) == B_OK;
-		     i++)
-		{
-			AlbumArtistRow* row = new AlbumArtistRow(id, name, cover);
-			row->SetField(new BStringField(name), 0);
-			row->SetField(new BStringField(year), 1);
-			const char* typeLabel =
-			    (strcmp(type, "album")  == 0) ? "Album"  :
-			    (strcmp(type, "single") == 0) ? "Single" : type;
-			row->SetField(new BStringField(typeLabel), 2);
-			fAlbumList->AddRow(row);
-		}
-		break;
-	}
-
+		_ApplyAlbums(message);
+		return true;
 	case kMsgRetryTopTracks:
-	{
-		if (message->GetInt32("generation", 0) == fTopTracksGeneration)
-			_LoadTopTracks(false);
-		break;
-	}
-
-	case 'tply':
-	{
-		const char* msgUri = message->GetString("trackUri", "");
-		std::string uri = *msgUri ? msgUri : "";
-		TrackArtistRow* row = nullptr;
-		if (uri.empty() && fTrackList) {
-			row = dynamic_cast<TrackArtistRow*>(fTrackList->CurrentSelection());
-			if (row) uri = row->fTrackUri;
-		}
-		if (!row && fTrackList) {
-			for (int32 i = 0; i < fTrackList->CountRows(); i++) {
-				TrackArtistRow* candidate =
-					dynamic_cast<TrackArtistRow*>(fTrackList->RowAt(i));
-				if (candidate && candidate->fTrackUri == uri) {
-					row = candidate;
-					break;
-				}
-			}
-		}
-		if (!uri.empty()) {
-			BMessage play('play');
-			play.AddString("uri", uri.c_str());
-			std::string contextUri = SpotifyUriForItemKind(
-				kSpotifyItemArtist, fArtistId);
-			play.AddString("context_uri", contextUri.c_str());
-			if (row) {
-				BStringField* title = dynamic_cast<BStringField*>(row->GetField(1));
-				BStringField* album = dynamic_cast<BStringField*>(row->GetField(2));
-				if (title)
-					play.AddString("title", title->String());
-				if (fNameView)
-					play.AddString("artist", fNameView->Text());
-				if (album)
-					play.AddString("album", album->String());
-			}
-			be_app->PostMessage(&play);
-			_SetPlayingTrack(uri.c_str());
-		}
-		break;
-	}
-
-	case 'aopn':
-	{
-		if (!fAlbumList) break;
-		AlbumArtistRow* row =
-		    dynamic_cast<AlbumArtistRow*>(fAlbumList->CurrentSelection());
-		if (!row || row->fAlbumId.empty()) break;
-		std::string albumUri = SpotifyUriForItemKind(kSpotifyItemAlbum,
-			row->fAlbumId);
-		if (albumUri.empty())
-			break;
-		BMessage msg(MSG_OPEN_PLAYLIST);
-		msg.AddString("uri",      albumUri.c_str());
-		msg.AddString("name",     row->fAlbumName.c_str());
-		msg.AddString("coverUrl", row->fCoverUrl.c_str());
-		be_app->PostMessage(&msg);
-		break;
-	}
-
-	case 'likT':
-	{
-		const char* trackUri;
-		if (message->FindString("trackUri", &trackUri) == B_OK) {
-			App* app = (App*)be_app;
-			SpotifyApi* api = app->GetApi();
-			if (api) {
-				std::string u = trackUri;
-				std::string trackId = SpotifyItemIdForUri(u);
-				if (SpotifyItemKindForUri(u) == kSpotifyItemTrack
-						&& !trackId.empty())
-					api->Library().SaveTrack(trackId, nullptr);
-			}
-		}
-		break;
-	}
-
-	case 'addP':
-	{
-		const char* trackUri;
-		const char* playlistId;
-		if (message->FindString("trackUri",   &trackUri)   == B_OK &&
-		    message->FindString("playlistId", &playlistId) == B_OK) {
-			App* app = (App*)be_app;
-			SpotifyApi* api = app->GetApi();
-			if (api)
-				api->Playlists().AddTrackToPlaylist(playlistId, trackUri,
-					nullptr);
-		}
-		break;
-	}
-
-	case 'remL':
-	{
-		const char* trackUri;
-		if (message->FindString("trackUri", &trackUri) == B_OK) {
-			App* app = (App*)be_app;
-			SpotifyApi* api = app->GetApi();
-			if (api) {
-				std::string uri = trackUri;
-				if (SpotifyItemKindForUri(uri) == kSpotifyItemTrack) {
-					api->Library().RemoveLibraryItems({uri}, [uri](bool ok,
-							const nlohmann::json&) {
-						if (!ok)
-							return;
-						BMessage changed(MSG_LIBRARY_CHANGED);
-						changed.AddString("operation", "remove");
-						changed.AddString("uri", uri.c_str());
-						be_app->PostMessage(&changed);
-					});
-				}
-			}
-		}
-		break;
-	}
-
-	case 'iCmR':
-	{
-		App* app = dynamic_cast<App*>(be_app);
-		ShowPlayableItemContextMenu(message->GetString("uri", ""),
-			message->GetString("context_uri", ""),
-			message->GetPoint("screen_point", BPoint()), BMessenger(this),
-			app ? app->GetApi() : nullptr,
-			message->GetBool("library_only", false), true,
-			message->GetBool("saved", false));
-		break;
-	}
-
-	case 'savA':
-	{
-		const char* uri = message->GetString("uri", "");
-		std::string albumUri = uri ? uri : "";
-		std::string albumId = SpotifyItemIdForUri(albumUri);
-		if (SpotifyItemKindForUri(albumUri) != kSpotifyItemAlbum
-				|| albumId.empty())
-			break;
-		App* app = (App*)be_app;
-		SpotifyApi* api = app->GetApi();
-		if (api) {
-			api->Library().SaveAlbum(albumId, [albumUri](bool ok,
-					const nlohmann::json&) {
-				if (!ok) return;
-				BMessage changed(MSG_LIBRARY_CHANGED);
-				changed.AddString("operation", "add");
-				changed.AddString("uri", albumUri.c_str());
-				be_app->PostMessage(&changed);
-			});
-		}
-		break;
-	}
-
+		_RetryTopTracks(message);
+		return true;
 	case 'pStU':
-	{
 		_SetPlayingTrack(message->GetString("trackUri", ""));
-		break;
+		return true;
+	default:
+		return false;
+	}
+}
+
+
+bool
+ArtistWindow::_HandleTrackActionMessage(BMessage* message)
+{
+	switch (message->what) {
+	case 'tply':
+		_PlayTrack(message);
+		return true;
+	case 'likT':
+		_LikeTrack(message);
+		return true;
+	case 'addP':
+		_AddTrackToPlaylist(message);
+		return true;
+	case 'remL':
+		_RemoveTrackFromLibrary(message);
+		return true;
+	case 'iCmR':
+		_ShowTrackContextMenuResult(message);
+		return true;
+	default:
+		return false;
+	}
+}
+
+
+bool
+ArtistWindow::_HandleAlbumActionMessage(BMessage* message)
+{
+	switch (message->what) {
+	case 'aopn':
+		_OpenSelectedAlbum();
+		return true;
+	case 'savA':
+		_SaveAlbum(message);
+		return true;
+	default:
+		return false;
+	}
+}
+
+
+void
+ArtistWindow::_ApplyLibraryChanged(BMessage* message)
+{
+	std::string uri = message->GetString("uri", "");
+	std::string operation = message->GetString("operation", "");
+	if (uri != SpotifyUriForItemKind(kSpotifyItemArtist, fArtistId)
+			|| (operation != "add" && operation != "remove")) {
+		return;
+	}
+	_UpdateFollowing(operation == "add");
+}
+
+
+void
+ArtistWindow::_UpdateFollowing(bool following)
+{
+	fFollowing = following;
+	if (fFollowButton) {
+		fFollowButton->SetLabel(fFollowing
+			? B_TRANSLATE("Unfollow") : B_TRANSLATE("Follow"));
+	}
+}
+
+
+void
+ArtistWindow::_ToggleFollowing()
+{
+	App* app = dynamic_cast<App*>(be_app);
+	SpotifyApi* api = app ? app->GetApi() : nullptr;
+	if (!api)
+		return;
+
+	bool target = !fFollowing;
+	BMessenger self(this);
+	std::string artistUri = SpotifyUriForItemKind(kSpotifyItemArtist,
+		fArtistId);
+	auto done = [self, target, artistUri](bool ok, const nlohmann::json&) {
+		if (!ok) return;
+		BMessage state('afst');
+		state.AddBool("following", target);
+		self.SendMessage(&state);
+		BMessage changed(MSG_LIBRARY_CHANGED);
+		changed.AddString("operation", target ? "add" : "remove");
+		changed.AddString("uri", artistUri.c_str());
+		be_app->PostMessage(&changed);
+	};
+	if (target)
+		api->Library().FollowArtist(fArtistId, done);
+	else
+		api->Library().UnfollowArtist(fArtistId, done);
+}
+
+
+void
+ArtistWindow::_ApplyArtistMetadata(BMessage* message)
+{
+	const char* name = message->GetString("name", "");
+	int32 followers = message->GetInt32("followers", 0);
+	const char* imgUrl = message->GetString("imageUrl", "");
+	if (fNameView) {
+		fNameView->SetText(name);
+		SetTitle(name);
+	}
+	if (fFollowersView)
+		fFollowersView->SetText(FormatFollowers(followers).c_str());
+	_LoadArtwork(imgUrl);
+}
+
+
+void
+ArtistWindow::_ApplyTopTracks(BMessage* message)
+{
+	if (!fTrackList)
+		return;
+
+	int32 generation = message->GetInt32("generation", 0);
+	if (generation != fTopTracksGeneration)
+		return;
+	if (!message->GetBool("ok", false)) {
+		_ScheduleTopTracksRetry(generation);
+		return;
+	}
+	if (fTracksLabel) {
+		fTracksLabel->SetText(ArtistTopTracksLabel(
+			message->GetInt32("source", kArtistTopTracksOfficial)));
 	}
 
-	default:
-		BWindow::MessageReceived(message);
-		break;
+	fTrackList->Clear();
+	const char *uri, *title, *album, *albumUri;
+	int32 num, ms;
+	int32 rowsAdded = 0;
+	for (int i = 0; i < 10
+			&& message->FindString("uri", i, &uri) == B_OK
+			&& message->FindString("title", i, &title) == B_OK
+			&& message->FindInt32("num", i, &num) == B_OK
+			&& message->FindInt32("ms", i, &ms) == B_OK
+			&& message->FindString("album", i, &album) == B_OK
+			&& message->FindString("albumUri", i, &albumUri) == B_OK; i++) {
+		char numBuf[8];
+		snprintf(numBuf, sizeof(numBuf), "%d", (int)num);
+		TrackArtistRow* row = new TrackArtistRow(uri);
+		row->fAlbumUri = albumUri;
+		row->SetField(new BStringField(numBuf), 0);
+		row->SetField(new TrackArtistStringField(title), 1);
+		row->SetField(new TrackArtistStringField(album), 2);
+		row->SetField(new TrackArtistStringField(FormatMs(ms).c_str()), 3);
+		fTrackList->AddRow(row);
+		rowsAdded++;
 	}
+	if (!fCurrentPlayingTrackUri.empty())
+		_SetPlayingTrack(fCurrentPlayingTrackUri.c_str());
+	if (rowsAdded == 0)
+		_ScheduleTopTracksRetry(generation);
+}
+
+
+void
+ArtistWindow::_ApplyAlbums(BMessage* message)
+{
+	if (!fAlbumList)
+		return;
+
+	fAlbumList->Clear();
+	const char *id, *name, *year, *type, *cover;
+	for (int i = 0;
+			message->FindString("id", i, &id) == B_OK
+			&& message->FindString("name", i, &name) == B_OK
+			&& message->FindString("year", i, &year) == B_OK
+			&& message->FindString("type", i, &type) == B_OK
+			&& message->FindString("cover", i, &cover) == B_OK; i++) {
+		AlbumArtistRow* row = new AlbumArtistRow(id, name, cover);
+		row->SetField(new BStringField(name), 0);
+		row->SetField(new BStringField(year), 1);
+		const char* typeLabel =
+		    (strcmp(type, "album") == 0) ? "Album" :
+		    (strcmp(type, "single") == 0) ? "Single" : type;
+		row->SetField(new BStringField(typeLabel), 2);
+		fAlbumList->AddRow(row);
+	}
+}
+
+
+void
+ArtistWindow::_RetryTopTracks(BMessage* message)
+{
+	if (message->GetInt32("generation", 0) == fTopTracksGeneration)
+		_LoadTopTracks(false);
+}
+
+
+std::string
+ArtistWindow::_PlayTrackUri(BMessage* message) const
+{
+	const char* msgUri = message->GetString("trackUri", "");
+	std::string uri = *msgUri ? msgUri : "";
+	if (!uri.empty() || !fTrackList)
+		return uri;
+
+	TrackArtistRow* row = dynamic_cast<TrackArtistRow*>(
+		fTrackList->CurrentSelection());
+	return row ? row->fTrackUri : "";
+}
+
+
+void
+ArtistWindow::_AddPlayingTrackMetadata(BMessage& play,
+	const std::string& uri) const
+{
+	TrackArtistRow* row = nullptr;
+	if (fTrackList) {
+		for (int32 i = 0; i < fTrackList->CountRows(); i++) {
+			TrackArtistRow* candidate =
+				dynamic_cast<TrackArtistRow*>(fTrackList->RowAt(i));
+			if (candidate && candidate->fTrackUri == uri) {
+				row = candidate;
+				break;
+			}
+		}
+	}
+	if (!row)
+		return;
+
+	BStringField* title = dynamic_cast<BStringField*>(row->GetField(1));
+	BStringField* album = dynamic_cast<BStringField*>(row->GetField(2));
+	if (title)
+		play.AddString("title", title->String());
+	if (fNameView)
+		play.AddString("artist", fNameView->Text());
+	if (album)
+		play.AddString("album", album->String());
+}
+
+
+void
+ArtistWindow::_PlayTrack(BMessage* message)
+{
+	std::string uri = _PlayTrackUri(message);
+	if (uri.empty())
+		return;
+
+	BMessage play('play');
+	play.AddString("uri", uri.c_str());
+	std::string contextUri = SpotifyUriForItemKind(kSpotifyItemArtist,
+		fArtistId);
+	play.AddString("context_uri", contextUri.c_str());
+	_AddPlayingTrackMetadata(play, uri);
+	be_app->PostMessage(&play);
+	_SetPlayingTrack(uri.c_str());
+}
+
+
+void
+ArtistWindow::_OpenSelectedAlbum()
+{
+	if (!fAlbumList)
+		return;
+
+	AlbumArtistRow* row =
+	    dynamic_cast<AlbumArtistRow*>(fAlbumList->CurrentSelection());
+	if (!row || row->fAlbumId.empty())
+		return;
+
+	std::string albumUri = SpotifyUriForItemKind(kSpotifyItemAlbum,
+		row->fAlbumId);
+	if (albumUri.empty())
+		return;
+
+	BMessage msg(MSG_OPEN_PLAYLIST);
+	msg.AddString("uri", albumUri.c_str());
+	msg.AddString("name", row->fAlbumName.c_str());
+	msg.AddString("coverUrl", row->fCoverUrl.c_str());
+	be_app->PostMessage(&msg);
+}
+
+
+void
+ArtistWindow::_LikeTrack(BMessage* message)
+{
+	const char* trackUri;
+	if (message->FindString("trackUri", &trackUri) != B_OK)
+		return;
+
+	App* app = (App*)be_app;
+	SpotifyApi* api = app->GetApi();
+	if (!api)
+		return;
+
+	std::string uri = trackUri;
+	std::string trackId = SpotifyItemIdForUri(uri);
+	if (SpotifyItemKindForUri(uri) == kSpotifyItemTrack && !trackId.empty())
+		api->Library().SaveTrack(trackId, nullptr);
+}
+
+
+void
+ArtistWindow::_AddTrackToPlaylist(BMessage* message)
+{
+	const char* trackUri;
+	const char* playlistId;
+	if (message->FindString("trackUri", &trackUri) != B_OK
+			|| message->FindString("playlistId", &playlistId) != B_OK) {
+		return;
+	}
+
+	App* app = (App*)be_app;
+	SpotifyApi* api = app->GetApi();
+	if (api)
+		api->Playlists().AddTrackToPlaylist(playlistId, trackUri, nullptr);
+}
+
+
+void
+ArtistWindow::_RemoveTrackFromLibrary(BMessage* message)
+{
+	const char* trackUri;
+	if (message->FindString("trackUri", &trackUri) != B_OK)
+		return;
+
+	App* app = (App*)be_app;
+	SpotifyApi* api = app->GetApi();
+	if (!api)
+		return;
+
+	std::string uri = trackUri;
+	if (SpotifyItemKindForUri(uri) != kSpotifyItemTrack)
+		return;
+
+	api->Library().RemoveLibraryItems({uri}, [uri](bool ok,
+			const nlohmann::json&) {
+		if (!ok)
+			return;
+		BMessage changed(MSG_LIBRARY_CHANGED);
+		changed.AddString("operation", "remove");
+		changed.AddString("uri", uri.c_str());
+		be_app->PostMessage(&changed);
+	});
+}
+
+
+void
+ArtistWindow::_ShowTrackContextMenuResult(BMessage* message)
+{
+	App* app = dynamic_cast<App*>(be_app);
+	ShowPlayableItemContextMenu(message->GetString("uri", ""),
+		message->GetString("context_uri", ""),
+		message->GetPoint("screen_point", BPoint()), BMessenger(this),
+		app ? app->GetApi() : nullptr,
+		message->GetBool("library_only", false), true,
+		message->GetBool("saved", false));
+}
+
+
+void
+ArtistWindow::_SaveAlbum(BMessage* message)
+{
+	const char* uri = message->GetString("uri", "");
+	std::string albumUri = uri ? uri : "";
+	std::string albumId = SpotifyItemIdForUri(albumUri);
+	if (SpotifyItemKindForUri(albumUri) != kSpotifyItemAlbum
+			|| albumId.empty()) {
+		return;
+	}
+
+	App* app = (App*)be_app;
+	SpotifyApi* api = app->GetApi();
+	if (api) {
+		api->Library().SaveAlbum(albumId, [albumUri](bool ok,
+				const nlohmann::json&) {
+			if (!ok) return;
+			BMessage changed(MSG_LIBRARY_CHANGED);
+			changed.AddString("operation", "add");
+			changed.AddString("uri", albumUri.c_str());
+			be_app->PostMessage(&changed);
+		});
+	}
+}
+
+
+void ArtistWindow::MessageReceived(BMessage* message)
+{
+	if (_HandleArtistStateMessage(message) || _HandleTrackActionMessage(message)
+			|| _HandleAlbumActionMessage(message)) {
+		return;
+	}
+
+	BWindow::MessageReceived(message);
 }

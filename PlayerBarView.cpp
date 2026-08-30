@@ -1188,92 +1188,47 @@ void PlayerBarView::_ForwardMessage(BMessage* message) {
     }
 }
 
-void PlayerBarView::MessageReceived(BMessage* msg) {
+bool PlayerBarView::_HandleStateMessage(BMessage* msg) {
     switch (msg->what) {
         case B_COLORS_UPDATED:
-        {
             _ApplyBackgroundColors();
-            break;
-        }
+            return true;
 
         case kMsgRefreshReplicantColor:
             _ApplyBackgroundColors();
-            break;
+            return true;
 
         case kMsgTick:
-        {
-            if (fIsReplicant) {
-                if (!_UpdateReplicantAvailability())
-                    break;
-                if (!fRegistered || !fTarget.IsValid())
-                    _RegisterReplicant();
-            }
-            if (fIsPlaying && fDurationUs > 0 && fLastSyncUs > 0) {
-                bigtime_t elapsed = system_time() - fLastSyncUs;
-                bigtime_t pos = fLastPosUs + elapsed;
-                if (pos > fDurationUs) pos = fDurationUs;
-                _UpdatePlaybackPosition(pos, fDurationUs);
-            }
-            break;
-        }
+            _ApplyTick();
+            return true;
 
         case MSG_REPLICANT_STATE:
-        {
-            if (fIsReplicant && !fRegistered)
-                _RegisterReplicant();
-            _ApplyReplicantAppearance(msg);
-            SetTrack(msg->GetString("title", ""), msg->GetString("artist", ""));
-            SetTrackUri(msg->GetString("track_uri", ""));
-            const char* openUri = msg->GetString(
-                kNowPlayingPrimaryOpenUriField, "");
-            if (!openUri || !openUri[0])
-                openUri = msg->GetString("track_uri", "");
-            SetOpenUri(openUri);
-            SetTrackIds(msg->GetString("album_id", ""), msg->GetString("artist_id", ""));
-            SetPlaying(msg->GetBool("is_playing", false));
-            int32 pos = msg->GetInt32("progress_ms", 0);
-            int32 dur = msg->GetInt32("duration_ms", 0);
-            SetPosition((bigtime_t)pos * 1000LL, (bigtime_t)dur * 1000LL);
-            int32 vol = msg->GetInt32("volume_percent", -1);
-            if (vol >= 0) SetVolume(vol);
-            SetShuffle(msg->GetBool("shuffle_state", false));
-            SetRepeat(msg->GetString("repeat_state", "off"));
-            SetPlaybackOptionsEnabled(
-                strcmp(msg->GetString(kNowPlayingParentKindField, ""),
-                    "audiobook") != 0);
-
-            break;
-        }
+            _ApplyReplicantStateMessage(msg);
+            return true;
 
         case MSG_REPLICANT_APPEARANCE_CHANGED:
             _ApplyReplicantAppearance(msg);
-            break;
+            return true;
 
         case MSG_SEEKBAR_COLOR_CHANGED:
-        {
-            rgb_color color = {
-                (uint8)msg->GetInt32("red", fSeekBarColor.red),
-                (uint8)msg->GetInt32("green", fSeekBarColor.green),
-                (uint8)msg->GetInt32("blue", fSeekBarColor.blue),
-                (uint8)msg->GetInt32("alpha", fSeekBarColor.alpha)
-            };
-            SetSeekBarColor(msg->GetBool("use_system", false), color);
-            break;
-        }
+            _ApplySeekbarColorMessage(msg);
+            return true;
 
         case MSG_SEEKBAR_COLOR_DROPPED:
             _ForwardMessage(msg);
-            break;
+            return true;
 
+        default:
+            return false;
+    }
+}
+
+
+bool PlayerBarView::_HandleMenuMessage(BMessage* msg) {
+    switch (msg->what) {
         case MSG_SHOW_REPLICANT_MENU:
-        {
-            if (!fIsReplicant)
-                break;
-            BPoint screenWhere;
-            if (msg->FindPoint("screen_where", &screenWhere) == B_OK)
-                _ShowContextMenu(screenWhere);
-            break;
-        }
+            _ShowReplicantMenu(msg);
+            return true;
 
         case MSG_SHOW_PLAYER_WINDOW:
         case MSG_OPEN_ARTWORK:
@@ -1284,173 +1239,210 @@ void PlayerBarView::MessageReceived(BMessage* msg) {
         case MSG_QUIT_APP:
         case 'open':
             _ForwardMessage(msg);
-            break;
+            return true;
 
         case MSG_SHOW_ADD_TRACK_MENU:
-        {
-            if (fCurrentTrackUri.empty())
-                break;
-            BMessage open(MSG_SHOW_ADD_TRACK_MENU);
-            open.AddString("trackUri", fCurrentTrackUri.c_str());
-            if (fAddTrackButton) {
-                BPoint where(fAddTrackButton->Bounds().left,
-                    fAddTrackButton->Bounds().bottom + 1.0f);
-                fAddTrackButton->ConvertToScreen(&where);
-                open.AddPoint("screen_where", where);
-            }
-            _ForwardMessage(&open);
-            break;
-        }
+            _ForwardAddTrackMenu();
+            return true;
 
+        case MSG_SHOW_ALBUM:
+            _ForwardAlbumOpen();
+            return true;
+
+        case MSG_SHOW_ARTIST:
+            _ForwardArtistOpen();
+            return true;
+
+        default:
+            return false;
+    }
+}
+
+
+bool PlayerBarView::_HandlePlaybackCommand(BMessage* msg) {
+    switch (msg->what) {
         case MSG_PLAY_PAUSE:
-        {
-            if (fIsReplicant && !_UpdateReplicantAvailability()) {
-                _ForwardMessage(msg);
-                break;
-            }
-            SetPlaying(!fIsPlaying);
-            if (fIsReplicant) {
-                if (!fTarget.IsValid())
-                    fTarget = BMessenger(HAIFY_MIME_SIG);
-                if (fTarget.IsValid())
-                    fTarget.SendMessage(msg);
-                else {
-                    fRegistered = false;
-                    be_roster->Launch(HAIFY_MIME_SIG);
-                }
-            } else {
-                BMessenger(nullptr, Window()).SendMessage(msg);
-            }
-            break;
-        }
+            _TogglePlayPause(msg);
+            return true;
 
         case MSG_TOGGLE_SHUFFLE:
-        {
-            if (!fPlaybackOptionsEnabled)
-                break;
-            if (fIsReplicant && !_UpdateReplicantAvailability()) {
-                _ForwardMessage(msg);
-                break;
-            }
-            SetShuffle(!fShuffleOn);
-            if (fIsReplicant) {
-                if (!fTarget.IsValid())
-                    fTarget = BMessenger(HAIFY_MIME_SIG);
-                if (fTarget.IsValid())
-                    fTarget.SendMessage(msg);
-                else {
-                    fRegistered = false;
-                    be_roster->Launch(HAIFY_MIME_SIG);
-                }
-            } else {
-                BMessenger(nullptr, Window()).SendMessage(msg);
-            }
-            break;
-        }
+            _ToggleShuffle(msg);
+            return true;
 
         case MSG_TOGGLE_REPEAT:
-        {
-            if (!fPlaybackOptionsEnabled)
-                break;
-            if (fIsReplicant && !_UpdateReplicantAvailability()) {
-                _ForwardMessage(msg);
-                break;
-            }
-            if (fRepeatState == "off")          SetRepeat("context");
-            else if (fRepeatState == "context") SetRepeat("track");
-            else                                SetRepeat("off");
-            if (fIsReplicant) {
-                if (!fTarget.IsValid())
-                    fTarget = BMessenger(HAIFY_MIME_SIG);
-                if (fTarget.IsValid())
-                    fTarget.SendMessage(msg);
-                else {
-                    fRegistered = false;
-                    be_roster->Launch(HAIFY_MIME_SIG);
-                }
-            } else {
-                BMessenger(nullptr, Window()).SendMessage(msg);
-            }
-            break;
-        }
+            _ToggleRepeat(msg);
+            return true;
 
         case MSG_TOGGLE_MUTE:
             _ForwardMessage(msg);
-            break;
-
-        case MSG_SHOW_ALBUM:
-        {
-            if (fCurrentAlbumId.empty())
-                break;
-            BMessage open(MSG_SHOW_ALBUM);
-            open.AddString("id", fCurrentAlbumId.c_str());
-            if (fIsReplicant) {
-                if (!fTarget.IsValid())
-                    fTarget = BMessenger(HAIFY_MIME_SIG);
-                if (fTarget.IsValid())
-                    fTarget.SendMessage(&open);
-                else {
-                    fRegistered = false;
-                    be_roster->Launch(HAIFY_MIME_SIG);
-                }
-            } else {
-                BMessenger(nullptr, Window()).SendMessage(&open);
-            }
-            break;
-        }
-
-        case MSG_SHOW_ARTIST:
-        {
-            if (fCurrentArtistId.empty())
-                break;
-            BMessage open(MSG_SHOW_ARTIST);
-            open.AddString("id", fCurrentArtistId.c_str());
-            if (fIsReplicant) {
-                if (!fTarget.IsValid())
-                    fTarget = BMessenger(HAIFY_MIME_SIG);
-                if (fTarget.IsValid())
-                    fTarget.SendMessage(&open);
-                else {
-                    fRegistered = false;
-                    be_roster->Launch(HAIFY_MIME_SIG);
-                }
-            } else {
-                BMessenger(nullptr, Window()).SendMessage(&open);
-            }
-            break;
-        }
+            return true;
 
         case MSG_NEXT_TRACK:
         case MSG_PREV_TRACK:
         case MSG_SET_VOLUME:
         case MSG_SEEK_REQUEST:
-        {
-            if (msg->what == MSG_SET_VOLUME) {
-                int32 volume = 0;
-                if (msg->FindInt32("be:value", &volume) == B_OK)
-                    SetVolume(volume);
-                else
-                    _UpdateVolumeIcon();
-            }
-            if (fIsReplicant) {
-                if (!fTarget.IsValid())
-                    fTarget = BMessenger(HAIFY_MIME_SIG);
-                if (fTarget.IsValid())
-                    fTarget.SendMessage(msg);
-                else {
-                    fRegistered = false;
-                    be_roster->Launch(HAIFY_MIME_SIG);
-                }
-            } else {
-                BMessenger(nullptr, Window()).SendMessage(msg);
-            }
-            break;
-        }
+            _ForwardTransportCommand(msg);
+            return true;
 
         default:
-            BView::MessageReceived(msg);
-            break;
+            return false;
     }
+}
+
+
+void PlayerBarView::_ApplyTick() {
+    if (fIsReplicant) {
+        if (!_UpdateReplicantAvailability())
+            return;
+        if (!fRegistered || !fTarget.IsValid())
+            _RegisterReplicant();
+    }
+    if (fIsPlaying && fDurationUs > 0 && fLastSyncUs > 0) {
+        bigtime_t elapsed = system_time() - fLastSyncUs;
+        bigtime_t pos = fLastPosUs + elapsed;
+        if (pos > fDurationUs) pos = fDurationUs;
+        _UpdatePlaybackPosition(pos, fDurationUs);
+    }
+}
+
+
+void PlayerBarView::_ApplyReplicantStateMessage(BMessage* msg) {
+    if (fIsReplicant && !fRegistered)
+        _RegisterReplicant();
+    _ApplyReplicantAppearance(msg);
+    SetTrack(msg->GetString("title", ""), msg->GetString("artist", ""));
+    SetTrackUri(msg->GetString("track_uri", ""));
+    const char* openUri = msg->GetString(kNowPlayingPrimaryOpenUriField, "");
+    if (!openUri || !openUri[0])
+        openUri = msg->GetString("track_uri", "");
+    SetOpenUri(openUri);
+    SetTrackIds(msg->GetString("album_id", ""), msg->GetString("artist_id", ""));
+    SetPlaying(msg->GetBool("is_playing", false));
+    int32 pos = msg->GetInt32("progress_ms", 0);
+    int32 dur = msg->GetInt32("duration_ms", 0);
+    SetPosition((bigtime_t)pos * 1000LL, (bigtime_t)dur * 1000LL);
+    int32 vol = msg->GetInt32("volume_percent", -1);
+    if (vol >= 0) SetVolume(vol);
+    SetShuffle(msg->GetBool("shuffle_state", false));
+    SetRepeat(msg->GetString("repeat_state", "off"));
+    SetPlaybackOptionsEnabled(
+        strcmp(msg->GetString(kNowPlayingParentKindField, ""), "audiobook")
+            != 0);
+}
+
+
+void PlayerBarView::_ApplySeekbarColorMessage(BMessage* msg) {
+    rgb_color color = {
+        (uint8)msg->GetInt32("red", fSeekBarColor.red),
+        (uint8)msg->GetInt32("green", fSeekBarColor.green),
+        (uint8)msg->GetInt32("blue", fSeekBarColor.blue),
+        (uint8)msg->GetInt32("alpha", fSeekBarColor.alpha)
+    };
+    SetSeekBarColor(msg->GetBool("use_system", false), color);
+}
+
+
+void PlayerBarView::_ShowReplicantMenu(BMessage* msg) {
+    if (!fIsReplicant)
+        return;
+
+    BPoint screenWhere;
+    if (msg->FindPoint("screen_where", &screenWhere) == B_OK)
+        _ShowContextMenu(screenWhere);
+}
+
+
+void PlayerBarView::_ForwardAddTrackMenu() {
+    if (fCurrentTrackUri.empty())
+        return;
+
+    BMessage open(MSG_SHOW_ADD_TRACK_MENU);
+    open.AddString("trackUri", fCurrentTrackUri.c_str());
+    if (fAddTrackButton) {
+        BPoint where(fAddTrackButton->Bounds().left,
+            fAddTrackButton->Bounds().bottom + 1.0f);
+        fAddTrackButton->ConvertToScreen(&where);
+        open.AddPoint("screen_where", where);
+    }
+    _ForwardMessage(&open);
+}
+
+
+void PlayerBarView::_ForwardAlbumOpen() {
+    if (fCurrentAlbumId.empty())
+        return;
+
+    BMessage open(MSG_SHOW_ALBUM);
+    open.AddString("id", fCurrentAlbumId.c_str());
+    _ForwardMessage(&open);
+}
+
+
+void PlayerBarView::_ForwardArtistOpen() {
+    if (fCurrentArtistId.empty())
+        return;
+
+    BMessage open(MSG_SHOW_ARTIST);
+    open.AddString("id", fCurrentArtistId.c_str());
+    _ForwardMessage(&open);
+}
+
+
+void PlayerBarView::_TogglePlayPause(BMessage* message) {
+    if (fIsReplicant && !_UpdateReplicantAvailability()) {
+        _ForwardMessage(message);
+        return;
+    }
+    SetPlaying(!fIsPlaying);
+    _ForwardMessage(message);
+}
+
+
+void PlayerBarView::_ToggleShuffle(BMessage* message) {
+    if (!fPlaybackOptionsEnabled)
+        return;
+    if (fIsReplicant && !_UpdateReplicantAvailability()) {
+        _ForwardMessage(message);
+        return;
+    }
+    SetShuffle(!fShuffleOn);
+    _ForwardMessage(message);
+}
+
+
+void PlayerBarView::_ToggleRepeat(BMessage* message) {
+    if (!fPlaybackOptionsEnabled)
+        return;
+    if (fIsReplicant && !_UpdateReplicantAvailability()) {
+        _ForwardMessage(message);
+        return;
+    }
+    if (fRepeatState == "off")          SetRepeat("context");
+    else if (fRepeatState == "context") SetRepeat("track");
+    else                                SetRepeat("off");
+    _ForwardMessage(message);
+}
+
+
+void PlayerBarView::_ForwardTransportCommand(BMessage* msg) {
+    if (msg->what == MSG_SET_VOLUME) {
+        int32 volume = 0;
+        if (msg->FindInt32("be:value", &volume) == B_OK)
+            SetVolume(volume);
+        else
+            _UpdateVolumeIcon();
+    }
+    _ForwardMessage(msg);
+}
+
+
+void PlayerBarView::MessageReceived(BMessage* msg) {
+    if (_HandleStateMessage(msg) || _HandleMenuMessage(msg)
+            || _HandlePlaybackCommand(msg)) {
+        return;
+    }
+
+    BView::MessageReceived(msg);
 }
 
 

@@ -22,6 +22,19 @@ static const char kSuccessPage[] =
     "<p>You can close this window and return to Haify.</p>"
     "</body></html>\r\n";
 
+static const char kFailurePage[] =
+    "HTTP/1.1 400 Bad Request\r\nContent-Type: text/html; charset=utf-8\r\n"
+    "Connection: close\r\n\r\n"
+    "<!DOCTYPE html><html><body style='font-family:sans-serif;padding:40px'>"
+    "<h2>Sign-in failed</h2><p>Please return to Haify and try again.</p>"
+    "</body></html>\r\n";
+
+struct CallbackResult {
+    std::string code;
+    std::string state;
+    std::string error;
+};
+
 static std::string
 UrlDecode(const std::string& value)
 {
@@ -67,6 +80,75 @@ ParseQuery(const std::string& query)
         start = end + 1;
     }
     return values;
+}
+
+static std::string
+ReadHttpRequest(int client)
+{
+    std::string request;
+    char buffer[2048];
+    while (request.size() < 16384
+        && request.find("\r\n\r\n") == std::string::npos) {
+        ssize_t bytes = recv(client, buffer, sizeof(buffer), 0);
+        if (bytes <= 0)
+            break;
+        request.append(buffer, (size_t)bytes);
+    }
+    return request;
+}
+
+static void
+ParseRequestLine(const std::string& request, std::string& method,
+    std::string& target)
+{
+    size_t firstSpace = request.find(' ');
+    size_t secondSpace = firstSpace == std::string::npos
+        ? std::string::npos : request.find(' ', firstSpace + 1);
+    if (firstSpace == std::string::npos || secondSpace == std::string::npos)
+        return;
+
+    method = request.substr(0, firstSpace);
+    target = request.substr(firstSpace + 1, secondSpace - firstSpace - 1);
+}
+
+static std::string
+FindQueryValue(const std::map<std::string, std::string>& params,
+    const char* key)
+{
+    auto found = params.find(key);
+    return found == params.end() ? "" : found->second;
+}
+
+static CallbackResult
+ParseCallbackRequest(const std::string& request)
+{
+    std::string method;
+    std::string target;
+    ParseRequestLine(request, method, target);
+
+    size_t question = target.find('?');
+    std::string path = target.substr(0, question);
+    std::map<std::string, std::string> params = question == std::string::npos
+        ? std::map<std::string, std::string>()
+        : ParseQuery(target.substr(question + 1));
+
+    CallbackResult result;
+    result.code = FindQueryValue(params, "code");
+    result.state = FindQueryValue(params, "state");
+    result.error = FindQueryValue(params, "error");
+
+    if (method != "GET" || path != "/callback")
+        result.error = "invalid_callback_request";
+    else if (result.code.empty() && result.error.empty())
+        result.error = "missing_authorization_code";
+    return result;
+}
+
+static void
+SendCallbackResponse(int client, bool success)
+{
+    const char* page = success ? kSuccessPage : kFailurePage;
+    send(client, page, strlen(page), 0);
 }
 
 OAuthCallbackServer::OAuthCallbackServer(int port, AuthCodeCallback callback)
@@ -158,54 +240,12 @@ int32 OAuthCallbackServer::_ListenThread(void* data) {
     if (client < 0)
         return 1;
 
-    std::string request;
-    char buffer[2048];
-    while (request.size() < 16384 && request.find("\r\n\r\n") == std::string::npos) {
-        ssize_t bytes = recv(client, buffer, sizeof(buffer), 0);
-        if (bytes <= 0)
-            break;
-        request.append(buffer, (size_t)bytes);
-    }
-
-    std::string method;
-    std::string target;
-    size_t firstSpace = request.find(' ');
-    size_t secondSpace = firstSpace == std::string::npos
-        ? std::string::npos : request.find(' ', firstSpace + 1);
-    if (firstSpace != std::string::npos && secondSpace != std::string::npos) {
-        method = request.substr(0, firstSpace);
-        target = request.substr(firstSpace + 1, secondSpace - firstSpace - 1);
-    }
-
-    size_t question = target.find('?');
-    std::string path = target.substr(0, question);
-    std::map<std::string, std::string> params = question == std::string::npos
-        ? std::map<std::string, std::string>()
-        : ParseQuery(target.substr(question + 1));
-    std::string code = params["code"];
-    std::string state = params["state"];
-    std::string error = params["error"];
-
-    if (method != "GET" || path != "/callback")
-        error = "invalid_callback_request";
-    else if (code.empty() && error.empty())
-        error = "missing_authorization_code";
-
-    if (!code.empty()) {
-        send(client, kSuccessPage, strlen(kSuccessPage), 0);
-    } else {
-        std::string errBody =
-            "HTTP/1.1 400 Bad Request\r\nContent-Type: text/html; charset=utf-8\r\n"
-            "Connection: close\r\n\r\n"
-            "<!DOCTYPE html><html><body style='font-family:sans-serif;padding:40px'>"
-            "<h2>Sign-in failed</h2><p>Please return to Haify and try again.</p>"
-            "</body></html>\r\n";
-        send(client, errBody.c_str(), errBody.size(), 0);
-    }
+    CallbackResult result = ParseCallbackRequest(ReadHttpRequest(client));
+    SendCallbackResponse(client, !result.code.empty());
     close(client);
 
     if (self->fCallback)
-        self->fCallback(code, state, error);
+        self->fCallback(result.code, result.state, result.error);
 
     return 0;
 }

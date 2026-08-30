@@ -316,35 +316,125 @@ AppendTextChar(StyledText& output, const StyleState& style, char character)
 }
 
 
+struct EntityReplacement {
+	const char* name;
+	const char* replacement;
+	bool appendAsTextChar;
+};
+
+
+bool
+AppendNamedEntity(const std::string& lower, StyledText& output,
+	const StyleState& style)
+{
+	static const EntityReplacement kNamedEntities[] = {
+		{"amp", "&", false},
+		{"lt", "<", false},
+		{"gt", ">", false},
+		{"quot", "\"", false},
+		{"apos", "'", false},
+		{"nbsp", " ", true},
+		{"ndash", "-", false},
+		{"mdash", "-", false},
+		{"hellip", "...", false},
+	};
+
+	for (const EntityReplacement& entity : kNamedEntities) {
+		if (lower != entity.name)
+			continue;
+		if (entity.appendAsTextChar)
+			AppendTextChar(output, style, entity.replacement[0]);
+		else {
+			AppendRunIfNeeded(output, style);
+			output.text += entity.replacement;
+		}
+		return true;
+	}
+	return false;
+}
+
+
+bool
+DecodeNumericEntity(const std::string& lower, unsigned long& codepoint)
+{
+	int base = 10;
+	const char* digits = nullptr;
+	if (StartsWith(lower, "#x")) {
+		base = 16;
+		digits = lower.c_str() + 2;
+	} else if (StartsWith(lower, "#"))
+		digits = lower.c_str() + 1;
+	else
+		return false;
+
+	char* end = nullptr;
+	codepoint = strtoul(digits, &end, base);
+	return end && *end == '\0';
+}
+
+
 bool
 AppendDecodedEntity(const std::string& entity, StyledText& output,
 	const StyleState& style)
 {
 	std::string lower = LowercaseAscii(entity);
-	AppendRunIfNeeded(output, style);
-	if (lower == "amp") output.text += '&';
-	else if (lower == "lt") output.text += '<';
-	else if (lower == "gt") output.text += '>';
-	else if (lower == "quot") output.text += '"';
-	else if (lower == "apos") output.text += '\'';
-	else if (lower == "nbsp") AppendTextChar(output, style, ' ');
-	else if (lower == "ndash" || lower == "mdash") output.text += '-';
-	else if (lower == "hellip") output.text += "...";
-	else if (StartsWith(lower, "#x")) {
-		char* end = nullptr;
-		unsigned long codepoint = strtoul(lower.c_str() + 2, &end, 16);
-		if (!end || *end != '\0')
-			return false;
-		AppendUtf8(output.text, codepoint);
-	} else if (StartsWith(lower, "#")) {
-		char* end = nullptr;
-		unsigned long codepoint = strtoul(lower.c_str() + 1, &end, 10);
-		if (!end || *end != '\0')
-			return false;
-		AppendUtf8(output.text, codepoint);
-	} else
+	if (AppendNamedEntity(lower, output, style))
+		return true;
+
+	unsigned long codepoint = 0;
+	if (!DecodeNumericEntity(lower, codepoint))
 		return false;
+	AppendRunIfNeeded(output, style);
+	AppendUtf8(output.text, codepoint);
 	return true;
+}
+
+
+bool
+IsHeadingTag(const std::string& lower)
+{
+	return lower.size() == 2 && lower[0] == 'h' && lower[1] >= '1'
+		&& lower[1] <= '6';
+}
+
+
+void
+ApplyLinkTag(const std::string& tag, StyledText& output, StyleState& style,
+	std::vector<OpenLink>& openLinks, bool closing)
+{
+	style.underline = !closing;
+	style.link = !closing;
+	if (!closing) {
+		std::string href = TagAttribute(tag, "href");
+		if (!href.empty())
+			openLinks.push_back({(int32)output.text.size(), href});
+		return;
+	}
+
+	if (openLinks.empty())
+		return;
+	OpenLink link = openLinks.back();
+	openLinks.pop_back();
+	int32 end = (int32)output.text.size();
+	if (end > link.start)
+		output.links.push_back({link.start, end, link.url});
+}
+
+
+void
+ApplyHeadingTag(StyledText& output, StyleState& style, bool closing)
+{
+	style.bold = !closing;
+	AppendNewline(output, style, 2);
+}
+
+
+void
+ApplyListItemTag(StyledText& output, const StyleState& style, bool closing)
+{
+	AppendNewline(output, style);
+	if (!closing)
+		output.text += "- ";
 }
 
 
@@ -361,34 +451,16 @@ ApplyTag(const std::string& tag, StyledText& output, StyleState& style,
 		style.italic = !closing;
 	else if (lower == "u")
 		style.underline = !closing;
-	else if (lower == "a") {
-		style.underline = !closing;
-		style.link = !closing;
-		if (!closing) {
-			std::string href = TagAttribute(tag, "href");
-			if (!href.empty())
-				openLinks.push_back({(int32)output.text.size(), href});
-		} else if (!openLinks.empty()) {
-			OpenLink link = openLinks.back();
-			openLinks.pop_back();
-			int32 end = (int32)output.text.size();
-			if (end > link.start)
-				output.links.push_back({link.start, end, link.url});
-		}
-	}
-	else if (lower.size() == 2 && lower[0] == 'h' && lower[1] >= '1'
-			&& lower[1] <= '6') {
-		style.bold = !closing;
-		AppendNewline(output, style, 2);
-	} else if (lower == "br")
+	else if (lower == "a")
+		ApplyLinkTag(tag, output, style, openLinks, closing);
+	else if (IsHeadingTag(lower))
+		ApplyHeadingTag(output, style, closing);
+	else if (lower == "br")
 		AppendNewline(output, style);
 	else if (lower == "p" || lower == "div")
 		AppendNewline(output, style, 2);
-	else if (lower == "li") {
-		AppendNewline(output, style);
-		if (!closing)
-			output.text += "- ";
-	}
+	else if (lower == "li")
+		ApplyListItemTag(output, style, closing);
 }
 
 
@@ -405,45 +477,42 @@ TrimFormattedText(const std::string& text)
 }
 
 
-StyledText
-ParseMediaDescription(const std::string& description)
+bool
+ConsumeTag(const std::string& description, size_t& index, StyledText& output,
+	StyleState& style, std::vector<OpenLink>& openLinks)
 {
-	StyledText output;
-	output.text.reserve(description.size());
-	StyleState style;
-	std::vector<OpenLink> openLinks;
-	output.runs.push_back({0, style});
+	if (description[index] != '<')
+		return false;
+	size_t close = description.find('>', index + 1);
+	if (close == std::string::npos)
+		return false;
+	ApplyTag(description.substr(index + 1, close - index - 1), output, style,
+		openLinks);
+	index = close;
+	return true;
+}
 
-	for (size_t index = 0; index < description.size(); index++) {
-		char character = description[index];
-		if (character == '<') {
-			size_t close = description.find('>', index + 1);
-			if (close != std::string::npos) {
-				ApplyTag(description.substr(index + 1, close - index - 1),
-					output, style, openLinks);
-				index = close;
-				continue;
-			}
-		}
-		if (character == '&') {
-			size_t close = description.find(';', index + 1);
-			if (close != std::string::npos && close - index <= 16) {
-				std::string entity = description.substr(index + 1,
-					close - index - 1);
-				if (AppendDecodedEntity(entity, output, style)) {
-					index = close;
-					continue;
-				}
-			}
-		}
-		AppendTextChar(output, style, character);
-	}
 
-	size_t trimmedSize = TrimFormattedText(output.text).size();
-	size_t leading = 0;
-	while (leading < output.text.size() && IsSpace(output.text[leading]))
-		leading++;
-	output.text = output.text.substr(leading, trimmedSize);
+bool
+ConsumeEntity(const std::string& description, size_t& index,
+	StyledText& output, const StyleState& style)
+{
+	if (description[index] != '&')
+		return false;
+	size_t close = description.find(';', index + 1);
+	if (close == std::string::npos || close - index > 16)
+		return false;
+	std::string entity = description.substr(index + 1, close - index - 1);
+	if (!AppendDecodedEntity(entity, output, style))
+		return false;
+	index = close;
+	return true;
+}
+
+
+void
+TrimStyledRuns(StyledText& output, size_t leading)
+{
 	std::vector<StyledRun> trimmedRuns;
 	for (StyledRun& run : output.runs) {
 		run.offset = std::max<int32>(0, run.offset - (int32)leading);
@@ -457,10 +526,50 @@ ParseMediaDescription(const std::string& description)
 	if (trimmedRuns.empty() || trimmedRuns.front().offset != 0)
 		trimmedRuns.insert(trimmedRuns.begin(), {0, StyleState()});
 	output.runs = trimmedRuns;
+}
+
+
+void
+TrimLinks(StyledText& output, size_t leading)
+{
 	for (MediaDescriptionLink& link : output.links) {
 		link.start = std::max<int32>(0, link.start - (int32)leading);
 		link.end = std::max<int32>(0, link.end - (int32)leading);
 	}
+}
+
+
+void
+TrimParsedDescription(StyledText& output)
+{
+	size_t trimmedSize = TrimFormattedText(output.text).size();
+	size_t leading = 0;
+	while (leading < output.text.size() && IsSpace(output.text[leading]))
+		leading++;
+	output.text = output.text.substr(leading, trimmedSize);
+	TrimStyledRuns(output, leading);
+	TrimLinks(output, leading);
+}
+
+
+StyledText
+ParseMediaDescription(const std::string& description)
+{
+	StyledText output;
+	output.text.reserve(description.size());
+	StyleState style;
+	std::vector<OpenLink> openLinks;
+	output.runs.push_back({0, style});
+
+	for (size_t index = 0; index < description.size(); index++) {
+		if (ConsumeTag(description, index, output, style, openLinks))
+			continue;
+		if (ConsumeEntity(description, index, output, style))
+			continue;
+		AppendTextChar(output, style, description[index]);
+	}
+
+	TrimParsedDescription(output);
 	ApplyLinkStyles(output);
 	return output;
 }

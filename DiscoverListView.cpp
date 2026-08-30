@@ -9,6 +9,46 @@
 #include <InterfaceDefs.h>
 #include <cstring>
 
+static bool
+IsSecondaryMouseClick(BMessage* message)
+{
+	int32 buttons = 0;
+	return message && message->FindInt32("buttons", &buttons) == B_OK
+		&& (buttons & (B_SECONDARY_MOUSE_BUTTON
+			| B_TERTIARY_MOUSE_BUTTON)) != 0;
+}
+
+static bool
+IsListContentView(BView* view)
+{
+	if (!view || dynamic_cast<BScrollBar*>(view))
+		return false;
+	return !view->Name() || strcmp(view->Name(), "header") != 0;
+}
+
+static bool
+ViewBelongsToDiscoverList(BView* view, DiscoverListView* owner)
+{
+	for (BView* parent = view; parent; parent = parent->Parent()) {
+		if (parent == owner || parent == owner->ScrollView())
+			return true;
+	}
+	return false;
+}
+
+static bool
+FindScreenPoint(BMessage* message, BView* view, BPoint& screenWhere)
+{
+	if (message->FindPoint("screen_where", &screenWhere) == B_OK)
+		return true;
+
+	BPoint where;
+	if (message->FindPoint("where", &where) != B_OK)
+		return false;
+	screenWhere = view->ConvertToScreen(where);
+	return true;
+}
+
 
 void
 BoldStringColumn::DrawField(BField* field, BRect rect, BView* parent)
@@ -51,37 +91,18 @@ public:
 	{
 		if (!fOwner || !msg || msg->what != B_MOUSE_DOWN)
 			return B_DISPATCH_MESSAGE;
-
-		int32 buttons = 0;
-		if (msg->FindInt32("buttons", &buttons) != B_OK
-				|| (buttons & (B_SECONDARY_MOUSE_BUTTON
-					| B_TERTIARY_MOUSE_BUTTON)) == 0) {
+		if (!IsSecondaryMouseClick(msg))
 			return B_DISPATCH_MESSAGE;
-		}
 
 		BView* view = dynamic_cast<BView*>(*target);
-		if (!view || dynamic_cast<BScrollBar*>(view))
+		if (!IsListContentView(view))
 			return B_DISPATCH_MESSAGE;
-		if (view->Name() && strcmp(view->Name(), "header") == 0)
-			return B_DISPATCH_MESSAGE;
-
-		bool inside = false;
-		for (BView* p = view; p; p = p->Parent()) {
-			if (p == fOwner || p == fOwner->ScrollView()) {
-				inside = true;
-				break;
-			}
-		}
-		if (!inside)
+		if (!ViewBelongsToDiscoverList(view, fOwner))
 			return B_DISPATCH_MESSAGE;
 
 		BPoint screenWhere;
-		if (msg->FindPoint("screen_where", &screenWhere) != B_OK) {
-			BPoint where;
-			if (msg->FindPoint("where", &where) != B_OK)
-				return B_DISPATCH_MESSAGE;
-			screenWhere = view->ConvertToScreen(where);
-		}
+		if (!FindScreenPoint(msg, view, screenWhere))
+			return B_DISPATCH_MESSAGE;
 
 		BMessage show('rCf!');
 		show.AddPoint("screenPt", screenWhere);
@@ -364,61 +385,94 @@ DiscoverListView::SetPlayingUri(const std::string& uri)
 void
 DiscoverListView::_DispatchClick(bool isDouble)
 {
-	if (!Window()) return;
+	if (!isDouble)
+		return;
 
-	DiscoverRow* row = (DiscoverRow*)CurrentSelection();
-	if (!row) return;
+	DiscoverRow* row = nullptr;
+	int32 col = -1;
+	std::string title;
+	if (!_FindClickTarget(row, col, title))
+		return;
 
-	BPoint where;
-	uint32 buttons;
-	GetMouse(&where, &buttons, false);
-
-	int32 col = _ColumnAt(where.x);
-	if (col < 0 || col >= (int32)fActions.size()) return;
-	if (col >= (int32)row->fUris.size() || row->fUris[col].empty()) return;
-
-	const std::string& uri   = row->fUris[col];
-	const std::string& title = col < (int32)row->fTitles.size()
-	                           ? row->fTitles[col] : "";
+	const std::string& uri = row->fUris[col];
 
 	switch (fActions[col]) {
 		case kColPlayOnDouble:
-			if (isDouble) {
-				SetPlayingUri(uri);
-				BMessage msg('play');
-				msg.AddString("uri", uri.c_str());
-				msg.AddString("title", title.c_str());
-				if (row->fTitles.size() > 1)
-					msg.AddString("artist", row->fTitles[1].c_str());
-				Window()->PostMessage(&msg);
-			}
+			_PostPlayClick(row, uri, title);
 			break;
 
 		case kColOpenOnDouble:
-			if (isDouble) {
-				BMessage msg('open');
-				msg.AddString("uri",   uri.c_str());
-				msg.AddString("title", title.c_str());
-				Window()->PostMessage(&msg);
-			}
+			_PostOpenClick(uri, title);
 			break;
 
 		case kColRouteOnDouble:
-			if (isDouble) {
-				bool playable = SpotifyItemIsPlayable(
-					SpotifyItemKindForUri(uri));
-				BMessage msg(playable ? 'play' : 'open');
-				msg.AddString("uri", uri.c_str());
-				msg.AddString("title", title.c_str());
-				if (row->fTitles.size() > 1)
-					msg.AddString("artist", row->fTitles[1].c_str());
-				Window()->PostMessage(&msg);
-			}
+			_PostRouteClick(row, uri, title);
 			break;
 
 		default:
 			break;
 	}
+}
+
+bool
+DiscoverListView::_FindClickTarget(DiscoverRow*& row, int32& column,
+	std::string& title)
+{
+	if (!Window())
+		return false;
+
+	row = (DiscoverRow*)CurrentSelection();
+	if (!row)
+		return false;
+
+	BPoint where;
+	uint32 buttons;
+	GetMouse(&where, &buttons, false);
+
+	column = _ColumnAt(where.x);
+	if (column < 0 || column >= (int32)fActions.size())
+		return false;
+	if (column >= (int32)row->fUris.size() || row->fUris[column].empty())
+		return false;
+
+	title = column < (int32)row->fTitles.size() ? row->fTitles[column] : "";
+	return true;
+}
+
+void
+DiscoverListView::_PostPlayClick(DiscoverRow* row, const std::string& uri,
+	const std::string& title)
+{
+	SetPlayingUri(uri);
+	BMessage msg('play');
+	msg.AddString("uri", uri.c_str());
+	msg.AddString("title", title.c_str());
+	if (row->fTitles.size() > 1)
+		msg.AddString("artist", row->fTitles[1].c_str());
+	Window()->PostMessage(&msg);
+}
+
+void
+DiscoverListView::_PostOpenClick(const std::string& uri,
+	const std::string& title)
+{
+	BMessage msg('open');
+	msg.AddString("uri", uri.c_str());
+	msg.AddString("title", title.c_str());
+	Window()->PostMessage(&msg);
+}
+
+void
+DiscoverListView::_PostRouteClick(DiscoverRow* row, const std::string& uri,
+	const std::string& title)
+{
+	bool playable = SpotifyItemIsPlayable(SpotifyItemKindForUri(uri));
+	BMessage msg(playable ? 'play' : 'open');
+	msg.AddString("uri", uri.c_str());
+	msg.AddString("title", title.c_str());
+	if (row->fTitles.size() > 1)
+		msg.AddString("artist", row->fTitles[1].c_str());
+	Window()->PostMessage(&msg);
 }
 
 int32
