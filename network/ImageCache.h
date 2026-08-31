@@ -30,6 +30,12 @@ private:
         uint64 generation);
     static void FinishLoad(const std::string& url, uint64 generation,
         BBitmap* bitmap);
+    static void StoreMemoryCacheLocked(const std::string& url,
+        BBitmap* bitmap);
+    static void TakePendingCallbacksLocked(const std::string& url,
+        std::vector<ImageCallback>& callbacks);
+    static void CopyCallbackBitmaps(BBitmap* bitmap,
+        size_t count, std::vector<BBitmap*>& callbackBitmaps);
     static std::map<std::string, BBitmap*> sCache;
     static std::map<std::string, uint64> sAccessOrder;
     static uint64 sNextAccessOrder;

@@ -42,13 +42,164 @@ SearchJsonString(const nlohmann::json& object, const char* key,
 	return object[key].get<std::string>();
 }
 
-static void
-ShowSearchItemContextMenu(const std::string& uri, const std::string& title,
-	bool saved, BPoint screenPoint, BMessenger target, SpotifyApi* api)
+struct SearchResultFields {
+	std::string name;
+	std::string artist;
+	std::string album;
+	std::string uri;
+	std::string artUri;
+	std::string albUri;
+};
+
+static const nlohmann::json*
+SearchSectionItems(const nlohmann::json& data, const char* key)
 {
-	SpotifyItemKind kind = SpotifyItemKindForUri(uri);
-	if (kind == kSpotifyItemUnknown) return;
-	BPopUpMenu* menu = new BPopUpMenu("searchItem", false, false);
+	if (!data.contains(key))
+		return nullptr;
+	const auto& section = data[key];
+	if (!section.is_object() || !section.contains("items")
+			|| !section["items"].is_array()) {
+		return nullptr;
+	}
+	return &section["items"];
+}
+
+static void
+ApplySearchArtist(const nlohmann::json& item, SearchResultFields& fields)
+{
+	if (!item.contains("artists") || !item["artists"].is_array()
+			|| item["artists"].empty() || !item["artists"][0].is_object()) {
+		return;
+	}
+	fields.artist = SearchJsonString(item["artists"][0], "name");
+	fields.artUri = SearchJsonString(item["artists"][0], "uri");
+}
+
+static void
+ApplySearchAlbum(const nlohmann::json& item, SearchResultFields& fields)
+{
+	if (!item.contains("album") || !item["album"].is_object())
+		return;
+	fields.album = SearchJsonString(item["album"], "name");
+	fields.albUri = SearchJsonString(item["album"], "uri");
+}
+
+static void
+ApplyPodcastSearchSource(const nlohmann::json& item,
+	SearchResultFields& fields)
+{
+	if (item.contains("publisher") && item["publisher"].is_string()) {
+		fields.artist = item["publisher"].get<std::string>();
+		fields.artUri = fields.uri;
+	}
+	if (item.contains("show") && item["show"].is_object()) {
+		fields.artist = SearchJsonString(item["show"], "name");
+		fields.artUri = SearchJsonString(item["show"], "uri");
+	}
+}
+
+static void
+ApplyAudiobookSearchSource(const nlohmann::json& item,
+	SearchResultFields& fields)
+{
+	if (!item.contains("authors") || !item["authors"].is_array()
+			|| item["authors"].empty() || !item["authors"][0].is_object()) {
+		return;
+	}
+	fields.artist = SearchJsonString(item["authors"][0], "name");
+}
+
+static void
+ApplyArtistSearchGenre(const char* key, const nlohmann::json& item,
+	SearchResultFields& fields)
+{
+	if (strcmp(key, "artists") != 0 || !item.contains("genres")
+			|| !item["genres"].is_array() || item["genres"].empty()
+			|| !item["genres"][0].is_string()) {
+		return;
+	}
+	fields.artist = item["genres"][0].get<std::string>();
+}
+
+static SearchResultFields
+SearchResultFieldsForItem(const char* key, const nlohmann::json& item)
+{
+	SearchResultFields fields;
+	fields.name = SearchJsonString(item, "name");
+	fields.uri = SearchJsonString(item, "uri");
+	if (strcmp(key, "audiobooks") == 0 && item.contains("id")
+			&& item["id"].is_string()) {
+		fields.uri = SpotifyUriForItemKind(kSpotifyItemAudiobook,
+			item["id"].get<std::string>());
+	}
+
+	ApplySearchArtist(item, fields);
+	ApplySearchAlbum(item, fields);
+	ApplyPodcastSearchSource(item, fields);
+	ApplyAudiobookSearchSource(item, fields);
+	ApplyArtistSearchGenre(key, item, fields);
+	return fields;
+}
+
+static void
+AddSearchResult(BMessage& message, const SearchResultFields& fields,
+	const char* typeLabel)
+{
+	message.AddString("name", fields.name.c_str());
+	message.AddString("type", typeLabel);
+	message.AddString("artist", fields.artist.c_str());
+	message.AddString("album", fields.album.c_str());
+	message.AddString("uri", fields.uri.c_str());
+	message.AddString("artUri", fields.artUri.c_str());
+	message.AddString("albUri", fields.albUri.c_str());
+}
+
+static int32
+AddSearchSectionResults(BMessage& message, const nlohmann::json& data,
+	const char* key, const char* typeLabel)
+{
+	const nlohmann::json* items = SearchSectionItems(data, key);
+	if (!items)
+		return 0;
+
+	int32 count = 0;
+	for (const auto& item : *items) {
+		if (!item.is_object())
+			continue;
+		AddSearchResult(message, SearchResultFieldsForItem(key, item),
+			typeLabel);
+		count++;
+	}
+	return count;
+}
+
+static int32
+AddSearchResults(BMessage& message, const nlohmann::json& data)
+{
+	int32 count = 0;
+	count += AddSearchSectionResults(message, data, "tracks",
+		B_TRANSLATE("Song"));
+	count += AddSearchSectionResults(message, data, "artists",
+		B_TRANSLATE("Artist"));
+	count += AddSearchSectionResults(message, data, "albums",
+		B_TRANSLATE("Album"));
+	count += AddSearchSectionResults(message, data, "playlists",
+		B_TRANSLATE("Playlist"));
+	count += AddSearchSectionResults(message, data, "audiobooks",
+		B_TRANSLATE("Audiobook"));
+	count += AddSearchSectionResults(message, data, "shows",
+		B_TRANSLATE("Podcast"));
+	count += AddSearchSectionResults(message, data, "episodes",
+		B_TRANSLATE("Episode"));
+	count += AddSearchSectionResults(message, data, "users",
+		B_TRANSLATE("Profile"));
+	return count;
+}
+
+static void
+AddSearchPrimaryActionItems(BPopUpMenu* menu, const std::string& uri,
+	const std::string& title, SpotifyItemKind kind, SpotifyApi* api)
+{
 	if (SpotifyItemIsPlayable(kind)) {
 		BMessage* play = new BMessage('play');
 		play->AddString("uri", uri.c_str());
@@ -64,85 +215,161 @@ ShowSearchItemContextMenu(const std::string& uri, const std::string& title,
 			queue->AddString("uri", uri.c_str());
 			menu->AddItem(new BMenuItem(B_TRANSLATE("Add to Queue"), queue));
 		}
-	} else {
-		BMessage* open = new BMessage('open');
-		open->AddString("uri", uri.c_str());
-		open->AddString("title", title.c_str());
-		menu->AddItem(new BMenuItem(B_TRANSLATE("Open"), open));
+		return;
 	}
 
-	menu->AddSeparatorItem();
-	const char* libraryLabel = "";
+	BMessage* open = new BMessage('open');
+	open->AddString("uri", uri.c_str());
+	open->AddString("title", title.c_str());
+	menu->AddItem(new BMenuItem(B_TRANSLATE("Open"), open));
+}
+
+static const char*
+SearchLibraryLabel(SpotifyItemKind kind, bool saved)
+{
 	switch (kind) {
 		case kSpotifyItemTrack:
-			libraryLabel = saved ? B_TRANSLATE("Remove from Liked Songs")
-				: B_TRANSLATE("Add to Liked Songs"); break;
+			return saved ? B_TRANSLATE("Remove from Liked Songs")
+				: B_TRANSLATE("Add to Liked Songs");
 		case kSpotifyItemEpisode:
-			libraryLabel = saved ? B_TRANSLATE("Remove from Saved Episodes")
-				: B_TRANSLATE("Add to Saved Episodes"); break;
+			return saved ? B_TRANSLATE("Remove from Saved Episodes")
+				: B_TRANSLATE("Add to Saved Episodes");
 		case kSpotifyItemAlbum:
-			libraryLabel = saved ? B_TRANSLATE("Remove from Saved Albums")
-				: B_TRANSLATE("Add to Saved Albums"); break;
+			return saved ? B_TRANSLATE("Remove from Saved Albums")
+				: B_TRANSLATE("Add to Saved Albums");
 		case kSpotifyItemShow:
-			libraryLabel = saved ? B_TRANSLATE("Remove from Podcasts")
-				: B_TRANSLATE("Add to Podcasts"); break;
+			return saved ? B_TRANSLATE("Remove from Podcasts")
+				: B_TRANSLATE("Add to Podcasts");
 		case kSpotifyItemArtist:
-			libraryLabel = saved ? B_TRANSLATE("Remove from Followed Artists")
-				: B_TRANSLATE("Add to Followed Artists"); break;
+			return saved ? B_TRANSLATE("Remove from Followed Artists")
+				: B_TRANSLATE("Add to Followed Artists");
 		case kSpotifyItemAudiobook:
-			libraryLabel = saved ? B_TRANSLATE("Remove from Audiobooks")
-				: B_TRANSLATE("Add to Audiobooks"); break;
+			return saved ? B_TRANSLATE("Remove from Audiobooks")
+				: B_TRANSLATE("Add to Audiobooks");
 		case kSpotifyItemPlaylist:
-			libraryLabel = saved ? B_TRANSLATE("Remove from Playlists")
-				: B_TRANSLATE("Add to Playlists"); break;
-		default: break;
+			return saved ? B_TRANSLATE("Remove from Playlists")
+				: B_TRANSLATE("Add to Playlists");
+		default:
+			return "";
 	}
+}
+
+static void
+AddSearchLibraryItem(BPopUpMenu* menu, const std::string& uri,
+	SpotifyItemKind kind, bool saved)
+{
 	BMessage* library = new BMessage(saved ? 'sRem' : 'sAdd');
 	library->AddString("uri", uri.c_str());
-	menu->AddItem(new BMenuItem(libraryLabel, library));
+	menu->AddItem(new BMenuItem(SearchLibraryLabel(kind, saved), library));
+}
 
-	if (api && SpotifyItemCanAddToPlaylist(kind)) {
-		auto playlists = api->Playlists().GetCachedPlaylists();
-		if (!playlists.empty()) {
-			BMenu* addMenu = new BMenu(B_TRANSLATE("Add to Playlist"));
-			for (const auto& playlist : playlists) {
-				BMessage* add = new BMessage('sPlA');
-				add->AddString("uri", uri.c_str());
-				add->AddString("playlist_id", playlist.first.c_str());
-				addMenu->AddItem(new BMenuItem(playlist.second.c_str(), add));
-			}
-			menu->AddItem(addMenu);
-		}
+static void
+AddSearchPlaylistTargetMenu(BPopUpMenu* menu, const std::string& uri,
+	SpotifyItemKind kind, SpotifyApi* api)
+{
+	if (!api || !SpotifyItemCanAddToPlaylist(kind))
+		return;
+	auto playlists = api->Playlists().GetCachedPlaylists();
+	if (playlists.empty())
+		return;
+
+	BMenu* addMenu = new BMenu(B_TRANSLATE("Add to Playlist"));
+	for (const auto& playlist : playlists) {
+		BMessage* add = new BMessage('sPlA');
+		add->AddString("uri", uri.c_str());
+		add->AddString("playlist_id", playlist.first.c_str());
+		addMenu->AddItem(new BMenuItem(playlist.second.c_str(), add));
 	}
+	menu->AddItem(addMenu);
+}
 
+static BPopUpMenu*
+BuildSearchItemContextMenu(const std::string& uri, const std::string& title,
+	SpotifyItemKind kind, bool saved, SpotifyApi* api)
+{
+	BPopUpMenu* menu = new BPopUpMenu("searchItem", false, false);
+	AddSearchPrimaryActionItems(menu, uri, title, kind, api);
+	menu->AddSeparatorItem();
+	AddSearchLibraryItem(menu, uri, kind, saved);
+	AddSearchPlaylistTargetMenu(menu, uri, kind, api);
+	return menu;
+}
+
+static void
+SendSearchLibraryActionResult(BMessenger target, bool add,
+	const std::string& uri, bool ok)
+{
+	BMessage result('sAct');
+	result.AddBool("ok", ok);
+	result.AddBool("add", add);
+	result.AddString("uri", uri.c_str());
+	target.SendMessage(&result);
+}
+
+static void
+HandleSearchLibraryAction(BMessage* message, const std::string& uri,
+	BMessenger target, SpotifyApi* api)
+{
+	if (!api)
+		return;
+	bool add = message->what == 'sAdd';
+	auto complete = [target, add, uri](bool ok, const nlohmann::json&) {
+		SendSearchLibraryActionResult(target, add, uri, ok);
+	};
+	if (add)
+		api->Library().SaveLibraryItems({uri}, complete);
+	else
+		api->Library().RemoveLibraryItems({uri}, complete);
+}
+
+static void
+HandleSearchPlaylistAdd(BMessage* message, const std::string& uri,
+	BMessenger target, SpotifyApi* api)
+{
+	if (!api)
+		return;
+	api->Playlists().AddTrackToPlaylist(
+		message->GetString("playlist_id", ""), uri,
+		[target](bool ok, const nlohmann::json&) {
+			BMessage result('sPlR');
+			result.AddBool("ok", ok);
+			target.SendMessage(&result);
+		});
+}
+
+static void
+HandleSearchMenuSelection(BMessage* message, const std::string& uri,
+	BMessenger target, SpotifyApi* api)
+{
+	if (!message)
+		return;
+	if (message->what == 'sQue' && api) {
+		api->Playback().AddToQueue(uri, nullptr);
+		return;
+	}
+	if (message->what == 'sAdd' || message->what == 'sRem') {
+		HandleSearchLibraryAction(message, uri, target, api);
+		return;
+	}
+	if (message->what == 'sPlA') {
+		HandleSearchPlaylistAdd(message, uri, target, api);
+		return;
+	}
+	target.SendMessage(message);
+}
+
+static void
+ShowSearchItemContextMenu(const std::string& uri, const std::string& title,
+	bool saved, BPoint screenPoint, BMessenger target, SpotifyApi* api)
+{
+	SpotifyItemKind kind = SpotifyItemKindForUri(uri);
+	if (kind == kSpotifyItemUnknown) return;
+
+	BPopUpMenu* menu = BuildSearchItemContextMenu(uri, title, kind, saved,
+		api);
 	BMenuItem* selected = menu->Go(screenPoint, false, true);
-	if (selected && selected->Message()) {
-		BMessage* message = selected->Message();
-		if (message->what == 'sQue' && api) {
-			api->Playback().AddToQueue(uri, nullptr);
-		} else if ((message->what == 'sAdd' || message->what == 'sRem') && api) {
-			bool add = message->what == 'sAdd';
-			auto complete = [target, add, uri](bool ok, const nlohmann::json&) {
-				BMessage result('sAct');
-				result.AddBool("ok", ok);
-				result.AddBool("add", add);
-				result.AddString("uri", uri.c_str());
-				target.SendMessage(&result);
-			};
-			if (add) api->Library().SaveLibraryItems({uri}, complete);
-			else api->Library().RemoveLibraryItems({uri}, complete);
-		} else if (message->what == 'sPlA' && api) {
-			api->Playlists().AddTrackToPlaylist(
-				message->GetString("playlist_id", ""), uri,
-				[target](bool ok, const nlohmann::json&) {
-					BMessage result('sPlR');
-					result.AddBool("ok", ok);
-					target.SendMessage(&result);
-				});
-		} else {
-			target.SendMessage(message);
-		}
-	}
+	if (selected)
+		HandleSearchMenuSelection(selected->Message(), uri, target, api);
 	delete menu;
 }
 
@@ -674,89 +901,15 @@ SearchWindow::_DoSearch()
 
 	api->Content().Search(query, types,
 		[self, generation](bool ok, const nlohmann::json& data) {
+			BMessage message(kMsgResults);
+			message.AddInt32("generation", generation);
 			if (!ok) {
-				BMessage err(kMsgResults);
-				err.AddInt32("generation", generation);
-				err.AddInt32("count", -1);
-				self.SendMessage(&err);
+				message.AddInt32("count", -1);
+				self.SendMessage(&message);
 				return;
 			}
 
-			BMessage* msg = new BMessage(kMsgResults);
-			msg->AddInt32("generation", generation);
-			int32 count = 0;
-
-			auto addItems = [&](const char* key, const char* typeLabel) {
-				if (!data.contains(key)) return;
-				const auto& section = data[key];
-				if (!section.is_object() || !section.contains("items")
-						|| !section["items"].is_array()) return;
-				for (const auto& item : section["items"]) {
-					if (!item.is_object()) continue;
-					std::string name = SearchJsonString(item, "name");
-					std::string uri = SearchJsonString(item, "uri");
-					if (std::string(key) == "audiobooks"
-							&& item.contains("id") && item["id"].is_string()) {
-						uri = SpotifyUriForItemKind(kSpotifyItemAudiobook,
-							item["id"].get<std::string>());
-					}
-					std::string artist, artUri, album, albUri;
-
-					if (item.contains("artists") && item["artists"].is_array()
-							&& !item["artists"].empty()
-							&& item["artists"][0].is_object()) {
-						artist = SearchJsonString(item["artists"][0], "name");
-						artUri = SearchJsonString(item["artists"][0], "uri");
-					}
-					if (item.contains("album") && item["album"].is_object()) {
-						album  = SearchJsonString(item["album"], "name");
-						albUri = SearchJsonString(item["album"], "uri");
-					}
-
-					if (item.contains("publisher") && item["publisher"].is_string()) {
-						artist = item["publisher"].get<std::string>();
-						artUri = uri;
-					}
-					if (item.contains("show") && item["show"].is_object()) {
-						artist = SearchJsonString(item["show"], "name");
-						artUri = SearchJsonString(item["show"], "uri");
-					}
-					if (item.contains("authors") && item["authors"].is_array()
-							&& !item["authors"].empty()
-							&& item["authors"][0].is_object()) {
-						artist = SearchJsonString(item["authors"][0], "name");
-					}
-
-					if (std::string(key) == "artists"
-							&& item.contains("genres")
-							&& item["genres"].is_array()
-							&& !item["genres"].empty()
-							&& item["genres"][0].is_string()) {
-						artist = item["genres"][0].get<std::string>();
-					}
-
-					msg->AddString("name",   name.c_str());
-					msg->AddString("type",   typeLabel);
-					msg->AddString("artist", artist.c_str());
-					msg->AddString("album",  album.c_str());
-					msg->AddString("uri",    uri.c_str());
-					msg->AddString("artUri", artUri.c_str());
-					msg->AddString("albUri", albUri.c_str());
-					count++;
-				}
-			};
-
-			addItems("tracks",     B_TRANSLATE("Song"));
-			addItems("artists",    B_TRANSLATE("Artist"));
-			addItems("albums",     B_TRANSLATE("Album"));
-			addItems("playlists",  B_TRANSLATE("Playlist"));
-			addItems("audiobooks", B_TRANSLATE("Audiobook"));
-			addItems("shows",      B_TRANSLATE("Podcast"));
-			addItems("episodes",   B_TRANSLATE("Episode"));
-			addItems("users",      B_TRANSLATE("Profile"));
-
-			msg->AddInt32("count", count);
-			self.SendMessage(msg);
-			delete msg;
+			message.AddInt32("count", AddSearchResults(message, data));
+			self.SendMessage(&message);
 		});
 }

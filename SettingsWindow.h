@@ -32,6 +32,18 @@ private:
 	void						_Load();
 	void						_LoadCategory(int32 index,
 									const HaifySettings& settings);
+	void						_LoadInterfaceCategory(
+									const HaifySettings& settings);
+	void						_LoadPlaybackCategory(
+									const HaifySettings& settings);
+	void						_LoadSpotifyCategory(
+									const HaifySettings& settings);
+	void						_LoadLibrespotCategory(
+									const HaifySettings& settings);
+	void						_LoadDeviceCategory(
+									const HaifySettings& settings);
+	void						_LoadImageCacheCategory(
+									const HaifySettings& settings);
 	bool						_Save();
 	void						_BrowseLibrespot();
 	void						_BrowseCachePath();

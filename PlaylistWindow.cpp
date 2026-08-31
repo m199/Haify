@@ -416,6 +416,62 @@ public:
 };
 
 static std::string
+TrackRowStringAt(TrackRow* row, int32 column)
+{
+	BStringField* field = dynamic_cast<BStringField*>(row->GetField(column));
+	return field ? field->String() : "";
+}
+
+static int32
+TrackRowNumber(TrackRow* row, int32 fallback)
+{
+	BIntegerField* field = dynamic_cast<BIntegerField*>(row->GetField(0));
+	return field ? field->Value() : fallback;
+}
+
+static nlohmann::json
+TrackRowCacheJson(TrackRow* row, int32 rowIndex)
+{
+	return {
+		{"number", TrackRowNumber(row, rowIndex + 1)},
+		{"title", TrackRowStringAt(row, 1)},
+		{"artist", TrackRowStringAt(row, 2)},
+		{"bpm", TrackRowStringAt(row, 3)},
+		{"key", TrackRowStringAt(row, 4)},
+		{"album", TrackRowStringAt(row, 5)},
+		{"duration", TrackRowStringAt(row, 6)},
+		{"uri", row->fTrackUri},
+		{"artist_uri", row->fArtistUri},
+		{"album_uri", row->fAlbumUri}
+	};
+}
+
+static bool
+ReadCacheJson(const BPath& path, nlohmann::json& j)
+{
+	BFile file(path.Path(), B_READ_ONLY);
+	if (file.InitCheck() != B_OK)
+		return false;
+
+	off_t size;
+	if (file.GetSize(&size) != B_OK)
+		return false;
+	if (size <= 0 || size > 50 * 1024 * 1024)
+		return false;
+
+	std::string content((size_t)size, '\0');
+	if (file.Read(&content[0], (size_t)size) != size)
+		return false;
+
+	try {
+		j = nlohmann::json::parse(content);
+		return true;
+	} catch (...) {
+		return false;
+	}
+}
+
+static std::string
 JsonString(const nlohmann::json& object, const char* key,
 	const std::string& fallback = "")
 {
@@ -445,6 +501,76 @@ JsonInt(const nlohmann::json& object, const char* key, int fallback = 0)
 		return fallback;
 	}
 	return value->get<int>();
+}
+
+static TrackRow*
+CachedTrackRowFromJson(const nlohmann::json& track,
+	const std::string& currentPlayingTrackUri)
+{
+	int32 number = JsonInt(track, "number");
+	TrackRow* row = new TrackRow(JsonString(track, "uri"), number - 1);
+	row->fArtistUri = JsonString(track, "artist_uri");
+	row->fAlbumUri = JsonString(track, "album_uri");
+	row->SetField(new BIntegerField(number), 0);
+	row->SetField(new TrackStringField(JsonString(track, "title").c_str()), 1);
+	row->SetField(new TrackStringField(JsonString(track, "artist").c_str()), 2);
+	row->SetField(new TrackStringField(JsonString(track, "bpm").c_str()), 3);
+	row->SetField(new TrackStringField(JsonString(track, "key").c_str()), 4);
+	row->SetField(new TrackStringField(JsonString(track, "album").c_str()), 5);
+	row->SetField(new TrackStringField(JsonString(track, "duration").c_str()), 6);
+	row->SetPlaying(!currentPlayingTrackUri.empty()
+		&& row->fTrackUri == currentPlayingTrackUri);
+	return row;
+}
+
+static bool IsLikedSongsCacheFresh(const nlohmann::json& object);
+
+static bool
+PrepareTrackCacheHeader(const nlohmann::json& j, bool isPlaylist,
+	std::string& cachedSnapshotId)
+{
+	if (!j.contains("tracks") || !j["tracks"].is_array())
+		return false;
+	if (!isPlaylist)
+		return IsLikedSongsCacheFresh(j);
+	cachedSnapshotId = JsonString(j, "snapshot_id");
+	return !cachedSnapshotId.empty();
+}
+
+static void
+AddCachedTrackRows(const nlohmann::json& tracks, BColumnListView* trackList,
+	const std::string& currentPlayingTrackUri)
+{
+	for (const auto& track : tracks) {
+		if (track.is_object())
+			trackList->AddRow(CachedTrackRowFromJson(track,
+				currentPlayingTrackUri));
+	}
+}
+
+static void
+NormalizeTrackCachePage(int32& offset, int32& total, int32 rowCount)
+{
+	if (offset < rowCount)
+		offset = rowCount;
+	if (total < rowCount)
+		total = rowCount;
+}
+
+static void
+SetCachedTrackInfo(BStringView* infoView, bool isPlaylist, int32 total,
+	int32 rowCount)
+{
+	char info[64];
+	const char* typeStr = isPlaylist
+		? B_TRANSLATE("Playlist") : B_TRANSLATE("Liked Songs");
+	if (total > rowCount)
+		snprintf(info, sizeof(info), "%s \xC2\xB7 %ld/%ld %s", typeStr,
+			(long)rowCount, (long)total, "Songs");
+	else
+		snprintf(info, sizeof(info), "%s \xC2\xB7 %ld %s", typeStr,
+			(long)rowCount, "Songs");
+	infoView->SetText(info);
 }
 
 static bool
@@ -4135,109 +4261,67 @@ bool
 PlaylistWindow::_LoadCache()
 {
 	SpotifyItemKind kind = SpotifyItemKindForUri(fUri);
-	if (fUri == "spotify:collection"
-			|| kind == kSpotifyItemPlaylist) {
-		BPath path;
-		bool isPlaylist = kind == kSpotifyItemPlaylist;
-		if (isPlaylist) {
-			if (!PlaylistCachePath(SpotifyItemIdForUri(fUri), path, false))
-				return false;
-		} else {
-			if (!LikedSongsCachePath(path, false))
-				return false;
-		}
+	if (fUri == "spotify:collection" || kind == kSpotifyItemPlaylist)
+		return _LoadTrackCache(kind == kSpotifyItemPlaylist);
+	if (kind == kSpotifyItemShow)
+		return _LoadShowCache();
+	return false;
+}
 
-		BFile file(path.Path(), B_READ_ONLY);
-		if (file.InitCheck() != B_OK) return false;
 
-		off_t size;
-		if (file.GetSize(&size) != B_OK) return false;
-		if (size <= 0 || size > 50 * 1024 * 1024) return false;
-
-		std::string content((size_t)size, '\0');
-		if (file.Read(&content[0], (size_t)size) != size) return false;
-
-		try {
-			auto j = nlohmann::json::parse(content);
-			if (!j.contains("tracks") || !j["tracks"].is_array())
-				return false;
-			if (isPlaylist) {
-				fCachedPlaylistSnapshotId = JsonString(j, "snapshot_id");
-				if (fCachedPlaylistSnapshotId.empty())
-					return false;
-				fPlaylistSnapshotId = fCachedPlaylistSnapshotId;
-			} else if (!IsLikedSongsCacheFresh(j)) {
-				return false;
-			}
-
-			if (fTrackList)
-				fTrackList->Clear();
-			fPageTotal = JsonInt(j, "total");
-			fPageOffset = JsonInt(j, "next_offset");
-
-			for (const auto& track : j["tracks"]) {
-				if (!track.is_object())
-					continue;
-				int32 number = JsonInt(track, "number");
-				TrackRow* row = new TrackRow(JsonString(track, "uri"), number - 1);
-				row->fArtistUri = JsonString(track, "artist_uri");
-				row->fAlbumUri = JsonString(track, "album_uri");
-				row->SetField(new BIntegerField(number), 0);
-				row->SetField(new TrackStringField(JsonString(track, "title").c_str()), 1);
-				row->SetField(new TrackStringField(JsonString(track, "artist").c_str()), 2);
-				row->SetField(new TrackStringField(JsonString(track, "bpm").c_str()), 3);
-				row->SetField(new TrackStringField(JsonString(track, "key").c_str()), 4);
-				row->SetField(new TrackStringField(JsonString(track, "album").c_str()), 5);
-				row->SetField(new TrackStringField(JsonString(track, "duration").c_str()), 6);
-				row->SetPlaying(!fCurrentPlayingTrackUri.empty()
-					&& row->fTrackUri == fCurrentPlayingTrackUri);
-				fTrackList->AddRow(row);
-			}
-
-			if (fPageOffset < fTrackList->CountRows())
-				fPageOffset = fTrackList->CountRows();
-			if (fPageTotal < fTrackList->CountRows())
-				fPageTotal = fTrackList->CountRows();
-			fPageHasMore = fPageTotal <= 0 || fPageOffset < fPageTotal;
-
-			char info[64];
-			const char* typeStr = isPlaylist
-				? B_TRANSLATE("Playlist") : B_TRANSLATE("Liked Songs");
-			if (fPageTotal > fTrackList->CountRows())
-				snprintf(info, sizeof(info), "%s \xC2\xB7 %ld/%ld %s", typeStr,
-					(long)fTrackList->CountRows(), (long)fPageTotal,
-					"Songs");
-			else
-				snprintf(info, sizeof(info), "%s \xC2\xB7 %ld %s", typeStr,
-					(long)fTrackList->CountRows(), "Songs");
-			fPlaylistInfo->SetText(info);
-
-			return fTrackList->CountRows() > 0;
-		} catch (...) {
-			if (fTrackList)
-				fTrackList->Clear();
-			return false;
-		}
-	}
-
-	if (kind != kSpotifyItemShow) return false;
-	std::string id = SpotifyItemIdForUri(fUri);
-
+bool
+PlaylistWindow::_LoadTrackCache(bool isPlaylist)
+{
 	BPath path;
-	if (!ShowCachePath(id, path, false)) return false;
+	if (!_TrackCachePath(isPlaylist, path, false))
+		return false;
 
-	BFile file(path.Path(), B_READ_ONLY);
-	if (file.InitCheck() != B_OK) return false;
-
-	off_t size;
-	if (file.GetSize(&size) != B_OK) return false;
-	if (size <= 0 || size > 50 * 1024 * 1024) return false;
-
-	std::string content((size_t)size, '\0');
-	if (file.Read(&content[0], (size_t)size) != size) return false;
+	nlohmann::json j;
+	if (!ReadCacheJson(path, j))
+		return false;
 
 	try {
-		auto j = nlohmann::json::parse(content);
+		std::string cachedSnapshotId;
+		if (!PrepareTrackCacheHeader(j, isPlaylist, cachedSnapshotId))
+			return false;
+		if (isPlaylist) {
+			fCachedPlaylistSnapshotId = cachedSnapshotId;
+			fPlaylistSnapshotId = fCachedPlaylistSnapshotId;
+		}
+
+		if (fTrackList)
+			fTrackList->Clear();
+		fPageTotal = JsonInt(j, "total");
+		fPageOffset = JsonInt(j, "next_offset");
+
+		AddCachedTrackRows(j["tracks"], fTrackList, fCurrentPlayingTrackUri);
+		NormalizeTrackCachePage(fPageOffset, fPageTotal,
+			fTrackList->CountRows());
+		fPageHasMore = fPageTotal <= 0 || fPageOffset < fPageTotal;
+		SetCachedTrackInfo(fPlaylistInfo, isPlaylist, fPageTotal,
+			fTrackList->CountRows());
+
+		return fTrackList->CountRows() > 0;
+	} catch (...) {
+		if (fTrackList)
+			fTrackList->Clear();
+		return false;
+	}
+}
+
+
+bool
+PlaylistWindow::_LoadShowCache()
+{
+	BPath path;
+	if (!ShowCachePath(SpotifyItemIdForUri(fUri), path, false))
+		return false;
+
+	nlohmann::json j;
+	if (!ReadCacheJson(path, j))
+		return false;
+
+	try {
 		if (!j.contains("episodes") || !j["episodes"].is_array())
 			return false;
 		if (JsonInt(j, "version") < kShowCacheVersion)
@@ -4246,13 +4330,13 @@ PlaylistWindow::_LoadCache()
 		fEpisodes.clear();
 		for (const auto& ep : j["episodes"]) {
 			EpisodeData d;
-			d.number      = JsonInt(ep, "number");
-			d.title       = JsonString(ep, "title");
+			d.number = JsonInt(ep, "number");
+			d.title = JsonString(ep, "title");
 			d.description = JsonString(ep, "description");
-			d.date        = JsonString(ep, "date");
-			d.duration    = JsonString(ep, "duration");
-			d.trackUri    = JsonString(ep, "uri");
-			d.searchText  = LowercaseSearchText(d.title, d.description);
+			d.date = JsonString(ep, "date");
+			d.duration = JsonString(ep, "duration");
+			d.trackUri = JsonString(ep, "uri");
+			d.searchText = LowercaseSearchText(d.title, d.description);
 			fEpisodes.push_back(d);
 		}
 		_RenumberEpisodes();
@@ -4290,77 +4374,74 @@ PlaylistWindow::_SaveCache()
 void
 PlaylistWindow::_WriteCacheNow()
 {
-	if (fUri == "spotify:collection"
-			|| SpotifyItemKindForUri(fUri) == kSpotifyItemPlaylist) {
-		if (!fTrackList) return;
-		bool isPlaylist = SpotifyItemKindForUri(fUri) == kSpotifyItemPlaylist;
-		if (isPlaylist && fPlaylistSnapshotId.empty())
-			return;
-
-		BPath path;
-		if (isPlaylist) {
-			if (!PlaylistCachePath(SpotifyItemIdForUri(fUri), path, true))
-				return;
-		} else {
-			if (!LikedSongsCachePath(path, true))
-				return;
-		}
-
-		nlohmann::json j;
-		j["total"] = fPageTotal;
-		j["next_offset"] = fPageOffset;
-		if (isPlaylist) {
-			j["snapshot_id"] = fPlaylistSnapshotId;
-		} else {
-			j["version"] = kLikedSongsCacheVersion;
-			j["cached_at"] = (int)time(NULL);
-		}
-		j["tracks"] = nlohmann::json::array();
-		for (int32 i = 0; i < fTrackList->CountRows(); i++) {
-			TrackRow* row = (TrackRow*)fTrackList->RowAt(i);
-			if (!row)
-				continue;
-			auto stringAt = [row](int32 column) -> std::string {
-				BStringField* field =
-					dynamic_cast<BStringField*>(row->GetField(column));
-				return field ? field->String() : "";
-			};
-			int32 number = i + 1;
-			BIntegerField* field =
-				dynamic_cast<BIntegerField*>(row->GetField(0));
-			if (field)
-				number = field->Value();
-			j["tracks"].push_back({
-				{"number",     number},
-				{"title",      stringAt(1)},
-				{"artist",     stringAt(2)},
-				{"bpm",        stringAt(3)},
-				{"key",        stringAt(4)},
-				{"album",      stringAt(5)},
-				{"duration",   stringAt(6)},
-				{"uri",        row->fTrackUri},
-				{"artist_uri", row->fArtistUri},
-				{"album_uri",  row->fAlbumUri}
-			});
-		}
-
-		WriteCacheAsync(path.Path(), std::move(j));
+	SpotifyItemKind kind = SpotifyItemKindForUri(fUri);
+	if (fUri == "spotify:collection" || kind == kSpotifyItemPlaylist) {
+		_WriteTrackCache(kind == kSpotifyItemPlaylist);
 		return;
 	}
 
-	if (SpotifyItemKindForUri(fUri) != kSpotifyItemShow) return;
-	std::string id = SpotifyItemIdForUri(fUri);
+	if (kind == kSpotifyItemShow)
+		_WriteShowCache();
+}
 
+
+bool
+PlaylistWindow::_TrackCachePath(bool isPlaylist, BPath& path,
+	bool createDirectories) const
+{
+	if (isPlaylist)
+		return PlaylistCachePath(SpotifyItemIdForUri(fUri), path,
+			createDirectories);
+	return LikedSongsCachePath(path, createDirectories);
+}
+
+
+bool
+PlaylistWindow::_WriteTrackCache(bool isPlaylist)
+{
+	if (!fTrackList)
+		return false;
+	if (isPlaylist && fPlaylistSnapshotId.empty())
+		return false;
 	BPath path;
-	if (!ShowCachePath(id, path, true)) return;
+	if (!_TrackCachePath(isPlaylist, path, true))
+		return false;
 
 	nlohmann::json j;
-	j["version"]  = kShowCacheVersion;
-	j["total"]    = fEpisodeTotal;
+	j["total"] = fPageTotal;
+	j["next_offset"] = fPageOffset;
+	if (isPlaylist) {
+		j["snapshot_id"] = fPlaylistSnapshotId;
+	} else {
+		j["version"] = kLikedSongsCacheVersion;
+		j["cached_at"] = (int)time(NULL);
+	}
+	j["tracks"] = nlohmann::json::array();
+	for (int32 i = 0; i < fTrackList->CountRows(); i++) {
+		TrackRow* row = (TrackRow*)fTrackList->RowAt(i);
+		if (row)
+			j["tracks"].push_back(TrackRowCacheJson(row, i));
+	}
+
+	WriteCacheAsync(path.Path(), std::move(j));
+	return true;
+}
+
+
+void
+PlaylistWindow::_WriteShowCache()
+{
+	BPath path;
+	if (!ShowCachePath(SpotifyItemIdForUri(fUri), path, true))
+		return;
+
+	nlohmann::json j;
+	j["version"] = kShowCacheVersion;
+	j["total"] = fEpisodeTotal;
 	j["next_offset"] = fEpisodeOffset;
-	j["complete"] = (fEpisodeTotal <= 0 || fEpisodeOffset >= fEpisodeTotal);
+	j["complete"] = fEpisodeTotal <= 0 || fEpisodeOffset >= fEpisodeTotal;
 	j["episodes"] = nlohmann::json::array();
-	for (const auto& ep : fEpisodes) {
+	for (const EpisodeData& ep : fEpisodes) {
 		j["episodes"].push_back({
 			{"number",      ep.number},
 			{"title",       ep.title},

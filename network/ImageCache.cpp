@@ -333,6 +333,67 @@ IsTransientImageFailure(int statusCode)
         || statusCode == 429 || statusCode >= 500;
 }
 
+static BBitmap*
+ValidatedBitmapFromFile(const std::string& path)
+{
+    BBitmap* bitmap = BTranslationUtils::GetBitmap(path.c_str());
+    if (bitmap && !bitmap->IsValid()) {
+        delete bitmap;
+        bitmap = nullptr;
+    }
+    return bitmap;
+}
+
+static BBitmap*
+DecodeBitmapBody(const std::string& body)
+{
+    BMemoryIO memory(body.data(), body.size());
+    BBitmap* bitmap = BTranslationUtils::GetBitmap(&memory);
+    if (bitmap && !bitmap->IsValid()) {
+        delete bitmap;
+        bitmap = nullptr;
+    }
+    return bitmap;
+}
+
+static BBitmap*
+WriteBitmapBodyToCache(const std::string& cacheFile, uint64 generation,
+    const std::string& body)
+{
+    std::string temporary = cacheFile + ".part-" + std::to_string(generation);
+    BFile file(temporary.c_str(), B_WRITE_ONLY | B_CREATE_FILE | B_ERASE_FILE);
+    BBitmap* bitmap = nullptr;
+    if (file.InitCheck() == B_OK
+            && file.Write(body.data(), body.size()) == (ssize_t)body.size()) {
+        bitmap = ValidatedBitmapFromFile(temporary);
+    }
+    if (bitmap) {
+        unlink(cacheFile.c_str());
+        rename(temporary.c_str(), cacheFile.c_str());
+        int64 maxCacheBytes = ImageCache::MaxCacheBytes();
+        if (maxCacheBytes > 0)
+            ImageCache::PruneToSize(maxCacheBytes);
+    } else {
+        unlink(temporary.c_str());
+    }
+    return bitmap;
+}
+
+static BBitmap*
+BitmapFromImageResponse(const HttpResponse& response,
+    const std::string& cacheFile, uint64 generation, bool& successfulResponse)
+{
+    successfulResponse = response.statusCode >= 200
+        && response.statusCode < 300;
+    if (!successfulResponse || response.body.empty()
+            || !LooksLikeCompleteImage(response.body)) {
+        return nullptr;
+    }
+    BBitmap* bitmap = cacheFile.empty() ? nullptr
+        : WriteBitmapBodyToCache(cacheFile, generation, response.body);
+    return bitmap ? bitmap : DecodeBitmapBody(response.body);
+}
+
 void ImageCache::StartNetworkLoad(const std::string& url, uint64 generation,
     const std::string& cacheFile, int32 attempt)
 {
@@ -345,48 +406,9 @@ void ImageCache::StartNetworkLoad(const std::string& url, uint64 generation,
             if (!ImageCache::IsCurrentGeneration(url, generation))
                 return;
 
-            BBitmap* bitmap = nullptr;
-            bool successfulResponse = response.statusCode >= 200
-                && response.statusCode < 300;
-            bool completeBody = !response.body.empty()
-                && LooksLikeCompleteImage(response.body);
-            if (successfulResponse && completeBody) {
-                if (!cacheFile.empty()) {
-                    std::string temporary = cacheFile + ".part-"
-                        + std::to_string(generation);
-                    BFile file(temporary.c_str(), B_WRITE_ONLY
-                        | B_CREATE_FILE | B_ERASE_FILE);
-                    if (file.InitCheck() == B_OK
-                            && file.Write(response.body.data(),
-                                response.body.size())
-                                == (ssize_t)response.body.size()) {
-                        bitmap = BTranslationUtils::GetBitmap(
-                            temporary.c_str());
-                    }
-                    if (bitmap && !bitmap->IsValid()) {
-                        delete bitmap;
-                        bitmap = nullptr;
-                    }
-                    if (bitmap) {
-                        unlink(cacheFile.c_str());
-                        rename(temporary.c_str(), cacheFile.c_str());
-                        int64 maxCacheBytes = ImageCache::MaxCacheBytes();
-                        if (maxCacheBytes > 0)
-                            ImageCache::PruneToSize(maxCacheBytes);
-                    } else {
-                        unlink(temporary.c_str());
-                    }
-                }
-                if (!bitmap) {
-                    BMemoryIO memory(response.body.data(),
-                        response.body.size());
-                    bitmap = BTranslationUtils::GetBitmap(&memory);
-                    if (bitmap && !bitmap->IsValid()) {
-                        delete bitmap;
-                        bitmap = nullptr;
-                    }
-                }
-            }
+            bool successfulResponse = false;
+            BBitmap* bitmap = BitmapFromImageResponse(response, cacheFile,
+                generation, successfulResponse);
 
             bool retryable = IsTransientImageFailure(response.statusCode)
                 || (successfulResponse && !bitmap);
@@ -409,6 +431,60 @@ void ImageCache::StartNetworkLoad(const std::string& url, uint64 generation,
         });
 }
 
+void ImageCache::StoreMemoryCacheLocked(const std::string& url,
+    BBitmap* bitmap)
+{
+    auto previous = sCache.find(url);
+    if (previous != sCache.end() && previous->second != bitmap)
+        delete previous->second;
+    sCache[url] = bitmap;
+    sAccessOrder[url] = ++sNextAccessOrder;
+    while (sCache.size() > kMaxMemoryCacheEntries) {
+        auto oldest = sAccessOrder.end();
+        for (auto current = sAccessOrder.begin();
+                current != sAccessOrder.end(); ++current) {
+            if (current->first == url)
+                continue;
+            if (oldest == sAccessOrder.end()
+                    || current->second < oldest->second)
+                oldest = current;
+        }
+        if (oldest == sAccessOrder.end())
+            break;
+        auto cached = sCache.find(oldest->first);
+        if (cached != sCache.end()) {
+            delete cached->second;
+            sCache.erase(cached);
+        }
+        sAccessOrder.erase(oldest);
+    }
+}
+
+void ImageCache::TakePendingCallbacksLocked(const std::string& url,
+    std::vector<ImageCallback>& callbacks)
+{
+    auto pending = sPending.find(url);
+    if (pending != sPending.end()) {
+        callbacks.swap(pending->second);
+        sPending.erase(pending);
+    }
+}
+
+void ImageCache::CopyCallbackBitmaps(BBitmap* bitmap, size_t count,
+    std::vector<BBitmap*>& callbackBitmaps)
+{
+    if (!bitmap)
+        return;
+    for (size_t index = 0; index < count; index++) {
+        BBitmap* copy = new BBitmap(bitmap);
+        if (!copy->IsValid()) {
+            delete copy;
+            copy = nullptr;
+        }
+        callbackBitmaps.push_back(copy);
+    }
+}
+
 void ImageCache::FinishLoad(const std::string& url, uint64 generation,
     BBitmap* bitmap)
 {
@@ -420,47 +496,10 @@ void ImageCache::FinishLoad(const std::string& url, uint64 generation,
             delete bitmap;
             return;
         }
-        if (bitmap) {
-            auto previous = sCache.find(url);
-            if (previous != sCache.end() && previous->second != bitmap)
-                delete previous->second;
-            sCache[url] = bitmap;
-            sAccessOrder[url] = ++sNextAccessOrder;
-            while (sCache.size() > kMaxMemoryCacheEntries) {
-                auto oldest = sAccessOrder.end();
-                for (auto current = sAccessOrder.begin();
-                        current != sAccessOrder.end(); ++current) {
-                    if (current->first == url)
-                        continue;
-                    if (oldest == sAccessOrder.end()
-                            || current->second < oldest->second)
-                        oldest = current;
-                }
-                if (oldest == sAccessOrder.end())
-                    break;
-                auto cached = sCache.find(oldest->first);
-                if (cached != sCache.end()) {
-                    delete cached->second;
-                    sCache.erase(cached);
-                }
-                sAccessOrder.erase(oldest);
-            }
-        }
-        auto pending = sPending.find(url);
-        if (pending != sPending.end()) {
-            callbacks.swap(pending->second);
-            sPending.erase(pending);
-        }
-        if (bitmap) {
-            for (size_t index = 0; index < callbacks.size(); index++) {
-                BBitmap* copy = new BBitmap(bitmap);
-                if (!copy->IsValid()) {
-                    delete copy;
-                    copy = nullptr;
-                }
-                callbackBitmaps.push_back(copy);
-            }
-        }
+        if (bitmap)
+            StoreMemoryCacheLocked(url, bitmap);
+        TakePendingCallbacksLocked(url, callbacks);
+        CopyCallbackBitmaps(bitmap, callbacks.size(), callbackBitmaps);
     }
     for (size_t index = 0; index < callbacks.size(); index++)
         callbacks[index](bitmap ? callbackBitmaps[index] : nullptr);

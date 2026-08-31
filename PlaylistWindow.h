@@ -194,8 +194,15 @@ private:
 	void					_RefreshPodcastHead(int32 offset);
 	void					_FinishPodcastHeadRefresh();
 	bool					_LoadCache();
+	bool					_LoadTrackCache(bool isPlaylist);
+	bool					_LoadShowCache();
 	void					_SaveCache();
 	void					_WriteCacheNow();
+	bool					_WriteTrackCache(bool isPlaylist);
+	bool					_TrackCachePath(bool isPlaylist,
+								BPath& path,
+								bool createDirectories) const;
+	void					_WriteShowCache();
 	void					_DeleteCache();
 
 	BMenuBar*				fMenuBar = nullptr;

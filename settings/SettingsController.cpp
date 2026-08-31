@@ -395,6 +395,211 @@ bool SettingsController::CredentialsExist(const HaifySettings& s)
     return stat(systemCache.c_str(), &st) == 0 && S_ISREG(st.st_mode);
 }
 
+static void
+JsonGetString(const nlohmann::json& j, const char* key, std::string& value)
+{
+    if (j.contains(key) && j[key].is_string())
+        value = j[key];
+}
+
+static void
+JsonGetInt(const nlohmann::json& j, const char* key, int& value)
+{
+    if (j.contains(key) && j[key].is_number_integer())
+        value = j[key];
+}
+
+static void
+JsonGetBool(const nlohmann::json& j, const char* key, bool& value)
+{
+    if (j.contains(key) && j[key].is_boolean())
+        value = j[key];
+}
+
+static void
+JsonGetFloat(const nlohmann::json& j, const char* key, float& value)
+{
+    if (j.contains(key) && j[key].is_number())
+        value = j[key];
+}
+
+static void
+LoadAuthSettings(const nlohmann::json& j, HaifySettings& s)
+{
+    JsonGetString(j, "access_token", s.accessToken);
+    JsonGetString(j, "refresh_token", s.refreshToken);
+    JsonGetString(j, "granted_scopes", s.grantedScopes);
+    JsonGetInt(j, "auth_scope_version", s.authScopeVersion);
+    JsonGetString(j, "spotify_account_id", s.spotifyAccountId);
+    if (j.contains("access_token_expires_at")
+            && j["access_token_expires_at"].is_number_integer()) {
+        s.accessTokenExpiresAt = j["access_token_expires_at"];
+    }
+}
+
+static void
+LoadWindowSettings(const nlohmann::json& j, HaifySettings& s)
+{
+    JsonGetFloat(j, "player_window_x", s.playerWindowX);
+    JsonGetFloat(j, "player_window_y", s.playerWindowY);
+    JsonGetFloat(j, "player_window_w", s.playerWindowW);
+    JsonGetFloat(j, "player_window_h", s.playerWindowH);
+    JsonGetBool(j, "browser_window_open", s.browserWindowOpen);
+    JsonGetFloat(j, "browser_window_x", s.browserWindowX);
+    JsonGetFloat(j, "browser_window_y", s.browserWindowY);
+    JsonGetFloat(j, "browser_window_w", s.browserWindowW);
+    JsonGetFloat(j, "browser_window_h", s.browserWindowH);
+    JsonGetBool(j, "queue_window_open", s.queueWindowOpen);
+    JsonGetFloat(j, "queue_window_x", s.queueWindowX);
+    JsonGetFloat(j, "queue_window_y", s.queueWindowY);
+    JsonGetFloat(j, "queue_window_w", s.queueWindowW);
+    JsonGetFloat(j, "queue_window_h", s.queueWindowH);
+    JsonGetBool(j, "search_window_open", s.searchWindowOpen);
+    JsonGetFloat(j, "search_window_x", s.searchWindowX);
+    JsonGetFloat(j, "search_window_y", s.searchWindowY);
+    JsonGetFloat(j, "search_window_w", s.searchWindowW);
+    JsonGetFloat(j, "search_window_h", s.searchWindowH);
+    JsonGetBool(j, "artwork_window_open", s.artworkWindowOpen);
+    JsonGetFloat(j, "artwork_window_x", s.artworkWindowX);
+    JsonGetFloat(j, "artwork_window_y", s.artworkWindowY);
+    JsonGetFloat(j, "artwork_window_w", s.artworkWindowW);
+    JsonGetFloat(j, "artwork_window_h", s.artworkWindowH);
+    JsonGetFloat(j, "playlist_window_x", s.playlistWindowX);
+    JsonGetFloat(j, "playlist_window_y", s.playlistWindowY);
+    JsonGetFloat(j, "playlist_window_w", s.playlistWindowW);
+    JsonGetFloat(j, "playlist_window_h", s.playlistWindowH);
+}
+
+static void
+LoadDiscoverSettings(const nlohmann::json& j, HaifySettings& s)
+{
+    JsonGetBool(j, "discover_tab_playlists", s.discoverTabPlaylists);
+    JsonGetBool(j, "discover_tab_top_tracks", s.discoverTabTopTracks);
+    JsonGetBool(j, "discover_tab_top_artists", s.discoverTabTopArtists);
+    JsonGetBool(j, "discover_tab_new_releases", s.discoverTabNewReleases);
+    JsonGetBool(j, "discover_tab_saved_albums", s.discoverTabSavedAlbums);
+    JsonGetBool(j, "discover_tab_podcasts", s.discoverTabPodcasts);
+    JsonGetBool(j, "discover_tab_followed_artists",
+        s.discoverTabFollowedArtists);
+    JsonGetBool(j, "discover_tab_saved_episodes",
+        s.discoverTabSavedEpisodes);
+    JsonGetBool(j, "discover_tab_audiobooks", s.discoverTabAudiobooks);
+    if (!j.contains("discover_tab_order") || !j["discover_tab_order"].is_array())
+        return;
+    s.discoverTabOrder.clear();
+    for (const auto& value : j["discover_tab_order"]) {
+        if (value.is_string())
+            s.discoverTabOrder.push_back(value.get<std::string>());
+    }
+}
+
+static void
+LoadSearchSettings(const nlohmann::json& j, HaifySettings& s)
+{
+    bool hasNewSearchMode = j.contains("search_filter_all")
+        && j["search_filter_all"].is_boolean();
+    bool hasLegacySearchFilters = j.contains("search_filter_tracks")
+        || j.contains("search_filter_artists")
+        || j.contains("search_filter_albums")
+        || j.contains("search_filter_playlists")
+        || j.contains("search_filter_shows");
+    JsonGetBool(j, "search_filter_all", s.searchFilterAll);
+    JsonGetBool(j, "search_filter_tracks", s.searchFilterTracks);
+    JsonGetBool(j, "search_filter_artists", s.searchFilterArtists);
+    JsonGetBool(j, "search_filter_albums", s.searchFilterAlbums);
+    JsonGetBool(j, "search_filter_playlists", s.searchFilterPlaylists);
+    JsonGetBool(j, "search_filter_shows", s.searchFilterShows);
+    JsonGetBool(j, "search_filter_episodes", s.searchFilterEpisodes);
+    JsonGetBool(j, "search_filter_audiobooks", s.searchFilterAudiobooks);
+    if (!hasNewSearchMode && hasLegacySearchFilters) {
+        bool legacyAll = s.searchFilterTracks && s.searchFilterArtists
+            && s.searchFilterAlbums && s.searchFilterPlaylists
+            && s.searchFilterShows;
+        s.searchFilterAll = legacyAll;
+        if (legacyAll) {
+            s.searchFilterTracks = false;
+            s.searchFilterArtists = false;
+            s.searchFilterAlbums = false;
+            s.searchFilterPlaylists = false;
+            s.searchFilterShows = false;
+        }
+    }
+    JsonGetInt(j, "audiobook_mode", s.audiobookMode);
+    if (s.audiobookMode < kAudiobookAuto
+            || s.audiobookMode > kAudiobookDisabled) {
+        s.audiobookMode = kAudiobookAuto;
+    }
+}
+
+static void
+LoadLibrespotSettings(const nlohmann::json& j, HaifySettings& s)
+{
+    JsonGetString(j, "librespot_path", s.librespotPath);
+    JsonGetBool(j, "librespot_always_start", s.librespotAlwaysStart);
+    JsonGetString(j, "librespot_backend", s.librespotBackend);
+    JsonGetInt(j, "librespot_bitrate", s.librespotBitrate);
+    JsonGetInt(j, "librespot_volume", s.librespotVolume);
+    JsonGetBool(j, "librespot_autoplay", s.librespotAutoplay);
+    JsonGetBool(j, "librespot_normalization", s.librespotNormalization);
+    JsonGetString(j, "librespot_device_name", s.librespotDeviceName);
+    JsonGetString(j, "librespot_device_type", s.librespotDeviceType);
+    JsonGetBool(j, "librespot_disable_discovery",
+        s.librespotDisableDiscovery);
+    JsonGetString(j, "librespot_cache_path", s.librespotCachePath);
+    JsonGetString(j, "librespot_additional_args", s.librespotAdditionalArgs);
+    if (s.librespotPath.empty())
+        JsonGetString(j, "librespot", s.librespotPath);
+    if (s.librespotBackend.empty())
+        JsonGetString(j, "audio_backend", s.librespotBackend);
+    if (!s.librespotBackend.empty()
+            && !IsSupportedLibrespotBackend(s.librespotBackend)) {
+        s.librespotBackend = "sdl";
+    }
+}
+
+static void
+LoadColorSettings(const nlohmann::json& j, HaifySettings& s)
+{
+    JsonGetBool(j, "seekbar_use_system_color", s.seekBarUseSystemColor);
+    JsonGetInt(j, "seekbar_color_red", s.seekBarColorRed);
+    JsonGetInt(j, "seekbar_color_green", s.seekBarColorGreen);
+    JsonGetInt(j, "seekbar_color_blue", s.seekBarColorBlue);
+    JsonGetInt(j, "seekbar_color_alpha", s.seekBarColorAlpha);
+    JsonGetBool(j, "deskbar_replicant_enabled", s.deskbarReplicantEnabled);
+    JsonGetBool(j, "replicant_use_automatic_color",
+        s.replicantUseAutomaticColor);
+    JsonGetInt(j, "replicant_color_red", s.replicantColorRed);
+    JsonGetInt(j, "replicant_color_green", s.replicantColorGreen);
+    JsonGetInt(j, "replicant_color_blue", s.replicantColorBlue);
+    JsonGetInt(j, "replicant_color_alpha", s.replicantColorAlpha);
+    JsonGetInt(j, "image_cache_limit_mb", s.imageCacheLimitMB);
+}
+
+static void
+NormalizeColorSettings(HaifySettings& s)
+{
+    bool formerBlueDefault = s.seekBarColorRed == 0
+        && s.seekBarColorGreen == 120 && s.seekBarColorBlue == 215;
+    bool interimVioletDefault = s.seekBarColorRed == 142
+        && s.seekBarColorGreen == 136 && s.seekBarColorBlue == 242;
+    if ((formerBlueDefault || interimVioletDefault)
+            && s.seekBarColorAlpha == 255) {
+        s.seekBarColorRed = kDefaultSeekBarColorRed;
+        s.seekBarColorGreen = kDefaultSeekBarColorGreen;
+        s.seekBarColorBlue = kDefaultSeekBarColorBlue;
+        s.seekBarColorAlpha = kDefaultSeekBarColorAlpha;
+    }
+
+    s.seekBarColorRed = std::max(0, std::min(255, s.seekBarColorRed));
+    s.seekBarColorGreen = std::max(0, std::min(255, s.seekBarColorGreen));
+    s.seekBarColorBlue = std::max(0, std::min(255, s.seekBarColorBlue));
+    s.seekBarColorAlpha = std::max(0, std::min(255, s.seekBarColorAlpha));
+    s.replicantColorRed = std::max(0, std::min(255, s.replicantColorRed));
+    s.replicantColorGreen = std::max(0, std::min(255, s.replicantColorGreen));
+    s.replicantColorBlue = std::max(0, std::min(255, s.replicantColorBlue));
+    s.replicantColorAlpha = std::max(0, std::min(255, s.replicantColorAlpha));
+}
+
 HaifySettings SettingsController::Load()
 {
     BAutolock lock(&sSettingsLock);
@@ -424,178 +629,13 @@ HaifySettings SettingsController::Load()
     }
     sLastLoadValid = true;
 
-    auto get = [&](const char* key, std::string& val) {
-        if (j.contains(key) && j[key].is_string()) val = j[key];
-    };
-    auto getI = [&](const char* key, int& val) {
-        if (j.contains(key) && j[key].is_number_integer()) val = j[key];
-    };
-    auto getB = [&](const char* key, bool& val) {
-        if (j.contains(key) && j[key].is_boolean()) val = j[key];
-    };
-
-    auto getF = [&](const char* key, float& val) {
-        if (j.contains(key) && j[key].is_number()) val = j[key];
-    };
-
-    get("access_token",                 s.accessToken);
-    get("refresh_token",                s.refreshToken);
-    get("granted_scopes",               s.grantedScopes);
-    getI("auth_scope_version",           s.authScopeVersion);
-    get("spotify_account_id",            s.spotifyAccountId);
-    if (j.contains("access_token_expires_at")
-        && j["access_token_expires_at"].is_number_integer()) {
-        s.accessTokenExpiresAt = j["access_token_expires_at"];
-    }
-
-    getF("player_window_x",             s.playerWindowX);
-    getF("player_window_y",             s.playerWindowY);
-    getF("player_window_w",             s.playerWindowW);
-    getF("player_window_h",             s.playerWindowH);
-
-    getB("browser_window_open",          s.browserWindowOpen);
-    getF("browser_window_x",            s.browserWindowX);
-    getF("browser_window_y",            s.browserWindowY);
-    getF("browser_window_w",            s.browserWindowW);
-    getF("browser_window_h",            s.browserWindowH);
-    getB("discover_tab_playlists",      s.discoverTabPlaylists);
-    getB("discover_tab_top_tracks",     s.discoverTabTopTracks);
-    getB("discover_tab_top_artists",    s.discoverTabTopArtists);
-    getB("discover_tab_new_releases",   s.discoverTabNewReleases);
-    getB("discover_tab_saved_albums",   s.discoverTabSavedAlbums);
-    getB("discover_tab_podcasts",       s.discoverTabPodcasts);
-    getB("discover_tab_followed_artists", s.discoverTabFollowedArtists);
-    getB("discover_tab_saved_episodes", s.discoverTabSavedEpisodes);
-    getB("discover_tab_audiobooks",     s.discoverTabAudiobooks);
-    if (j.contains("discover_tab_order")
-            && j["discover_tab_order"].is_array()) {
-        s.discoverTabOrder.clear();
-        for (const auto& value : j["discover_tab_order"]) {
-            if (value.is_string())
-                s.discoverTabOrder.push_back(value.get<std::string>());
-        }
-    }
-
-    getB("queue_window_open",           s.queueWindowOpen);
-    getF("queue_window_x",              s.queueWindowX);
-    getF("queue_window_y",              s.queueWindowY);
-    getF("queue_window_w",              s.queueWindowW);
-    getF("queue_window_h",              s.queueWindowH);
-
-    getB("search_window_open",          s.searchWindowOpen);
-    getF("search_window_x",             s.searchWindowX);
-    getF("search_window_y",             s.searchWindowY);
-    getF("search_window_w",             s.searchWindowW);
-    getF("search_window_h",             s.searchWindowH);
-
-    getB("artwork_window_open",         s.artworkWindowOpen);
-    getF("artwork_window_x",            s.artworkWindowX);
-    getF("artwork_window_y",            s.artworkWindowY);
-    getF("artwork_window_w",            s.artworkWindowW);
-    getF("artwork_window_h",            s.artworkWindowH);
-
-    bool hasNewSearchMode = j.contains("search_filter_all")
-        && j["search_filter_all"].is_boolean();
-    bool hasLegacySearchFilters = j.contains("search_filter_tracks")
-        || j.contains("search_filter_artists")
-        || j.contains("search_filter_albums")
-        || j.contains("search_filter_playlists")
-        || j.contains("search_filter_shows");
-    getB("search_filter_all",           s.searchFilterAll);
-    getB("search_filter_tracks",        s.searchFilterTracks);
-    getB("search_filter_artists",       s.searchFilterArtists);
-    getB("search_filter_albums",        s.searchFilterAlbums);
-    getB("search_filter_playlists",     s.searchFilterPlaylists);
-    getB("search_filter_shows",         s.searchFilterShows);
-    getB("search_filter_episodes",      s.searchFilterEpisodes);
-    getB("search_filter_audiobooks",    s.searchFilterAudiobooks);
-    if (!hasNewSearchMode && hasLegacySearchFilters) {
-        bool legacyAll = s.searchFilterTracks && s.searchFilterArtists
-            && s.searchFilterAlbums && s.searchFilterPlaylists
-            && s.searchFilterShows;
-        s.searchFilterAll = legacyAll;
-        if (legacyAll) {
-            s.searchFilterTracks = false;
-            s.searchFilterArtists = false;
-            s.searchFilterAlbums = false;
-            s.searchFilterPlaylists = false;
-            s.searchFilterShows = false;
-        }
-    }
-    getI("audiobook_mode",              s.audiobookMode);
-    if (s.audiobookMode < kAudiobookAuto
-            || s.audiobookMode > kAudiobookDisabled) {
-        s.audiobookMode = kAudiobookAuto;
-    }
-
-    getF("playlist_window_x",           s.playlistWindowX);
-    getF("playlist_window_y",           s.playlistWindowY);
-    getF("playlist_window_w",           s.playlistWindowW);
-    getF("playlist_window_h",           s.playlistWindowH);
-
-    get("librespot_path",               s.librespotPath);
-    getB("librespot_always_start",      s.librespotAlwaysStart);
-
-    get("librespot_backend",            s.librespotBackend);
-    getI("librespot_bitrate",           s.librespotBitrate);
-    getI("librespot_volume",            s.librespotVolume);
-    getB("librespot_autoplay",          s.librespotAutoplay);
-    getB("librespot_normalization",     s.librespotNormalization);
-
-    get("librespot_device_name",        s.librespotDeviceName);
-    get("librespot_device_type",        s.librespotDeviceType);
-
-    getB("librespot_disable_discovery", s.librespotDisableDiscovery);
-    get("librespot_cache_path",         s.librespotCachePath);
-    get("librespot_additional_args",    s.librespotAdditionalArgs);
-    getB("seekbar_use_system_color",    s.seekBarUseSystemColor);
-    getI("seekbar_color_red",           s.seekBarColorRed);
-    getI("seekbar_color_green",         s.seekBarColorGreen);
-    getI("seekbar_color_blue",          s.seekBarColorBlue);
-    getI("seekbar_color_alpha",         s.seekBarColorAlpha);
-    getB("deskbar_replicant_enabled",   s.deskbarReplicantEnabled);
-    getB("replicant_use_automatic_color", s.replicantUseAutomaticColor);
-    getI("replicant_color_red",         s.replicantColorRed);
-    getI("replicant_color_green",       s.replicantColorGreen);
-    getI("replicant_color_blue",        s.replicantColorBlue);
-    getI("replicant_color_alpha",       s.replicantColorAlpha);
-    getI("image_cache_limit_mb",        s.imageCacheLimitMB);
-
-    // Preserve custom colors while migrating the former exact default blue
-    // to the SoundPlay-inspired violet default.
-    bool formerBlueDefault = s.seekBarColorRed == 0
-        && s.seekBarColorGreen == 120 && s.seekBarColorBlue == 215;
-    bool interimVioletDefault = s.seekBarColorRed == 142
-        && s.seekBarColorGreen == 136 && s.seekBarColorBlue == 242;
-    if ((formerBlueDefault || interimVioletDefault)
-            && s.seekBarColorAlpha == 255) {
-        s.seekBarColorRed = kDefaultSeekBarColorRed;
-        s.seekBarColorGreen = kDefaultSeekBarColorGreen;
-        s.seekBarColorBlue = kDefaultSeekBarColorBlue;
-        s.seekBarColorAlpha = kDefaultSeekBarColorAlpha;
-    }
-
-    s.seekBarColorRed = std::max(0, std::min(255, s.seekBarColorRed));
-    s.seekBarColorGreen = std::max(0, std::min(255, s.seekBarColorGreen));
-    s.seekBarColorBlue = std::max(0, std::min(255, s.seekBarColorBlue));
-    s.seekBarColorAlpha = std::max(0, std::min(255, s.seekBarColorAlpha));
-    s.replicantColorRed = std::max(0, std::min(255, s.replicantColorRed));
-    s.replicantColorGreen = std::max(0, std::min(255, s.replicantColorGreen));
-    s.replicantColorBlue = std::max(0, std::min(255, s.replicantColorBlue));
-    s.replicantColorAlpha = std::max(0, std::min(255, s.replicantColorAlpha));
-
-    if (s.librespotPath.empty()) {
-        if (j.contains("librespot") && j["librespot"].is_string())
-            s.librespotPath = j["librespot"];
-    }
-    if (s.librespotBackend.empty()) {
-        if (j.contains("audio_backend") && j["audio_backend"].is_string())
-            s.librespotBackend = j["audio_backend"];
-    }
-    if (!s.librespotBackend.empty()
-        && !IsSupportedLibrespotBackend(s.librespotBackend)) {
-        s.librespotBackend = "sdl";
-    }
+    LoadAuthSettings(j, s);
+    LoadWindowSettings(j, s);
+    LoadDiscoverSettings(j, s);
+    LoadSearchSettings(j, s);
+    LoadLibrespotSettings(j, s);
+    LoadColorSettings(j, s);
+    NormalizeColorSettings(s);
 
     return s;
 }

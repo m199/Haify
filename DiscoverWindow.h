@@ -10,6 +10,7 @@
 
 class BMenuBar;
 class BPopUpMenu;
+class BMessenger;
 class BTab;
 class BTabView;
 class BColumnListView;
@@ -18,6 +19,7 @@ class BMenuItem;
 class BMessageRunner;
 class DiscoverRow;
 struct HaifySettings;
+class SpotifyApi;
 
 static const int32 kDiscoverTabCount = 9;
 
@@ -145,13 +147,78 @@ private:
 	void					_WriteCacheNow();
 	void					_ReloadTab(int32 logicalTab);
 	void					_ApplyPlaylistChange(BMessage* message);
+	void					_RemovePlaylistRow(DiscoverRow* row);
+	void					_RenamePlaylistRow(DiscoverRow* row,
+								const std::string& name);
+	void					_AddOrUpdatePlaylistRow(DiscoverRow* row,
+								const std::string& uri,
+								const std::string& name,
+								const std::string& owner, bool writable,
+								bool owned);
 	void					_ApplyPlaylistSnapshot(BMessage* message);
+	bool					_CanApplyPlaylistSnapshot(
+								BMessage* message) const;
+	bool					_ApplyPlaylistSnapshotItem(
+								BMessage* message, int32 index,
+								std::set<std::string>& serverUris);
+	void					_RemoveMissingPlaylistSnapshotRows(
+								const std::set<std::string>& serverUris);
 	void					_ApplyLibraryChange(BMessage* message);
+	int32					_LibraryChangeTabForUri(
+								const std::string& uri) const;
+	void					_UpdateAudiobookIdsForLibraryChange(
+								const std::string& operation,
+								const std::string& uri,
+								bool& refreshPodcasts);
+	void					_ApplyLibraryRemoval(int32 tab,
+								const std::string& uri);
+	void					_ApplyLibraryAddition(int32 tab,
+								const std::string& uri,
+								int32 generation);
+	void					_RefreshPodcastsAfterLibraryChange(
+								bool refreshPodcasts);
 	void					_ResolveLibraryAddition(int32 logicalTab,
 								const std::string& uri, int32 generation);
 	void					_ApplyResolvedLibraryAddition(BMessage* message);
+	bool					_CanApplyResolvedLibraryAddition(
+								int32 logicalTab,
+								const std::string& uri,
+								int32 generation) const;
+	void					_RemoveEmptyRows(int32 logicalTab);
 	void					_ApplyAudiobookIdSnapshot(BMessage* message);
 	void					_RemoveAudiobookDuplicatesFromPodcasts();
+	bool					_CanLoadTab(int32 logicalTab,
+								bool nextPage,
+								SpotifyApi*& api) const;
+	void					_PrepareLoadTab(int32 logicalTab,
+								bool nextPage);
+	void					_LoadPlaylistsTab(SpotifyApi* api,
+								const BMessenger& messenger,
+								bool snapshot, int32 loadGeneration);
+	void					_LoadTopTracksTab(SpotifyApi* api,
+								const BMessenger& messenger,
+								bool snapshot, int32 loadGeneration);
+	void					_LoadTopArtistsTab(SpotifyApi* api,
+								const BMessenger& messenger,
+								bool snapshot, int32 loadGeneration);
+	void					_LoadNewReleasesTab(SpotifyApi* api,
+								const BMessenger& messenger,
+								bool snapshot, int32 loadGeneration);
+	void					_LoadSavedAlbumsTab(SpotifyApi* api,
+								const BMessenger& messenger,
+								bool snapshot, int32 loadGeneration);
+	void					_LoadPodcastsTab(SpotifyApi* api,
+								const BMessenger& messenger,
+								bool snapshot, int32 loadGeneration);
+	void					_LoadFollowedArtistsTab(SpotifyApi* api,
+								const BMessenger& messenger,
+								bool snapshot, int32 loadGeneration);
+	void					_LoadSavedEpisodesTab(SpotifyApi* api,
+								const BMessenger& messenger,
+								bool snapshot, int32 loadGeneration);
+	void					_LoadAudiobooksTab(SpotifyApi* api,
+								const BMessenger& messenger,
+								bool snapshot, int32 loadGeneration);
 	DiscoverRow*			_FindRow(int32 logicalTab,
 								const std::string& uri) const;
 	DiscoverRow*			_FindPlaylistRow(const std::string& uri) const;

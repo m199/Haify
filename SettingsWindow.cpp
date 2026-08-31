@@ -717,104 +717,133 @@ SettingsWindow::_LoadCategory(int32 index, const HaifySettings& settings)
 {
 	switch (index) {
 		case kCategoryInterface:
-			fDeskbarReplicantCheck->SetValue(
-				settings.deskbarReplicantEnabled
-					? B_CONTROL_ON : B_CONTROL_OFF);
-			fUseAutomaticReplicantColorCheck->SetValue(
-				settings.replicantUseAutomaticColor
-					? B_CONTROL_ON : B_CONTROL_OFF);
-			fReplicantColorControl->SetValue(StoredReplicantColor(settings));
-			fUseSystemSeekbarColorCheck->SetValue(
-				settings.seekBarUseSystemColor ? B_CONTROL_ON : B_CONTROL_OFF);
-			fSeekbarColorControl->SetValue(StoredSeekbarColor(settings));
-			_UpdateSeekbarPreview();
-			_UpdateReplicantPreview();
+			_LoadInterfaceCategory(settings);
 			break;
 
 		case kCategoryPlayback:
-		{
-			BMenuItem* backend = fBackendMenu->FindItem(
-				settings.librespotBackend.c_str());
-			if (!backend || settings.librespotBackend.empty())
-				backend = fBackendMenu->ItemAt(0);
-			if (backend)
-				backend->SetMarked(true);
-
-			const char* bitrateLabel = "320 kbit/s";
-			if (settings.librespotBitrate == 96)
-				bitrateLabel = "96 kbit/s";
-			else if (settings.librespotBitrate == 160)
-				bitrateLabel = "160 kbit/s";
-			BMenuItem* bitrate = fBitrateMenu->FindItem(bitrateLabel);
-			if (bitrate)
-				bitrate->SetMarked(true);
-
-			fVolumeSlider->SetValue(settings.librespotVolume);
-			fAutoplayCheck->SetValue(settings.librespotAutoplay
-				? B_CONTROL_ON : B_CONTROL_OFF);
-			fNormalizationCheck->SetValue(settings.librespotNormalization
-				? B_CONTROL_ON : B_CONTROL_OFF);
+			_LoadPlaybackCategory(settings);
 			break;
-		}
 
 		case kCategorySpotify:
-		{
-			int audiobookIndex = settings.audiobookMode;
-			if (audiobookIndex < 0
-					|| audiobookIndex >= fAudiobookModeMenu->CountItems()) {
-				audiobookIndex = 0;
-			}
-			BMenuItem* item = fAudiobookModeMenu->ItemAt(audiobookIndex);
-			if (item)
-				item->SetMarked(true);
-			_UpdateAudiobookState();
+			_LoadSpotifyCategory(settings);
 			break;
-		}
 
 		case kCategoryLibrespot:
-		{
-			std::string path = settings.librespotPath.empty()
-				? SettingsController::FindLibrespotPath()
-				: settings.librespotPath;
-			fPathControl->SetText(path.c_str());
-			fAlwaysStartCheck->SetValue(settings.librespotAlwaysStart
-				? B_CONTROL_ON : B_CONTROL_OFF);
-			fOAuthStatusView->SetText(SettingsController::CredentialsExist(settings)
-				? B_TRANSLATE("Account registered")
-				: B_TRANSLATE("No account registered"));
-			fDisableDiscoveryCheck->SetValue(
-				settings.librespotDisableDiscovery
-					? B_CONTROL_ON : B_CONTROL_OFF);
-			std::string cachePath = settings.librespotCachePath.empty()
-				? SettingsController::DefaultCachePath()
-				: settings.librespotCachePath;
-			fCachePathControl->SetText(cachePath.c_str());
-			fAdditionalArgsControl->SetText(
-				settings.librespotAdditionalArgs.c_str());
+			_LoadLibrespotCategory(settings);
 			break;
-		}
 
 		case kCategoryDevice:
-		{
-			fDeviceNameControl->SetText(settings.librespotDeviceName.empty()
-				? LIBRESPOT_DEVICE_NAME : settings.librespotDeviceName.c_str());
-			BMenuItem* deviceType = fDeviceTypeMenu->FindItem(
-				settings.librespotDeviceType.c_str());
-			if (!deviceType)
-				deviceType = fDeviceTypeMenu->ItemAt(0);
-			if (deviceType)
-				deviceType->SetMarked(true);
+			_LoadDeviceCategory(settings);
 			break;
-		}
 
 		case kCategoryImageCache:
-		{
-			char buffer[32];
-			snprintf(buffer, sizeof(buffer), "%d", settings.imageCacheLimitMB);
-			fImageCacheLimitControl->SetText(buffer);
+			_LoadImageCacheCategory(settings);
 			break;
-		}
 	}
+}
+
+
+void
+SettingsWindow::_LoadInterfaceCategory(const HaifySettings& settings)
+{
+	fDeskbarReplicantCheck->SetValue(settings.deskbarReplicantEnabled
+		? B_CONTROL_ON : B_CONTROL_OFF);
+	fUseAutomaticReplicantColorCheck->SetValue(
+		settings.replicantUseAutomaticColor ? B_CONTROL_ON : B_CONTROL_OFF);
+	fReplicantColorControl->SetValue(StoredReplicantColor(settings));
+	fUseSystemSeekbarColorCheck->SetValue(settings.seekBarUseSystemColor
+		? B_CONTROL_ON : B_CONTROL_OFF);
+	fSeekbarColorControl->SetValue(StoredSeekbarColor(settings));
+	_UpdateSeekbarPreview();
+	_UpdateReplicantPreview();
+}
+
+
+void
+SettingsWindow::_LoadPlaybackCategory(const HaifySettings& settings)
+{
+	BMenuItem* backend = fBackendMenu->FindItem(
+		settings.librespotBackend.c_str());
+	if (!backend || settings.librespotBackend.empty())
+		backend = fBackendMenu->ItemAt(0);
+	if (backend)
+		backend->SetMarked(true);
+
+	const char* bitrateLabel = "320 kbit/s";
+	if (settings.librespotBitrate == 96)
+		bitrateLabel = "96 kbit/s";
+	else if (settings.librespotBitrate == 160)
+		bitrateLabel = "160 kbit/s";
+	BMenuItem* bitrate = fBitrateMenu->FindItem(bitrateLabel);
+	if (bitrate)
+		bitrate->SetMarked(true);
+
+	fVolumeSlider->SetValue(settings.librespotVolume);
+	fAutoplayCheck->SetValue(settings.librespotAutoplay
+		? B_CONTROL_ON : B_CONTROL_OFF);
+	fNormalizationCheck->SetValue(settings.librespotNormalization
+		? B_CONTROL_ON : B_CONTROL_OFF);
+}
+
+
+void
+SettingsWindow::_LoadSpotifyCategory(const HaifySettings& settings)
+{
+	int audiobookIndex = settings.audiobookMode;
+	if (audiobookIndex < 0
+			|| audiobookIndex >= fAudiobookModeMenu->CountItems()) {
+		audiobookIndex = 0;
+	}
+	BMenuItem* item = fAudiobookModeMenu->ItemAt(audiobookIndex);
+	if (item)
+		item->SetMarked(true);
+	_UpdateAudiobookState();
+}
+
+
+void
+SettingsWindow::_LoadLibrespotCategory(const HaifySettings& settings)
+{
+	std::string path = settings.librespotPath.empty()
+		? SettingsController::FindLibrespotPath()
+		: settings.librespotPath;
+	fPathControl->SetText(path.c_str());
+	fAlwaysStartCheck->SetValue(settings.librespotAlwaysStart
+		? B_CONTROL_ON : B_CONTROL_OFF);
+	fOAuthStatusView->SetText(SettingsController::CredentialsExist(settings)
+		? B_TRANSLATE("Account registered")
+		: B_TRANSLATE("No account registered"));
+	fDisableDiscoveryCheck->SetValue(settings.librespotDisableDiscovery
+		? B_CONTROL_ON : B_CONTROL_OFF);
+	std::string cachePath = settings.librespotCachePath.empty()
+		? SettingsController::DefaultCachePath()
+		: settings.librespotCachePath;
+	fCachePathControl->SetText(cachePath.c_str());
+	fAdditionalArgsControl->SetText(
+		settings.librespotAdditionalArgs.c_str());
+}
+
+
+void
+SettingsWindow::_LoadDeviceCategory(const HaifySettings& settings)
+{
+	fDeviceNameControl->SetText(settings.librespotDeviceName.empty()
+		? LIBRESPOT_DEVICE_NAME : settings.librespotDeviceName.c_str());
+	BMenuItem* deviceType = fDeviceTypeMenu->FindItem(
+		settings.librespotDeviceType.c_str());
+	if (!deviceType)
+		deviceType = fDeviceTypeMenu->ItemAt(0);
+	if (deviceType)
+		deviceType->SetMarked(true);
+}
+
+
+void
+SettingsWindow::_LoadImageCacheCategory(const HaifySettings& settings)
+{
+	char buffer[32];
+	snprintf(buffer, sizeof(buffer), "%d", settings.imageCacheLimitMB);
+	fImageCacheLimitControl->SetText(buffer);
 }
 
 

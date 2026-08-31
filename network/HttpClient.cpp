@@ -91,16 +91,16 @@ DecodeChunkedBody(const std::string& encoded, std::string& decoded)
     return false;
 }
 
-static bool
-ParseRawResponse(const std::string& raw, HttpResponse& response)
-{
-    size_t headerEnd = raw.find("\r\n\r\n");
-    if (headerEnd == std::string::npos) {
-        response.body = "Invalid HTTP response: missing headers";
-        return false;
-    }
+struct ParsedHttpHeaders {
+    bool chunked = false;
+    long long contentLength = -1;
+};
 
-    size_t statusEnd = raw.find("\r\n");
+static bool
+ParseHttpStatusLine(const std::string& raw, size_t& statusEnd,
+    HttpResponse& response)
+{
+    statusEnd = raw.find("\r\n");
     size_t statusSpace = raw.find(' ');
     if (statusEnd == std::string::npos || statusSpace == std::string::npos
             || statusSpace >= statusEnd) {
@@ -113,9 +113,28 @@ ParseRawResponse(const std::string& raw, HttpResponse& response)
         response.body = "Invalid HTTP response status";
         return false;
     }
+    return true;
+}
 
-    bool chunked = false;
-    long long contentLength = -1;
+static void
+ApplyHttpHeader(const std::string& name, const std::string& value,
+    HttpResponse& response, ParsedHttpHeaders& headers)
+{
+    if (name == "retry-after") {
+        response.retryAfter = atoi(value.c_str());
+    } else if (name == "transfer-encoding"
+            && Lowercase(value).find("chunked") != std::string::npos) {
+        headers.chunked = true;
+    } else if (name == "content-length") {
+        headers.contentLength = strtoll(value.c_str(), nullptr, 10);
+    }
+}
+
+static ParsedHttpHeaders
+ParseHttpHeaders(const std::string& raw, size_t statusEnd, size_t headerEnd,
+    HttpResponse& response)
+{
+    ParsedHttpHeaders headers;
     size_t lineStart = statusEnd + 2;
     while (lineStart < headerEnd) {
         size_t lineEnd = raw.find("\r\n", lineStart);
@@ -127,37 +146,52 @@ ParseRawResponse(const std::string& raw, HttpResponse& response)
                 raw.substr(lineStart, colon - lineStart)));
             std::string value = Trim(raw.substr(colon + 1,
                 lineEnd - colon - 1));
-            if (name == "retry-after")
-                response.retryAfter = atoi(value.c_str());
-            else if (name == "transfer-encoding"
-                    && Lowercase(value).find("chunked") != std::string::npos) {
-                chunked = true;
-            } else if (name == "content-length") {
-                contentLength = strtoll(value.c_str(), nullptr, 10);
-            }
+            ApplyHttpHeader(name, value, response, headers);
         }
         lineStart = lineEnd + 2;
     }
+    return headers;
+}
 
-    std::string encodedBody = raw.substr(headerEnd + 4);
-    if (chunked) {
+static bool
+ApplyHttpBody(const std::string& encodedBody, const ParsedHttpHeaders& headers,
+    HttpResponse& response)
+{
+    if (headers.chunked) {
         if (!DecodeChunkedBody(encodedBody, response.body)) {
             response.statusCode = -1;
             response.body = "Invalid chunked HTTP response";
             return false;
         }
-    } else {
-        if (contentLength >= 0
-                && (unsigned long long)contentLength > encodedBody.size()) {
-            response.statusCode = -1;
-            response.body = "Incomplete HTTP response body";
-            return false;
-        }
-        response.body = encodedBody;
-        if (contentLength >= 0)
-            response.body.resize((size_t)contentLength);
+        return true;
     }
+    if (headers.contentLength >= 0
+            && (unsigned long long)headers.contentLength > encodedBody.size()) {
+        response.statusCode = -1;
+        response.body = "Incomplete HTTP response body";
+        return false;
+    }
+    response.body = encodedBody;
+    if (headers.contentLength >= 0)
+        response.body.resize((size_t)headers.contentLength);
     return true;
+}
+
+static bool
+ParseRawResponse(const std::string& raw, HttpResponse& response)
+{
+    size_t headerEnd = raw.find("\r\n\r\n");
+    if (headerEnd == std::string::npos) {
+        response.body = "Invalid HTTP response: missing headers";
+        return false;
+    }
+
+    size_t statusEnd = 0;
+    if (!ParseHttpStatusLine(raw, statusEnd, response))
+        return false;
+    ParsedHttpHeaders headers = ParseHttpHeaders(raw, statusEnd, headerEnd,
+        response);
+    return ApplyHttpBody(raw.substr(headerEnd + 4), headers, response);
 }
 
 static bool
@@ -179,34 +213,36 @@ WriteAll(BSecureSocket& socket, const std::string& data,
     return true;
 }
 
-static HttpResponse
-RunDeleteRequest(const ReqState& req)
+static bool
+ResolveDeleteAddress(BUrl& url, BNetworkAddress& address,
+    HttpResponse& response)
 {
-    HttpResponse response;
-    BUrl url(req.url.c_str(), false);
-    if (!url.IsValid() || url.Protocol() != "https") {
-        response.body = "DELETE requires a valid HTTPS URL";
-        return response;
-    }
-
     int port = url.HasPort() ? url.Port() : 443;
-    BNetworkAddress address;
     status_t status = address.SetTo(url.Host().String(), (uint16)port);
-    if (status != B_OK) {
-        response.body = std::string("Could not resolve host: ")
-            + strerror(status);
-        return response;
-    }
+    if (status == B_OK)
+        return true;
+    response.body = std::string("Could not resolve host: ")
+        + strerror(status);
+    return false;
+}
 
-    BSecureSocket socket;
-    status = socket.Connect(address, 30000000LL);
-    if (status != B_OK) {
-        response.body = std::string("HTTPS connection failed: ")
-            + strerror(status);
-        return response;
+static bool
+ConnectDeleteSocket(BSecureSocket& socket, BNetworkAddress& address,
+    HttpResponse& response)
+{
+    status_t status = socket.Connect(address, 30000000LL);
+    if (status == B_OK) {
+        socket.SetTimeout(30000000LL);
+        return true;
     }
-    socket.SetTimeout(30000000LL);
+    response.body = std::string("HTTPS connection failed: ")
+        + strerror(status);
+    return false;
+}
 
+static std::string
+DeleteRequestTarget(BUrl& url)
+{
     std::string target = url.Path().String();
     if (target.empty())
         target = "/";
@@ -214,14 +250,13 @@ RunDeleteRequest(const ReqState& req)
         target += '?';
         target += url.Request().String();
     }
+    return target;
+}
 
-    std::string request = "DELETE " + target + " HTTP/1.1\r\n";
-    request += "Host: ";
-    request += url.Authority().String();
-    request += "\r\nUser-Agent: Haify\r\n";
-    request += "Accept: application/json\r\n";
-    request += "Accept-Encoding: identity\r\n";
-    request += "Connection: close\r\n";
+static bool
+AppendDeleteHeaders(const ReqState& req, std::string& request,
+    HttpResponse& response)
+{
     for (const auto& header : req.headers) {
         std::string name = Lowercase(header.first);
         if (name == "host" || name == "content-length"
@@ -231,16 +266,34 @@ RunDeleteRequest(const ReqState& req)
         if (header.first.find_first_of("\r\n") != std::string::npos
                 || header.second.find_first_of("\r\n") != std::string::npos) {
             response.body = "Invalid HTTP header";
-            return response;
+            return false;
         }
         request += header.first + ": " + header.second + "\r\n";
     }
+    return true;
+}
+
+static bool
+BuildDeleteRequest(const ReqState& req, BUrl& url, std::string& request,
+    HttpResponse& response)
+{
+    request = "DELETE " + DeleteRequestTarget(url) + " HTTP/1.1\r\n";
+    request += "Host: ";
+    request += url.Authority().String();
+    request += "\r\nUser-Agent: Haify\r\n";
+    request += "Accept: application/json\r\n";
+    request += "Accept-Encoding: identity\r\n";
+    request += "Connection: close\r\n";
+    if (!AppendDeleteHeaders(req, request, response))
+        return false;
     request += "Content-Length: " + std::to_string(req.body.size())
         + "\r\n\r\n" + req.body;
+    return true;
+}
 
-    if (!WriteAll(socket, request, response.body))
-        return response;
-
+static void
+ReadDeleteResponse(BSecureSocket& socket, HttpResponse& response)
+{
     std::string raw;
     char buffer[8192];
     const size_t maxResponseSize = 16 * 1024 * 1024;
@@ -253,20 +306,47 @@ RunDeleteRequest(const ReqState& req)
         if (bytesRead < 0) {
             socket.Disconnect();
             if (!raw.empty() && ParseRawResponse(raw, response))
-                return response;
+                return;
             response.statusCode = -1;
             response.body = "HTTPS read failed";
-            return response;
+            return;
         }
         if ((size_t)bytesRead > maxResponseSize - raw.size()) {
             response.body = "HTTP response is too large";
-            return response;
+            return;
         }
         raw.append(buffer, (size_t)bytesRead);
     }
     socket.Disconnect();
-
     ParseRawResponse(raw, response);
+}
+
+static HttpResponse
+RunDeleteRequest(const ReqState& req)
+{
+    HttpResponse response;
+    BUrl url(req.url.c_str(), false);
+    if (!url.IsValid() || url.Protocol() != "https") {
+        response.body = "DELETE requires a valid HTTPS URL";
+        return response;
+    }
+
+    BNetworkAddress address;
+    if (!ResolveDeleteAddress(url, address, response))
+        return response;
+
+    BSecureSocket socket;
+    if (!ConnectDeleteSocket(socket, address, response))
+        return response;
+
+    std::string request;
+    if (!BuildDeleteRequest(req, url, request, response))
+        return response;
+
+    if (!WriteAll(socket, request, response.body))
+        return response;
+
+    ReadDeleteResponse(socket, response);
     return response;
 }
 

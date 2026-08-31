@@ -159,77 +159,201 @@ DiscoverCachePath(const std::string& accountId, bool createDirectory)
 		name + ".json", createDirectory);
 }
 
+static uint64
+BeginDiscoverCacheWrite(const std::string& path)
+{
+	BAutolock lock(&sDiscoverCacheWriterLock);
+	uint64 generation = ++sNextDiscoverCacheWriteGeneration;
+	sDiscoverCacheWriteGenerations[path] = generation;
+	return generation;
+}
+
+static bool
+ReadDiscoverCacheFile(const std::string& path, nlohmann::json& existing)
+{
+	BFile file(path.c_str(), B_READ_ONLY);
+	if (file.InitCheck() != B_OK)
+		return false;
+	off_t size = 0;
+	if (file.GetSize(&size) != B_OK || size <= 0
+			|| size > 50LL * 1024LL * 1024LL) {
+		return false;
+	}
+	std::string content((size_t)size, '\0');
+	if (file.Read(&content[0], (size_t)size) != size)
+		return false;
+	try {
+		existing = nlohmann::json::parse(content);
+		return true;
+	} catch (...) {
+		return false;
+	}
+}
+
+static bool
+IsCompatibleDiscoverCache(const nlohmann::json& existing,
+	const nlohmann::json& data)
+{
+	return existing.value("version", 0) == kDiscoverCacheVersion
+		&& existing.value("account_id", "") == data.value("account_id", "")
+		&& existing.contains("tabs") && existing["tabs"].is_object();
+}
+
+static void
+MergeDiscoverCacheTabs(nlohmann::json& data, const nlohmann::json& existing)
+{
+	for (auto tab = existing["tabs"].begin(); tab != existing["tabs"].end();
+			++tab) {
+		if (!data["tabs"].contains(tab.key()))
+			data["tabs"][tab.key()] = tab.value();
+	}
+	if (!data.contains("audiobook_ids") && existing.contains("audiobook_ids")
+			&& existing["audiobook_ids"].is_array()) {
+		data["audiobook_ids"] = existing["audiobook_ids"];
+	}
+}
+
+static void
+MergeExistingDiscoverCache(const std::string& path, nlohmann::json& data)
+{
+	nlohmann::json existing;
+	if (ReadDiscoverCacheFile(path, existing)
+			&& IsCompatibleDiscoverCache(existing, data)) {
+		MergeDiscoverCacheTabs(data, existing);
+	}
+}
+
+static bool
+WriteDiscoverCacheFile(const std::string& path, uint64 generation,
+	const nlohmann::json& data)
+{
+	std::string serialized = data.dump();
+	std::string temporary = path + ".part-" + std::to_string(generation);
+	BFile file(temporary.c_str(), B_WRITE_ONLY | B_CREATE_FILE | B_ERASE_FILE);
+	bool written = file.InitCheck() == B_OK
+		&& file.Write(serialized.data(), serialized.size())
+			== (ssize_t)serialized.size();
+	file.Unset();
+	return written;
+}
+
+static bool
+TakeCurrentDiscoverCacheWrite(const std::string& path, uint64 generation)
+{
+	BAutolock lock(&sDiscoverCacheWriterLock);
+	auto latest = sDiscoverCacheWriteGenerations.find(path);
+	bool current = latest != sDiscoverCacheWriteGenerations.end()
+		&& latest->second == generation;
+	if (current)
+		sDiscoverCacheWriteGenerations.erase(latest);
+	return current;
+}
+
+static void
+CommitDiscoverCacheWrite(const std::string& path, uint64 generation,
+	bool written)
+{
+	std::string temporary = path + ".part-" + std::to_string(generation);
+	bool current = TakeCurrentDiscoverCacheWrite(path, generation);
+	if (written && current) {
+		unlink(path.c_str());
+		rename(temporary.c_str(), path.c_str());
+		return;
+	}
+	unlink(temporary.c_str());
+}
+
 static void
 WriteDiscoverCacheAsync(const std::string& path, nlohmann::json data)
 {
 	if (path.empty())
 		return;
-	uint64 generation;
-	{
-		BAutolock lock(&sDiscoverCacheWriterLock);
-		generation = ++sNextDiscoverCacheWriteGeneration;
-		sDiscoverCacheWriteGenerations[path] = generation;
-	}
+	uint64 generation = BeginDiscoverCacheWrite(path);
 	std::thread([path, generation, data = std::move(data)]() mutable {
-		BFile existingFile(path.c_str(), B_READ_ONLY);
-		if (existingFile.InitCheck() == B_OK) {
-			off_t existingSize = 0;
-			if (existingFile.GetSize(&existingSize) == B_OK
-					&& existingSize > 0
-					&& existingSize <= 50LL * 1024LL * 1024LL) {
-				std::string existingContent((size_t)existingSize, '\0');
-				if (existingFile.Read(&existingContent[0],
-						(size_t)existingSize) == existingSize) {
-					try {
-						nlohmann::json existing = nlohmann::json::parse(
-							existingContent);
-						if (existing.value("version", 0)
-								== kDiscoverCacheVersion
-								&& existing.value("account_id", "")
-									== data.value("account_id", "")
-								&& existing.contains("tabs")
-								&& existing["tabs"].is_object()) {
-							for (auto tab = existing["tabs"].begin();
-									tab != existing["tabs"].end(); ++tab) {
-								if (!data["tabs"].contains(tab.key()))
-									data["tabs"][tab.key()] = tab.value();
-							}
-							if (!data.contains("audiobook_ids")
-									&& existing.contains("audiobook_ids")
-									&& existing["audiobook_ids"].is_array()) {
-								data["audiobook_ids"] = existing["audiobook_ids"];
-							}
-						}
-					} catch (...) {
-					}
-				}
-			}
-		}
-		existingFile.Unset();
-		std::string serialized = data.dump();
-		std::string temporary = path + ".part-" + std::to_string(generation);
-		BFile file(temporary.c_str(), B_WRITE_ONLY | B_CREATE_FILE
-			| B_ERASE_FILE);
-		bool written = file.InitCheck() == B_OK
-			&& file.Write(serialized.data(), serialized.size())
-				== (ssize_t)serialized.size();
-		file.Unset();
-		bool current = false;
-		{
-			BAutolock lock(&sDiscoverCacheWriterLock);
-			auto latest = sDiscoverCacheWriteGenerations.find(path);
-			current = latest != sDiscoverCacheWriteGenerations.end()
-				&& latest->second == generation;
-			if (current)
-				sDiscoverCacheWriteGenerations.erase(latest);
-		}
-		if (written && current) {
-			unlink(path.c_str());
-			rename(temporary.c_str(), path.c_str());
-		} else {
-			unlink(temporary.c_str());
-		}
+		MergeExistingDiscoverCache(path, data);
+		bool written = WriteDiscoverCacheFile(path, generation, data);
+		CommitDiscoverCacheWrite(path, generation, written);
 	}).detach();
+}
+
+static void
+AddAudiobookIdsToDiscoverCache(nlohmann::json& cache,
+	const std::set<std::string>& audiobookIds)
+{
+	cache["audiobook_ids"] = nlohmann::json::array();
+	for (const std::string& id : audiobookIds)
+		cache["audiobook_ids"].push_back(id);
+}
+
+static bool
+BuildCachedDiscoverRow(int32 tab, DiscoverRow* row, nlohmann::json& rowJson)
+{
+	if (!row || row->fUris.empty()
+			|| !PrimaryUriMatchesTab(tab, row->fUris[0]))
+		return false;
+	size_t columns = kTabCols[tab].size();
+	if (row->fUris.size() < columns)
+		return false;
+
+	nlohmann::json values = nlohmann::json::array();
+	nlohmann::json uris = nlohmann::json::array();
+	nlohmann::json titles = nlohmann::json::array();
+	for (size_t column = 0; column < columns; column++) {
+		BStringField* field = dynamic_cast<BStringField*>(
+			row->GetField((int32)column));
+		values.push_back(field ? field->String() : "");
+		uris.push_back(row->fUris[column]);
+		titles.push_back(column < row->fTitles.size()
+			? row->fTitles[column] : "");
+	}
+	rowJson = {{"values", std::move(values)}, {"uris", std::move(uris)},
+		{"titles", std::move(titles)}, {"writable", row->fWritable},
+		{"owned", row->fOwned}};
+	return true;
+}
+
+static nlohmann::json
+BuildCachedDiscoverRows(int32 tab, BColumnListView* list)
+{
+	nlohmann::json rows = nlohmann::json::array();
+	for (int32 index = 0; index < list->CountRows()
+			&& (int32)rows.size() < kMaxDiscoverCachedRowsPerTab; index++) {
+		DiscoverRow* row = dynamic_cast<DiscoverRow*>(list->RowAt(index));
+		nlohmann::json rowJson;
+		if (BuildCachedDiscoverRow(tab, row, rowJson))
+			rows.push_back(std::move(rowJson));
+	}
+	return rows;
+}
+
+static void
+AddDiscoverTabCache(nlohmann::json& tabs, int32 tab, BColumnListView* list,
+	bool freshSnapshot, bool cacheBacked)
+{
+	if (!list || (!freshSnapshot && !cacheBacked))
+		return;
+	tabs[kTabDefs[tab].id] = BuildCachedDiscoverRows(tab, list);
+}
+
+static nlohmann::json
+BuildDiscoverCachePayload(const std::string& accountId,
+	const std::set<std::string>& audiobookIds, bool audiobookIdsKnown,
+	BColumnListView* const lists[], const bool cacheBacked[],
+	const bool freshSnapshot[])
+{
+	nlohmann::json cache = {
+		{"version", kDiscoverCacheVersion},
+		{"account_id", accountId},
+		{"saved_at", (int64)time(nullptr)},
+		{"tabs", nlohmann::json::object()}
+	};
+	if (audiobookIdsKnown)
+		AddAudiobookIdsToDiscoverCache(cache, audiobookIds);
+	for (int32 tab = 0; tab < TAB_COUNT; tab++) {
+		AddDiscoverTabCache(cache["tabs"], tab, lists[tab],
+			freshSnapshot[tab], cacheBacked[tab]);
+	}
+	return cache;
 }
 
 static std::string
@@ -2182,6 +2306,203 @@ DiscoverWindow::_InitLayout()
 	SetSizeLimits(300, 100000, 200, 100000);
 }
 
+static void
+AddDiscoverCacheMessageFields(BMessage& message, int32 tab, int32 generation,
+	const std::string& accountId, bool available, bool first, bool last)
+{
+	message.AddInt32("tab", tab);
+	message.AddInt32("cols", (int32)kTabCols[tab].size());
+	message.AddInt32("cache_generation", generation);
+	message.AddString("account_id", accountId.c_str());
+	message.AddBool("from_cache", true);
+	message.AddBool("cache_available", available);
+	message.AddBool("cache_first", first);
+	message.AddBool("cache_last", last);
+}
+
+static void
+SendDiscoverCacheUnavailable(BMessenger self, int32 tab, int32 generation,
+	const std::string& accountId)
+{
+	BMessage response(kMsgCacheLoaded);
+	AddDiscoverCacheMessageFields(response, tab, generation, accountId, false,
+		true, true);
+	self.SendMessage(&response);
+}
+
+static bool
+IsReadableDiscoverCache(const nlohmann::json& cache,
+	const std::string& accountId)
+{
+	return cache.is_object()
+		&& cache.value("version", 0) == kDiscoverCacheVersion
+		&& cache.value("account_id", "") == accountId
+		&& cache.contains("tabs") && cache["tabs"].is_object();
+}
+
+static std::vector<std::string>
+DiscoverCacheAudiobookIds(const nlohmann::json& cache)
+{
+	std::vector<std::string> audiobookIds;
+	if (!cache.contains("audiobook_ids")
+			|| !cache["audiobook_ids"].is_array()) {
+		return audiobookIds;
+	}
+	for (const auto& id : cache["audiobook_ids"]) {
+		if (id.is_string() && !id.get<std::string>().empty())
+			audiobookIds.push_back(id.get<std::string>());
+	}
+	return audiobookIds;
+}
+
+static bool
+CachedDiscoverRowArraysMatch(int32 tab, const nlohmann::json& row)
+{
+	if (!row.is_object() || !row.contains("values")
+			|| !row.contains("uris") || !row.contains("titles")
+			|| !row["values"].is_array() || !row["uris"].is_array()
+			|| !row["titles"].is_array()
+			|| row["values"].size() != kTabCols[tab].size()
+			|| row["uris"].size() != kTabCols[tab].size()
+			|| row["titles"].size() != kTabCols[tab].size()) {
+		return false;
+	}
+	return true;
+}
+
+static bool
+CachedDiscoverRowPrimaryUriMatches(int32 tab, const nlohmann::json& row)
+{
+	return !row["uris"].empty() && row["uris"][0].is_string()
+		&& PrimaryUriMatchesTab(tab, row["uris"][0].get<std::string>());
+}
+
+static bool
+CachedDiscoverRowColumnsAreStrings(int32 tab, const nlohmann::json& row)
+{
+	for (size_t column = 0; column < kTabCols[tab].size(); column++) {
+		if (!row["values"][column].is_string()
+				|| !row["uris"][column].is_string()
+				|| !row["titles"][column].is_string()) {
+			return false;
+		}
+	}
+	return true;
+}
+
+static bool
+IsValidCachedDiscoverRow(int32 tab, const nlohmann::json& row)
+{
+	return CachedDiscoverRowArraysMatch(tab, row)
+		&& CachedDiscoverRowPrimaryUriMatches(tab, row)
+		&& CachedDiscoverRowColumnsAreStrings(tab, row);
+}
+
+static RowData
+CachedDiscoverRowFromJson(const nlohmann::json& row)
+{
+	RowData cached;
+	for (const auto& value : row["values"])
+		cached.vals.push_back(value.get<std::string>());
+	for (const auto& value : row["uris"])
+		cached.uris.push_back(value.get<std::string>());
+	for (const auto& value : row["titles"])
+		cached.ttls.push_back(value.get<std::string>());
+	cached.writable = !row.contains("writable")
+		|| !row["writable"].is_boolean() || row["writable"].get<bool>();
+	cached.owned = row.contains("owned") && row["owned"].is_boolean()
+		&& row["owned"].get<bool>();
+	return cached;
+}
+
+static std::vector<RowData>
+CachedDiscoverRowsFromJson(int32 tab, const nlohmann::json& rows)
+{
+	std::vector<RowData> cachedRows;
+	for (const auto& row : rows) {
+		if ((int32)cachedRows.size() >= kMaxDiscoverCachedRowsPerTab)
+			break;
+		if (IsValidCachedDiscoverRow(tab, row))
+			cachedRows.push_back(CachedDiscoverRowFromJson(row));
+	}
+	return cachedRows;
+}
+
+static void
+AddDiscoverCacheRows(BMessage& message,
+	const std::vector<RowData>& cachedRows, size_t offset, size_t end)
+{
+	for (size_t index = offset; index < end; index++) {
+		const RowData& row = cachedRows[index];
+		for (const std::string& value : row.vals)
+			message.AddString("v", value.c_str());
+		for (const std::string& value : row.uris)
+			message.AddString("u", value.c_str());
+		for (const std::string& value : row.ttls)
+			message.AddString("t", value.c_str());
+		message.AddBool("writable", row.writable);
+		message.AddBool("owned", row.owned);
+	}
+}
+
+static void
+AddDiscoverAudiobookSnapshot(BMessage& message,
+	const std::vector<std::string>& audiobookIds)
+{
+	message.AddBool("audiobook_ids_snapshot", true);
+	for (const std::string& id : audiobookIds)
+		message.AddString("audiobook_id", id.c_str());
+}
+
+static bool
+SendDiscoverCacheBatches(BMessenger self, int32 tab, int32 generation,
+	const std::string& accountId, const std::vector<RowData>& cachedRows,
+	const std::vector<std::string>& audiobookIds, bool hasAudiobookIds)
+{
+	size_t offset = 0;
+	bool firstBatch = true;
+	do {
+		size_t end = std::min(offset + (size_t)kDiscoverCacheBatchRows,
+			cachedRows.size());
+		BMessage rows(kMsgCacheLoaded);
+		AddDiscoverCacheMessageFields(rows, tab, generation, accountId, true,
+			firstBatch, end >= cachedRows.size());
+		if (firstBatch && hasAudiobookIds)
+			AddDiscoverAudiobookSnapshot(rows, audiobookIds);
+		AddDiscoverCacheRows(rows, cachedRows, offset, end);
+		if (self.SendMessage(&rows) != B_OK)
+			return false;
+		firstBatch = false;
+		offset = end;
+	} while (offset < cachedRows.size());
+	return true;
+}
+
+static void
+LoadPersistentDiscoverCache(BMessenger self, const std::string& path,
+	const std::string& accountId, int32 generation, int32 tab)
+{
+	nlohmann::json cache;
+	try {
+		if (!ReadDiscoverCacheFile(path, cache)
+				|| !IsReadableDiscoverCache(cache, accountId)) {
+			SendDiscoverCacheUnavailable(self, tab, generation, accountId);
+			return;
+		}
+		auto found = cache["tabs"].find(kTabDefs[tab].id);
+		if (found == cache["tabs"].end() || !found->is_array()) {
+			SendDiscoverCacheUnavailable(self, tab, generation, accountId);
+			return;
+		}
+		std::vector<RowData> cachedRows = CachedDiscoverRowsFromJson(tab,
+			*found);
+		SendDiscoverCacheBatches(self, tab, generation, accountId, cachedRows,
+			DiscoverCacheAudiobookIds(cache), cache.contains("audiobook_ids"));
+	} catch (...) {
+		SendDiscoverCacheUnavailable(self, tab, generation, accountId);
+	}
+}
+
 
 void
 DiscoverWindow::_LoadPersistentCache(int32 tab)
@@ -2199,139 +2520,7 @@ DiscoverWindow::_LoadPersistentCache(int32 tab)
 	int32 generation = ++fCacheLoadGeneration[tab];
 	BMessenger self(this);
 	std::thread([self, path, accountId, generation, tab]() {
-		auto sendUnavailable = [&]() {
-			BMessage response(kMsgCacheLoaded);
-			response.AddInt32("tab", tab);
-			response.AddInt32("cols", (int32)kTabCols[tab].size());
-			response.AddInt32("cache_generation", generation);
-			response.AddString("account_id", accountId.c_str());
-			response.AddBool("from_cache", true);
-			response.AddBool("cache_available", false);
-			response.AddBool("cache_first", true);
-			response.AddBool("cache_last", true);
-			self.SendMessage(&response);
-		};
-
-		BFile file(path.c_str(), B_READ_ONLY);
-		if (file.InitCheck() != B_OK) {
-			sendUnavailable();
-			return;
-		}
-		off_t size = 0;
-		if (file.GetSize(&size) != B_OK || size <= 0
-				|| size > 50LL * 1024LL * 1024LL) {
-			sendUnavailable();
-			return;
-		}
-		std::string content((size_t)size, '\0');
-		if (file.Read(&content[0], (size_t)size) != size) {
-			sendUnavailable();
-			return;
-		}
-		try {
-			nlohmann::json cache = nlohmann::json::parse(content);
-			if (!cache.is_object()
-					|| cache.value("version", 0) != kDiscoverCacheVersion
-					|| cache.value("account_id", "") != accountId
-					|| !cache.contains("tabs") || !cache["tabs"].is_object()) {
-				sendUnavailable();
-				return;
-			}
-			std::vector<std::string> audiobookIds;
-			if (cache.contains("audiobook_ids")
-					&& cache["audiobook_ids"].is_array()) {
-				for (const auto& id : cache["audiobook_ids"]) {
-					if (id.is_string() && !id.get<std::string>().empty())
-						audiobookIds.push_back(id.get<std::string>());
-				}
-			}
-
-			auto found = cache["tabs"].find(kTabDefs[tab].id);
-			if (found == cache["tabs"].end() || !found->is_array()) {
-				sendUnavailable();
-				return;
-			}
-
-			std::vector<RowData> cachedRows;
-			for (const auto& row : *found) {
-				if ((int32)cachedRows.size() >= kMaxDiscoverCachedRowsPerTab)
-					break;
-				if (!row.is_object() || !row.contains("values")
-						|| !row.contains("uris") || !row.contains("titles")
-						|| !row["values"].is_array()
-						|| !row["uris"].is_array()
-						|| !row["titles"].is_array()
-						|| row["values"].size() != kTabCols[tab].size()
-						|| row["uris"].size() != kTabCols[tab].size()
-						|| row["titles"].size() != kTabCols[tab].size()
-						|| row["uris"].empty()
-						|| !row["uris"][0].is_string()
-						|| !PrimaryUriMatchesTab(tab,
-							row["uris"][0].get<std::string>()))
-					continue;
-				bool valid = true;
-				for (size_t column = 0; column < kTabCols[tab].size(); column++) {
-					valid = valid && row["values"][column].is_string()
-						&& row["uris"][column].is_string()
-						&& row["titles"][column].is_string();
-				}
-				if (!valid)
-					continue;
-
-				RowData cached;
-				for (const auto& value : row["values"])
-					cached.vals.push_back(value.get<std::string>());
-				for (const auto& value : row["uris"])
-					cached.uris.push_back(value.get<std::string>());
-				for (const auto& value : row["titles"])
-					cached.ttls.push_back(value.get<std::string>());
-				cached.writable = !row.contains("writable")
-					|| !row["writable"].is_boolean()
-					|| row["writable"].get<bool>();
-				cached.owned = row.contains("owned")
-					&& row["owned"].is_boolean()
-					&& row["owned"].get<bool>();
-				cachedRows.push_back(std::move(cached));
-			}
-
-			size_t offset = 0;
-			bool firstBatch = true;
-			do {
-				size_t end = std::min(offset
-					+ (size_t)kDiscoverCacheBatchRows, cachedRows.size());
-				BMessage rows(kMsgCacheLoaded);
-				rows.AddInt32("tab", tab);
-				rows.AddInt32("cols", (int32)kTabCols[tab].size());
-				rows.AddInt32("cache_generation", generation);
-				rows.AddString("account_id", accountId.c_str());
-				rows.AddBool("from_cache", true);
-				rows.AddBool("cache_available", true);
-				rows.AddBool("cache_first", firstBatch);
-				rows.AddBool("cache_last", end >= cachedRows.size());
-				if (firstBatch && cache.contains("audiobook_ids")) {
-					rows.AddBool("audiobook_ids_snapshot", true);
-					for (const std::string& id : audiobookIds)
-						rows.AddString("audiobook_id", id.c_str());
-				}
-				for (size_t index = offset; index < end; index++) {
-					const RowData& row = cachedRows[index];
-					for (const std::string& value : row.vals)
-						rows.AddString("v", value.c_str());
-					for (const std::string& value : row.uris)
-						rows.AddString("u", value.c_str());
-					for (const std::string& value : row.ttls)
-						rows.AddString("t", value.c_str());
-					rows.AddBool("writable", row.writable);
-					rows.AddBool("owned", row.owned);
-				}
-				if (self.SendMessage(&rows) != B_OK)
-					return;
-				firstBatch = false;
-				offset = end;
-			} while (offset < cachedRows.size());
-		} catch (...) {
-			sendUnavailable();
-		}
+		LoadPersistentDiscoverCache(self, path, accountId, generation, tab);
 	}).detach();
 }
 
@@ -2360,49 +2549,9 @@ DiscoverWindow::_WriteCacheNow()
 	std::string path = DiscoverCachePath(fCacheAccountId, true);
 	if (path.empty())
 		return;
-	nlohmann::json cache = {
-		{"version", kDiscoverCacheVersion},
-		{"account_id", fCacheAccountId},
-		{"saved_at", (int64)time(nullptr)},
-		{"tabs", nlohmann::json::object()}
-	};
-	if (fAudiobookIdsKnown) {
-		cache["audiobook_ids"] = nlohmann::json::array();
-		for (const std::string& id : fAudiobookIds)
-			cache["audiobook_ids"].push_back(id);
-	}
-	for (int32 tab = 0; tab < TAB_COUNT; tab++) {
-		if (!fLists[tab] || (!fFreshSnapshot[tab] && !fCacheBacked[tab]))
-			continue;
-		nlohmann::json rows = nlohmann::json::array();
-		for (int32 index = 0; index < fLists[tab]->CountRows()
-				&& (int32)rows.size() < kMaxDiscoverCachedRowsPerTab; index++) {
-			DiscoverRow* row = dynamic_cast<DiscoverRow*>(
-				fLists[tab]->RowAt(index));
-			if (!row || row->fUris.empty()
-					|| !PrimaryUriMatchesTab(tab, row->fUris[0]))
-				continue;
-			size_t columns = kTabCols[tab].size();
-			if (row->fUris.size() < columns)
-				continue;
-			nlohmann::json values = nlohmann::json::array();
-			nlohmann::json uris = nlohmann::json::array();
-			nlohmann::json titles = nlohmann::json::array();
-			for (size_t column = 0; column < columns; column++) {
-				BStringField* field = dynamic_cast<BStringField*>(
-					row->GetField((int32)column));
-				values.push_back(field ? field->String() : "");
-				uris.push_back(row->fUris[column]);
-				titles.push_back(column < row->fTitles.size()
-					? row->fTitles[column] : "");
-			}
-			rows.push_back({{"values", std::move(values)},
-				{"uris", std::move(uris)}, {"titles", std::move(titles)},
-				{"writable", row->fWritable}, {"owned", row->fOwned}});
-		}
-		cache["tabs"][kTabDefs[tab].id] = std::move(rows);
-	}
-	WriteDiscoverCacheAsync(path, std::move(cache));
+	WriteDiscoverCacheAsync(path, BuildDiscoverCachePayload(fCacheAccountId,
+		fAudiobookIds, fAudiobookIdsKnown, fLists, fCacheBacked,
+		fFreshSnapshot));
 }
 
 
@@ -2489,60 +2638,88 @@ DiscoverWindow::_ApplyLibraryChange(BMessage* message)
 		return;
 	std::string operation = message->GetString("operation", "");
 	std::string uri = message->GetString("uri", "");
-	int32 tab = -1;
-	switch (SpotifyItemKindForUri(uri)) {
-		case kSpotifyItemAlbum:
-			tab = TAB_SAVED_ALBUMS;
-			break;
-		case kSpotifyItemShow:
-			tab = TAB_PODCASTS;
-			break;
-		case kSpotifyItemArtist:
-			tab = TAB_FOLLOWED_ARTISTS;
-			break;
-		case kSpotifyItemEpisode:
-			tab = TAB_SAVED_EPISODES;
-			break;
-		case kSpotifyItemAudiobook:
-			tab = TAB_AUDIOBOOKS;
-			break;
-		default:
-			break;
-	}
+	int32 tab = _LibraryChangeTabForUri(uri);
 	if (tab < 0 || !fLists[tab])
 		return;
 	int32 generation = ++fLibraryChangeGenerations[uri];
 	bool refreshPodcasts = false;
-	if (tab == TAB_AUDIOBOOKS) {
-		std::string id = SpotifyItemIdForUri(uri);
-		if (!id.empty()) {
-			fAudiobookIdsKnown = true;
-			if (operation == "add") {
-				fAudiobookIds.insert(id);
-				_RemoveAudiobookDuplicatesFromPodcasts();
-			} else if (operation == "remove") {
-				refreshPodcasts = fAudiobookIds.erase(id) > 0;
-			}
-			_ScheduleCacheSave();
-		}
-	}
+	if (tab == TAB_AUDIOBOOKS)
+		_UpdateAudiobookIdsForLibraryChange(operation, uri, refreshPodcasts);
+	if (operation == "remove")
+		_ApplyLibraryRemoval(tab, uri);
+	else if (operation == "add")
+		_ApplyLibraryAddition(tab, uri, generation);
+	_RefreshPodcastsAfterLibraryChange(refreshPodcasts);
+}
 
-	if (operation == "remove") {
-		DiscoverRow* row = _FindRow(tab, uri);
-		if (row) {
-			fLists[tab]->RemoveRow(row);
-			delete row;
-			_ScheduleCacheSave();
-		}
-		if (fLoaded[tab])
-			fLoadTime[tab] = system_time();
-	} else if (operation == "add") {
-		if (!fLoaded[tab] || _FindRow(tab, uri))
-			return;
-		// Resolve just the newly saved object. This preserves the current list,
-		// selection and scroll position instead of rebuilding the whole tab.
-		_ResolveLibraryAddition(tab, uri, generation);
+
+int32
+DiscoverWindow::_LibraryChangeTabForUri(const std::string& uri) const
+{
+	switch (SpotifyItemKindForUri(uri)) {
+		case kSpotifyItemAlbum:
+			return TAB_SAVED_ALBUMS;
+		case kSpotifyItemShow:
+			return TAB_PODCASTS;
+		case kSpotifyItemArtist:
+			return TAB_FOLLOWED_ARTISTS;
+		case kSpotifyItemEpisode:
+			return TAB_SAVED_EPISODES;
+		case kSpotifyItemAudiobook:
+			return TAB_AUDIOBOOKS;
+		default:
+			return -1;
 	}
+}
+
+
+void
+DiscoverWindow::_UpdateAudiobookIdsForLibraryChange(
+	const std::string& operation, const std::string& uri, bool& refreshPodcasts)
+{
+	std::string id = SpotifyItemIdForUri(uri);
+	if (id.empty())
+		return;
+	fAudiobookIdsKnown = true;
+	if (operation == "add") {
+		fAudiobookIds.insert(id);
+		_RemoveAudiobookDuplicatesFromPodcasts();
+	} else if (operation == "remove") {
+		refreshPodcasts = fAudiobookIds.erase(id) > 0;
+	}
+	_ScheduleCacheSave();
+}
+
+
+void
+DiscoverWindow::_ApplyLibraryRemoval(int32 tab, const std::string& uri)
+{
+	DiscoverRow* row = _FindRow(tab, uri);
+	if (row) {
+		fLists[tab]->RemoveRow(row);
+		delete row;
+		_ScheduleCacheSave();
+	}
+	if (fLoaded[tab])
+		fLoadTime[tab] = system_time();
+}
+
+
+void
+DiscoverWindow::_ApplyLibraryAddition(int32 tab, const std::string& uri,
+	int32 generation)
+{
+	if (!fLoaded[tab] || _FindRow(tab, uri))
+		return;
+	// Resolve just the newly saved object. This preserves the current list,
+	// selection and scroll position instead of rebuilding the whole tab.
+	_ResolveLibraryAddition(tab, uri, generation);
+}
+
+
+void
+DiscoverWindow::_RefreshPodcastsAfterLibraryChange(bool refreshPodcasts)
+{
 	if (refreshPodcasts && fLoaded[TAB_PODCASTS]) {
 		_InvalidateTabCache(TAB_PODCASTS);
 		fLoaded[TAB_PODCASTS] = false;
@@ -2599,6 +2776,123 @@ DiscoverWindow::_RemoveAudiobookDuplicatesFromPodcasts()
 		_ScheduleCacheSave();
 }
 
+static bool
+BuildResolvedAlbumRow(const std::string& uri, const nlohmann::json& item,
+	const std::string& name, RowData& row)
+{
+	std::string artist = "Unknown";
+	std::string artistUri;
+	if (item.contains("artists") && item["artists"].is_array()
+			&& !item["artists"].empty() && item["artists"][0].is_object()) {
+		artist = JsonString(item["artists"][0], "name", "Unknown");
+		artistUri = JsonString(item["artists"][0], "uri");
+	}
+	row.vals = {name, artist};
+	row.uris = {uri, artistUri};
+	row.ttls = {name, artist};
+	return true;
+}
+
+static bool
+BuildResolvedPodcastRow(const std::string& uri, const nlohmann::json& item,
+	const std::string& name, RowData& row)
+{
+	row.vals = {name, JsonString(item, "publisher", "Unknown")};
+	row.uris = {uri, ""};
+	row.ttls = {name, ""};
+	return true;
+}
+
+static bool
+BuildResolvedArtistRow(const std::string& uri, const nlohmann::json& item,
+	const std::string& name, RowData& row)
+{
+	std::string genre = "Artist";
+	if (item.contains("genres") && item["genres"].is_array()
+			&& !item["genres"].empty() && item["genres"][0].is_string()) {
+		genre = item["genres"][0].get<std::string>();
+	}
+	row.vals = {name, genre};
+	row.uris = {uri, ""};
+	row.ttls = {name, ""};
+	return true;
+}
+
+static bool
+BuildResolvedEpisodeRow(const std::string& uri, const nlohmann::json& item,
+	const std::string& name, bool showProgress, RowData& row)
+{
+	if (name.empty())
+		return false;
+	std::string showName;
+	std::string showUri;
+	if (item.contains("show") && item["show"].is_object()) {
+		showName = JsonString(item["show"], "name");
+		std::string showId = JsonString(item["show"], "id");
+		showUri = showId.empty() ? JsonString(item["show"], "uri")
+			: SpotifyUriForItemKind(kSpotifyItemShow, showId);
+	}
+	std::string progress;
+	if (showProgress && item.contains("resume_point")
+			&& item["resume_point"].is_object()) {
+		const auto& resume = item["resume_point"];
+		progress = JsonBool(resume, "fully_played")
+			? B_TRANSLATE("Done")
+			: DurationText(JsonInt32(resume, "resume_position_ms"));
+	}
+	row.vals = {name, showName, JsonString(item, "release_date"),
+		DurationText(JsonInt32(item, "duration_ms")), progress};
+	row.uris = {uri, showUri, "", "", ""};
+	row.ttls = {name, showName, "", "", ""};
+	return true;
+}
+
+static bool
+BuildResolvedAudiobookRow(const std::string& uri, const nlohmann::json& item,
+	const std::string& name, RowData& row)
+{
+	std::string author;
+	if (item.contains("authors") && item["authors"].is_array()
+			&& !item["authors"].empty() && item["authors"][0].is_object()) {
+		author = JsonString(item["authors"][0], "name");
+	}
+	row.vals = {name, author};
+	row.uris = {uri, ""};
+	row.ttls = {name, ""};
+	return true;
+}
+
+static bool
+BuildResolvedLibraryRow(int32 tab, const std::string& uri,
+	const nlohmann::json& item, bool showProgress, RowData& row)
+{
+	std::string name = JsonString(item, "name");
+	if (tab != TAB_SAVED_EPISODES && name.empty())
+		name = "Unknown";
+	if (tab == TAB_SAVED_ALBUMS)
+		return BuildResolvedAlbumRow(uri, item, name, row);
+	if (tab == TAB_PODCASTS)
+		return BuildResolvedPodcastRow(uri, item, name, row);
+	if (tab == TAB_FOLLOWED_ARTISTS)
+		return BuildResolvedArtistRow(uri, item, name, row);
+	if (tab == TAB_SAVED_EPISODES)
+		return BuildResolvedEpisodeRow(uri, item, name, showProgress, row);
+	if (tab == TAB_AUDIOBOOKS)
+		return BuildResolvedAudiobookRow(uri, item, name, row);
+	return false;
+}
+
+static void
+AddResolvedLibraryRowToMessage(BMessage& result, const RowData& row)
+{
+	for (const std::string& value : row.vals)
+		result.AddString("v", value.c_str());
+	for (const std::string& value : row.uris)
+		result.AddString("u", value.c_str());
+	for (const std::string& value : row.ttls)
+		result.AddString("t", value.c_str());
+}
+
 
 void
 DiscoverWindow::_ResolveLibraryAddition(int32 tab, const std::string& uri,
@@ -2629,86 +2923,11 @@ DiscoverWindow::_ResolveLibraryAddition(int32 tab, const std::string& uri,
 			return;
 		}
 
-		std::vector<std::string> values;
-		std::vector<std::string> uris;
-		std::vector<std::string> titles;
-		std::string name = JsonString(item, "name");
-		if (name.empty() && tab == TAB_SAVED_EPISODES) {
+		RowData row;
+		if (!BuildResolvedLibraryRow(tab, uri, item, showProgress, row))
 			result.ReplaceBool("ok", false);
-			self.SendMessage(&result);
-			return;
-		}
-		if (name.empty())
-			name = "Unknown";
-		if (tab == TAB_SAVED_ALBUMS) {
-			std::string artist = "Unknown";
-			std::string artistUri;
-			if (item.contains("artists") && item["artists"].is_array()
-					&& !item["artists"].empty()
-					&& item["artists"][0].is_object()) {
-				artist = JsonString(item["artists"][0], "name", "Unknown");
-				artistUri = JsonString(item["artists"][0], "uri");
-			}
-			values = {name, artist};
-			uris = {uri, artistUri};
-			titles = {name, artist};
-		} else if (tab == TAB_PODCASTS) {
-			values = {name, JsonString(item, "publisher", "Unknown")};
-			uris = {uri, ""};
-			titles = {name, ""};
-		} else if (tab == TAB_FOLLOWED_ARTISTS) {
-			std::string genre = "Artist";
-			if (item.contains("genres") && item["genres"].is_array()
-					&& !item["genres"].empty()
-					&& item["genres"][0].is_string()) {
-				genre = item["genres"][0].get<std::string>();
-			}
-			values = {name, genre};
-			uris = {uri, ""};
-			titles = {name, ""};
-		} else if (tab == TAB_SAVED_EPISODES) {
-			std::string showName;
-			std::string showUri;
-			if (item.contains("show") && item["show"].is_object()) {
-				showName = JsonString(item["show"], "name");
-				std::string showId = JsonString(item["show"], "id");
-				showUri = showId.empty() ? JsonString(item["show"], "uri")
-					: SpotifyUriForItemKind(kSpotifyItemShow, showId);
-			}
-			std::string progress;
-			if (showProgress && item.contains("resume_point")
-					&& item["resume_point"].is_object()) {
-				const auto& resume = item["resume_point"];
-				progress = JsonBool(resume, "fully_played")
-					? B_TRANSLATE("Done")
-					: DurationText(JsonInt32(resume, "resume_position_ms"));
-			}
-			values = {name, showName, JsonString(item, "release_date"),
-				DurationText(JsonInt32(item, "duration_ms")), progress};
-			uris = {uri, showUri, "", "", ""};
-			titles = {name, showName, "", "", ""};
-		} else if (tab == TAB_AUDIOBOOKS) {
-			std::string author;
-			if (item.contains("authors") && item["authors"].is_array()
-					&& !item["authors"].empty()
-					&& item["authors"][0].is_object()) {
-				author = JsonString(item["authors"][0], "name");
-			}
-			values = {name, author};
-			uris = {uri, ""};
-			titles = {name, ""};
-		}
-
-		if (values.empty()) {
-			result.ReplaceBool("ok", false);
-		} else {
-			for (const std::string& value : values)
-				result.AddString("v", value.c_str());
-			for (const std::string& value : uris)
-				result.AddString("u", value.c_str());
-			for (const std::string& value : titles)
-				result.AddString("t", value.c_str());
-		}
+		else
+			AddResolvedLibraryRowToMessage(result, row);
 		self.SendMessage(&result);
 	};
 
@@ -2733,11 +2952,8 @@ DiscoverWindow::_ApplyResolvedLibraryAddition(BMessage* message)
 	int32 tab = message->GetInt32("tab", -1);
 	int32 generation = message->GetInt32("generation", -1);
 	std::string uri = message->GetString("uri", "");
-	if (tab < 0 || tab >= TAB_COUNT || !fLists[tab] || !fLoaded[tab]
-			|| fLibraryChangeGenerations[uri] != generation
-			|| _FindRow(tab, uri)) {
+	if (!_CanApplyResolvedLibraryAddition(tab, uri, generation))
 		return;
-	}
 
 	std::vector<std::string> values;
 	std::vector<std::string> uris;
@@ -2754,18 +2970,36 @@ DiscoverWindow::_ApplyResolvedLibraryAddition(BMessage* message)
 		return;
 	}
 
-	// Remove an empty-state row (for example "No followed artists") before
-	// inserting the real object at the top without disturbing existing rows.
-	for (int32 i = fLists[tab]->CountRows() - 1; i >= 0; i--) {
-		DiscoverRow* row = dynamic_cast<DiscoverRow*>(fLists[tab]->RowAt(i));
-		if (row && (row->fUris.empty() || row->fUris[0].empty())) {
-			fLists[tab]->RemoveRow(row);
-			delete row;
-		}
-	}
+	_RemoveEmptyRows(tab);
 	fLists[tab]->AddRow(new DiscoverRow(values, uris, titles), 0);
 	fLoadTime[tab] = system_time();
 	_ScheduleCacheSave();
+}
+
+
+bool
+DiscoverWindow::_CanApplyResolvedLibraryAddition(int32 logicalTab,
+	const std::string& uri, int32 generation) const
+{
+	return logicalTab >= 0 && logicalTab < TAB_COUNT && fLists[logicalTab]
+		&& fLoaded[logicalTab]
+		&& fLibraryChangeGenerations.find(uri) != fLibraryChangeGenerations.end()
+		&& fLibraryChangeGenerations.at(uri) == generation
+		&& !_FindRow(logicalTab, uri);
+}
+
+
+void
+DiscoverWindow::_RemoveEmptyRows(int32 logicalTab)
+{
+	for (int32 i = fLists[logicalTab]->CountRows() - 1; i >= 0; i--) {
+		DiscoverRow* row = dynamic_cast<DiscoverRow*>(
+			fLists[logicalTab]->RowAt(i));
+		if (row && (row->fUris.empty() || row->fUris[0].empty())) {
+			fLists[logicalTab]->RemoveRow(row);
+			delete row;
+		}
+	}
 }
 
 
@@ -2820,11 +3054,7 @@ DiscoverWindow::_ApplyPlaylistChange(BMessage* message)
 
 	DiscoverRow* row = _FindPlaylistRow(uri);
 	if (operation == "remove") {
-		if (row) {
-			fLists[TAB_PLAYLISTS]->RemoveRow(row);
-			delete row;
-			_ScheduleCacheSave();
-		}
+		_RemovePlaylistRow(row);
 		return;
 	}
 
@@ -2833,16 +3063,43 @@ DiscoverWindow::_ApplyPlaylistChange(BMessage* message)
 	bool writable = message->GetBool("writable", true);
 	bool owned = message->GetBool("owned", row ? row->fOwned : false);
 	if (operation == "rename") {
-		if (row) {
-			_UpdatePlaylistRow(row, name, "", row->fWritable, row->fOwned);
-			_ScheduleCacheSave();
-		} else
+		if (row)
+			_RenamePlaylistRow(row, name);
+		else
 			ReloadPlaylists();
 		return;
 	}
 	if (operation != "add" || name.empty())
 		return;
 
+	_AddOrUpdatePlaylistRow(row, uri, name, owner, writable, owned);
+}
+
+
+void
+DiscoverWindow::_RemovePlaylistRow(DiscoverRow* row)
+{
+	if (!row)
+		return;
+	fLists[TAB_PLAYLISTS]->RemoveRow(row);
+	delete row;
+	_ScheduleCacheSave();
+}
+
+
+void
+DiscoverWindow::_RenamePlaylistRow(DiscoverRow* row, const std::string& name)
+{
+	_UpdatePlaylistRow(row, name, "", row->fWritable, row->fOwned);
+	_ScheduleCacheSave();
+}
+
+
+void
+DiscoverWindow::_AddOrUpdatePlaylistRow(DiscoverRow* row,
+	const std::string& uri, const std::string& name,
+	const std::string& owner, bool writable, bool owned)
+{
 	if (row) {
 		_UpdatePlaylistRow(row, name, owner, writable, owned);
 		_ScheduleCacheSave();
@@ -2861,48 +3118,75 @@ DiscoverWindow::_ApplyPlaylistChange(BMessage* message)
 void
 DiscoverWindow::_ApplyPlaylistSnapshot(BMessage* message)
 {
-	if (!message || !fLists[TAB_PLAYLISTS] || !fLoaded[TAB_PLAYLISTS])
-		return;
-	int32 generation = -1;
-	if (message->FindInt32("generation", &generation) != B_OK
-			|| generation != fPlaylistSyncGeneration)
+	if (!_CanApplyPlaylistSnapshot(message))
 		return;
 
 	std::set<std::string> serverUris;
 	for (int32 i = 0;; i++) {
-		const char* uri = nullptr;
-		if (message->FindString("uri", i, &uri) != B_OK)
+		if (!_ApplyPlaylistSnapshotItem(message, i, serverUris))
 			break;
-		const char* name = "Unknown";
-		const char* owner = "Spotify";
-		message->FindString("name", i, &name);
-		message->FindString("owner", i, &owner);
-		bool writable = true;
-		message->FindBool("writable", i, &writable);
-		bool owned = false;
-		message->FindBool("owned", i, &owned);
-
-		std::string playlistUri = uri ? uri : "";
-		if (playlistUri.empty())
-			continue;
-		std::string id = SpotifyItemKindForUri(playlistUri)
-			== kSpotifyItemPlaylist
-			? SpotifyItemIdForUri(playlistUri) : "";
-		serverUris.insert(playlistUri);
-		if (!id.empty() && fPendingPlaylistRemovals.find(id)
-				!= fPendingPlaylistRemovals.end())
-			continue;
-
-		DiscoverRow* row = _FindPlaylistRow(playlistUri);
-		if (row) {
-			_UpdatePlaylistRow(row, name, owner, writable, owned);
-		} else {
-			fLists[TAB_PLAYLISTS]->AddRow(new DiscoverRow(
-				{name, owner}, {playlistUri, ""}, {name, ""}, writable,
-				owned));
-		}
 	}
 
+	_RemoveMissingPlaylistSnapshotRows(serverUris);
+	fLoadTime[TAB_PLAYLISTS] = system_time();
+	fFreshSnapshot[TAB_PLAYLISTS] = true;
+	fCacheBacked[TAB_PLAYLISTS] = false;
+	_ScheduleCacheSave();
+}
+
+
+bool
+DiscoverWindow::_CanApplyPlaylistSnapshot(BMessage* message) const
+{
+	if (!message || !fLists[TAB_PLAYLISTS] || !fLoaded[TAB_PLAYLISTS])
+		return false;
+	int32 generation = -1;
+	return message->FindInt32("generation", &generation) == B_OK
+		&& generation == fPlaylistSyncGeneration;
+}
+
+
+bool
+DiscoverWindow::_ApplyPlaylistSnapshotItem(BMessage* message, int32 index,
+	std::set<std::string>& serverUris)
+{
+	const char* uri = nullptr;
+	if (message->FindString("uri", index, &uri) != B_OK)
+		return false;
+	const char* name = "Unknown";
+	const char* owner = "Spotify";
+	message->FindString("name", index, &name);
+	message->FindString("owner", index, &owner);
+	bool writable = true;
+	message->FindBool("writable", index, &writable);
+	bool owned = false;
+	message->FindBool("owned", index, &owned);
+
+	std::string playlistUri = uri ? uri : "";
+	if (playlistUri.empty())
+		return true;
+	std::string id = SpotifyItemKindForUri(playlistUri)
+		== kSpotifyItemPlaylist ? SpotifyItemIdForUri(playlistUri) : "";
+	serverUris.insert(playlistUri);
+	if (!id.empty() && fPendingPlaylistRemovals.find(id)
+			!= fPendingPlaylistRemovals.end())
+		return true;
+
+	DiscoverRow* row = _FindPlaylistRow(playlistUri);
+	if (row) {
+		_UpdatePlaylistRow(row, name, owner, writable, owned);
+	} else {
+		fLists[TAB_PLAYLISTS]->AddRow(new DiscoverRow(
+			{name, owner}, {playlistUri, ""}, {name, ""}, writable, owned));
+	}
+	return true;
+}
+
+
+void
+DiscoverWindow::_RemoveMissingPlaylistSnapshotRows(
+	const std::set<std::string>& serverUris)
+{
 	for (int32 i = fLists[TAB_PLAYLISTS]->CountRows() - 1; i >= 0; i--) {
 		DiscoverRow* row = dynamic_cast<DiscoverRow*>(
 			fLists[TAB_PLAYLISTS]->RowAt(i));
@@ -2914,10 +3198,6 @@ DiscoverWindow::_ApplyPlaylistSnapshot(BMessage* message)
 			delete row;
 		}
 	}
-	fLoadTime[TAB_PLAYLISTS] = system_time();
-	fFreshSnapshot[TAB_PLAYLISTS] = true;
-	fCacheBacked[TAB_PLAYLISTS] = false;
-	_ScheduleCacheSave();
 }
 
 
@@ -3020,393 +3300,575 @@ DiscoverWindow::_CheckLazyLoad()
 }
 
 
-void
-DiscoverWindow::_LoadTab(int32 tab, bool nextPage)
+static RowData
+TrackLikeDiscoverRow(const nlohmann::json& item)
+{
+	std::string name = item.value("name", "Unknown");
+	std::string artist = "Unknown";
+	std::string artistUri;
+	if (item.contains("artists") && item["artists"].is_array()
+			&& !item["artists"].empty()) {
+		artist = item["artists"][0].value("name", "Unknown");
+		artistUri = item["artists"][0].value("uri", "");
+	}
+	return {{name, artist}, {item.value("uri", ""), artistUri},
+		{name, artist}};
+}
+
+static std::vector<RowData>
+TopTrackRows(const nlohmann::json& data)
+{
+	std::vector<RowData> rows;
+	if (!data.contains("items"))
+		return rows;
+	for (const auto& item : data["items"]) {
+		if (item.is_object())
+			rows.push_back(TrackLikeDiscoverRow(item));
+	}
+	return rows;
+}
+
+static std::vector<RowData>
+TopArtistRows(const nlohmann::json& data)
+{
+	std::vector<RowData> rows;
+	if (!data.contains("items"))
+		return rows;
+	for (const auto& item : data["items"]) {
+		if (!item.is_object())
+			continue;
+		std::string name = item.value("name", "Unknown");
+		std::string genre = "Artist";
+		if (item.contains("genres") && item["genres"].is_array()
+				&& !item["genres"].empty())
+			genre = item["genres"][0].get<std::string>();
+		rows.push_back({{name, genre}, {item.value("uri", ""), ""},
+			{name, ""}});
+	}
+	return rows;
+}
+
+static std::vector<RowData>
+NewReleaseRows(const nlohmann::json& data)
+{
+	std::vector<RowData> rows;
+	if (!data.contains("albums") || !data["albums"].contains("items"))
+		return rows;
+	for (const auto& item : data["albums"]["items"]) {
+		if (item.is_object())
+			rows.push_back(TrackLikeDiscoverRow(item));
+	}
+	return rows;
+}
+
+static std::vector<RowData>
+SavedAlbumRows(const nlohmann::json& data)
+{
+	std::vector<RowData> rows;
+	if (!data.contains("items"))
+		return rows;
+	for (const auto& item : data["items"]) {
+		if (item.contains("album") && item["album"].is_object())
+			rows.push_back(TrackLikeDiscoverRow(item["album"]));
+	}
+	return rows;
+}
+
+static void
+SendDiscoverTabRows(BMessenger messenger, int32 tab, bool snapshot,
+	int32 loadGeneration, const std::vector<RowData>& rows)
+{
+	BMessage* msg = new BMessage('uRow');
+	msg->AddInt32("tab", tab);
+	msg->AddInt32("load_generation", loadGeneration);
+	msg->AddInt32("cols", rows.empty()
+		? (int32)kTabCols[tab].size() : (int32)rows[0].vals.size());
+	msg->AddBool("snapshot", snapshot);
+	for (const RowData& row : rows) {
+		for (const std::string& value : row.vals)
+			msg->AddString("v", value.c_str());
+		for (const std::string& uri : row.uris)
+			msg->AddString("u", uri.c_str());
+		for (const std::string& title : row.ttls)
+			msg->AddString("t", title.c_str());
+		msg->AddBool("writable", row.writable);
+		msg->AddBool("owned", row.owned);
+	}
+	messenger.SendMessage(msg);
+	delete msg;
+}
+
+static void
+SendDiscoverPageDone(BMessenger messenger, int32 tab, int32 loadGeneration,
+	const std::string& nextCursor, bool hasMore)
+{
+	BMessage done(kMsgPageDone);
+	done.AddInt32("tab", tab);
+	done.AddInt32("load_generation", loadGeneration);
+	if (!nextCursor.empty())
+		done.AddString("next_cursor", nextCursor.c_str());
+	done.AddBool("has_more", hasMore);
+	messenger.SendMessage(&done);
+}
+
+static std::set<std::string>
+AudiobookIdsFromResponse(bool ok, const nlohmann::json& books,
+	const std::set<std::string>& fallback, bool& freshIds)
+{
+	freshIds = ok && books.is_array();
+	if (!freshIds)
+		return fallback;
+	std::set<std::string> audiobookIds;
+	for (const auto& book : books) {
+		if (!book.is_object() || JsonString(book, "type") != "audiobook")
+			continue;
+		std::string id = JsonString(book, "id");
+		if (id.empty())
+			id = SpotifyItemIdForUri(JsonString(book, "uri"));
+		if (!id.empty())
+			audiobookIds.insert(id);
+	}
+	return audiobookIds;
+}
+
+static void
+SendAudiobookIdsSnapshot(BMessenger messenger, int32 loadGeneration,
+	const std::set<std::string>& audiobookIds)
+{
+	BMessage ids(kMsgAudiobookIdsUpdated);
+	ids.AddInt32("load_generation", loadGeneration);
+	for (const std::string& id : audiobookIds)
+		ids.AddString("audiobook_id", id.c_str());
+	messenger.SendMessage(&ids);
+}
+
+static std::vector<RowData>
+PodcastRows(const nlohmann::json& data,
+	const std::set<std::string>& audiobookIds)
+{
+	std::vector<RowData> rows;
+	if (!data.contains("items") || !data["items"].is_array())
+		return rows;
+	for (const auto& item : data["items"]) {
+		if (!item.is_object() || !item.contains("show")
+				|| !item["show"].is_object())
+			continue;
+		const auto& show = item["show"];
+		std::string id = JsonString(show, "id");
+		std::string uri = JsonString(show, "uri");
+		if (id.empty())
+			id = SpotifyItemIdForUri(uri);
+		if (JsonString(show, "type") != "show"
+				|| !PrimaryUriMatchesTab(TAB_PODCASTS, uri)
+				|| SpotifyEffectiveItemKind(kSpotifyItemShow, id,
+					audiobookIds) == kSpotifyItemAudiobook) {
+			continue;
+		}
+		std::string name = show.value("name", "Unknown");
+		std::string publisher = show.value("publisher", "Unknown");
+		rows.push_back({{name, publisher}, {uri, ""}, {name, ""}});
+	}
+	return rows;
+}
+
+static std::string
+FollowedArtistsNextCursor(const nlohmann::json& data)
+{
+	if (!data.contains("artists") || !data["artists"].is_object()
+			|| !data["artists"].contains("cursors")
+			|| !data["artists"]["cursors"].is_object()) {
+		return "";
+	}
+	const auto& cursors = data["artists"]["cursors"];
+	if (cursors.contains("after") && cursors["after"].is_string())
+		return cursors["after"].get<std::string>();
+	return "";
+}
+
+static std::vector<RowData>
+FollowedArtistRows(const nlohmann::json& data)
+{
+	std::vector<RowData> rows;
+	if (!data.contains("artists") || !data["artists"].is_object()
+			|| !data["artists"].contains("items")
+			|| !data["artists"]["items"].is_array())
+		return rows;
+	for (const auto& item : data["artists"]["items"]) {
+		if (!item.is_object())
+			continue;
+		std::string name = item.contains("name") && item["name"].is_string()
+			? item["name"].get<std::string>() : "Unknown";
+		std::string uri = item.contains("uri") && item["uri"].is_string()
+			? item["uri"].get<std::string>() : "";
+		std::string genre = "Artist";
+		if (item.contains("genres") && item["genres"].is_array()
+				&& !item["genres"].empty() && item["genres"][0].is_string())
+			genre = item["genres"][0].get<std::string>();
+		rows.push_back({{name, genre}, {uri, ""}, {name, ""}});
+	}
+	return rows;
+}
+
+static bool
+HasFollowedArtistsItems(const nlohmann::json& data)
+{
+	return data.contains("artists") && data["artists"].is_object()
+		&& data["artists"].contains("items")
+		&& data["artists"]["items"].is_array();
+}
+
+static void
+HandleFollowedArtistsResponse(bool ok, const nlohmann::json& data,
+	BMessenger messenger, bool snapshot, int32 loadGeneration)
+{
+	if (!ok) {
+		if (SpotifyResponseStatus(data) == 403) {
+			SendDiscoverTabRows(messenger, TAB_FOLLOWED_ARTISTS, snapshot,
+				loadGeneration,
+				{{{B_TRANSLATE("Permission to read followed artists is missing"),
+					B_TRANSLATE("Reconnect Spotify in Settings")},
+					{"", ""}, {"", ""}}});
+		}
+		SendDiscoverPageDone(messenger, TAB_FOLLOWED_ARTISTS, loadGeneration,
+			"", false);
+		return;
+	}
+	if (!HasFollowedArtistsItems(data)) {
+		SendDiscoverPageDone(messenger, TAB_FOLLOWED_ARTISTS, loadGeneration,
+			"", false);
+		return;
+	}
+	std::vector<RowData> rows = FollowedArtistRows(data);
+	SendDiscoverTabRows(messenger, TAB_FOLLOWED_ARTISTS, snapshot,
+		loadGeneration, rows);
+	std::string next = FollowedArtistsNextCursor(data);
+	if (next.empty() && rows.empty()) {
+		SendDiscoverTabRows(messenger, TAB_FOLLOWED_ARTISTS, snapshot,
+			loadGeneration, {{{B_TRANSLATE("No followed artists"), ""},
+				{"", ""}, {"", ""}}});
+	}
+	SendDiscoverPageDone(messenger, TAB_FOLLOWED_ARTISTS, loadGeneration, next,
+		!next.empty());
+}
+
+static RowData
+SavedEpisodeRow(const nlohmann::json& episode, bool showProgress)
+{
+	std::string showName;
+	std::string showUri;
+	if (episode.contains("show") && episode["show"].is_object()) {
+		showName = JsonString(episode["show"], "name");
+		std::string showId = JsonString(episode["show"], "id");
+		showUri = !showId.empty()
+			? SpotifyUriForItemKind(kSpotifyItemShow, showId)
+			: JsonString(episode["show"], "uri");
+	}
+	std::string episodeId = JsonString(episode, "id");
+	std::string episodeUri = !episodeId.empty()
+		? SpotifyUriForItemKind(kSpotifyItemEpisode, episodeId)
+		: JsonString(episode, "uri");
+	std::string episodeName = JsonString(episode, "name");
+	std::string progress;
+	if (showProgress && episode.contains("resume_point")
+			&& episode["resume_point"].is_object()) {
+		const auto& resume = episode["resume_point"];
+		progress = JsonBool(resume, "fully_played")
+			? B_TRANSLATE("Done")
+			: DurationText(JsonInt32(resume, "resume_position_ms"));
+	}
+	return {{episodeName, showName, JsonString(episode, "release_date"),
+		DurationText(JsonInt32(episode, "duration_ms")), progress},
+		{episodeUri, showUri, "", "", ""},
+		{episodeName, showName, "", "", ""}};
+}
+
+static std::vector<RowData>
+SavedEpisodeRows(const nlohmann::json& data, bool showProgress)
+{
+	std::vector<RowData> rows;
+	if (!data.contains("items") || !data["items"].is_array())
+		return rows;
+	for (const auto& saved : data["items"]) {
+		if (!saved.is_object() || !saved.contains("episode")
+				|| !saved["episode"].is_object())
+			continue;
+		const auto& episode = saved["episode"];
+		if (JsonString(episode, "type") != "episode")
+			continue;
+		RowData row = SavedEpisodeRow(episode, showProgress);
+		if (!row.vals[0].empty()
+				&& PrimaryUriMatchesTab(TAB_SAVED_EPISODES, row.uris[0]))
+			rows.push_back(std::move(row));
+	}
+	return rows;
+}
+
+static void
+HandleSavedEpisodesResponse(bool ok, const nlohmann::json& data,
+	BMessenger messenger, int32 offset, bool showProgress, bool snapshot,
+	int32 loadGeneration)
+{
+	if (!ok || !data.is_object() || !data.contains("items")
+			|| !data["items"].is_array()) {
+		SendDiscoverPageDone(messenger, TAB_SAVED_EPISODES, loadGeneration, "",
+			false);
+		return;
+	}
+	std::vector<RowData> rows = SavedEpisodeRows(data, showProgress);
+	SendDiscoverTabRows(messenger, TAB_SAVED_EPISODES, snapshot,
+		loadGeneration, rows);
+	int32 count = ok && data.contains("items") && data["items"].is_array()
+		? (int32)data["items"].size() : 0;
+	int32 total = ok ? JsonInt32(data, "total", offset + count)
+		: offset + count;
+	SendDiscoverPageDone(messenger, TAB_SAVED_EPISODES, loadGeneration, "",
+		ok && count > 0 && offset + count < total);
+}
+
+static std::vector<RowData>
+AudiobookRows(const nlohmann::json& data)
+{
+	std::vector<RowData> rows;
+	if (!data.contains("items") || !data["items"].is_array())
+		return rows;
+	for (const auto& book : data["items"]) {
+		if (!book.is_object() || JsonString(book, "type") != "audiobook")
+			continue;
+		std::string id = JsonString(book, "id");
+		std::string uri = !id.empty()
+			? SpotifyUriForItemKind(kSpotifyItemAudiobook, id)
+			: JsonString(book, "uri");
+		if (!PrimaryUriMatchesTab(TAB_AUDIOBOOKS, uri))
+			continue;
+		std::string author;
+		if (book.contains("authors") && book["authors"].is_array()
+				&& !book["authors"].empty()
+				&& book["authors"][0].is_object())
+			author = JsonString(book["authors"][0], "name");
+		std::string name = JsonString(book, "name", "Unknown");
+		rows.push_back({{name, author}, {uri, ""}, {name, ""}});
+	}
+	return rows;
+}
+
+static void
+HandleAudiobooksResponse(bool ok, const nlohmann::json& data,
+	BMessenger messenger, int32 offset, bool snapshot, int32 loadGeneration)
+{
+	if (!ok || !data.is_object() || !data.contains("items")
+			|| !data["items"].is_array()) {
+		SendDiscoverPageDone(messenger, TAB_AUDIOBOOKS, loadGeneration, "",
+			false);
+		return;
+	}
+	std::vector<RowData> rows = AudiobookRows(data);
+	SendDiscoverTabRows(messenger, TAB_AUDIOBOOKS, snapshot, loadGeneration,
+		rows);
+	int32 count = ok && data.contains("items") && data["items"].is_array()
+		? (int32)data["items"].size() : 0;
+	int32 total = ok ? JsonInt32(data, "total", offset + count)
+		: offset + count;
+	SendDiscoverPageDone(messenger, TAB_AUDIOBOOKS, loadGeneration, "",
+		ok && count > 0 && offset + count < total);
+}
+
+bool
+DiscoverWindow::_CanLoadTab(int32 tab, bool nextPage, SpotifyApi*& api) const
 {
 	if (tab < 0 || tab >= TAB_COUNT || !_IsTabEffectivelyVisible(tab)
 			|| !fLists[tab])
-		return;
-
+		return false;
 	App* app = (App*)be_app;
-	SpotifyApi* api = app->GetApi();
-	if (!api) return;
+	api = app ? app->GetApi() : nullptr;
+	if (!api)
+		return false;
+	bool paged = tab == TAB_FOLLOWED_ARTISTS
+		|| tab == TAB_SAVED_EPISODES || tab == TAB_AUDIOBOOKS;
+	return !nextPage || (paged && !fPageLoading[tab] && fPageHasMore[tab]);
+}
 
-	if (nextPage && (tab != TAB_FOLLOWED_ARTISTS
-			&& tab != TAB_SAVED_EPISODES && tab != TAB_AUDIOBOOKS))
+
+void
+DiscoverWindow::_PrepareLoadTab(int32 tab, bool nextPage)
+{
+	if (nextPage)
 		return;
-	if (nextPage && (fPageLoading[tab] || !fPageHasMore[tab]))
-		return;
-	if (!nextPage) {
-		fTabLoadGeneration[tab]++;
-		fLoaded[tab] = true;
-		fLoadTime[tab] = system_time();
-		fPageLoading[tab] = false;
-		fPageHasMore[tab] = true;
-		fPageOffset[tab] = 0;
-		fPageCursor[tab].clear();
-	}
+	fTabLoadGeneration[tab]++;
+	fLoaded[tab] = true;
+	fLoadTime[tab] = system_time();
+	fPageLoading[tab] = false;
+	fPageHasMore[tab] = true;
+	fPageOffset[tab] = 0;
+	fPageCursor[tab].clear();
+}
 
-	BMessenger messenger(this);
 
-	int32 loadGeneration = fTabLoadGeneration[tab];
-	bool snapshot = !nextPage && tab != TAB_PLAYLISTS;
-	auto send = [messenger, tab, snapshot, loadGeneration](
-			const std::vector<RowData>& rows) {
-		BMessage* msg = new BMessage('uRow');
-		msg->AddInt32("tab",  tab);
-		msg->AddInt32("load_generation", loadGeneration);
-		msg->AddInt32("cols", rows.empty()
-			? (int32)kTabCols[tab].size() : (int32)rows[0].vals.size());
-		msg->AddBool("snapshot", snapshot);
-		for (const auto& row : rows) {
-			for (const auto& v : row.vals) msg->AddString("v", v.c_str());
-			for (const auto& u : row.uris) msg->AddString("u", u.c_str());
-			for (const auto& t : row.ttls) msg->AddString("t", t.c_str());
-			msg->AddBool("writable", row.writable);
-			msg->AddBool("owned", row.owned);
-		}
-		messenger.SendMessage(msg);
-		delete msg;
+void
+DiscoverWindow::_LoadPlaylistsTab(SpotifyApi*, const BMessenger& messenger,
+	bool snapshot, int32 loadGeneration)
+{
+	SendDiscoverTabRows(messenger, TAB_PLAYLISTS, snapshot, loadGeneration,
+		{{{ B_TRANSLATE("Liked Songs"), "Spotify"},
+		{"spotify:collection", ""},
+		{B_TRANSLATE("Liked Songs"), ""}, true, true}});
+	ReloadPlaylists();
+}
+
+
+void
+DiscoverWindow::_LoadTopTracksTab(SpotifyApi* api, const BMessenger& messenger,
+	bool snapshot, int32 loadGeneration)
+{
+	api->Content().GetTopItems("tracks", 20,
+		[messenger, snapshot, loadGeneration](bool ok,
+				const nlohmann::json& data) {
+		if (ok)
+			SendDiscoverTabRows(messenger, TAB_TOP_TRACKS, snapshot,
+				loadGeneration, TopTrackRows(data));
+	});
+}
+
+
+void
+DiscoverWindow::_LoadTopArtistsTab(SpotifyApi* api, const BMessenger& messenger,
+	bool snapshot, int32 loadGeneration)
+{
+	api->Content().GetTopItems("artists", 20,
+		[messenger, snapshot, loadGeneration](bool ok,
+				const nlohmann::json& data) {
+		if (ok)
+			SendDiscoverTabRows(messenger, TAB_TOP_ARTISTS, snapshot,
+				loadGeneration, TopArtistRows(data));
+	});
+}
+
+
+void
+DiscoverWindow::_LoadNewReleasesTab(SpotifyApi* api,
+	const BMessenger& messenger, bool snapshot, int32 loadGeneration)
+{
+	api->Content().GetNewReleases(20,
+		[messenger, snapshot, loadGeneration](bool ok,
+				const nlohmann::json& data) {
+		if (ok)
+			SendDiscoverTabRows(messenger, TAB_NEW_RELEASES, snapshot,
+				loadGeneration, NewReleaseRows(data));
+	});
+}
+
+
+void
+DiscoverWindow::_LoadSavedAlbumsTab(SpotifyApi* api,
+	const BMessenger& messenger, bool snapshot, int32 loadGeneration)
+{
+	api->Library().GetSavedAlbums(20,
+		[messenger, snapshot, loadGeneration](bool ok,
+				const nlohmann::json& data) {
+		if (ok)
+			SendDiscoverTabRows(messenger, TAB_SAVED_ALBUMS, snapshot,
+				loadGeneration, SavedAlbumRows(data));
+	});
+}
+
+
+void
+DiscoverWindow::_LoadPodcastsTab(SpotifyApi* api, const BMessenger& messenger,
+	bool, int32 loadGeneration)
+{
+	std::set<std::string> cachedAudiobookIds = fAudiobookIds;
+	auto loadShows = [api, messenger, loadGeneration](
+			const std::set<std::string>& audiobookIds, bool freshIds) {
+		if (freshIds)
+			SendAudiobookIdsSnapshot(messenger, loadGeneration, audiobookIds);
+		api->Library().GetSavedShows(20,
+			[messenger, audiobookIds, loadGeneration](bool ok,
+					const nlohmann::json& data) {
+			if (ok) {
+				SendDiscoverTabRows(messenger, TAB_PODCASTS, true,
+					loadGeneration, PodcastRows(data, audiobookIds));
+			}
+		});
 	};
+	api->Library().GetAllSavedAudiobooks(
+		[loadShows, cachedAudiobookIds](bool ok, const nlohmann::json& books) {
+		bool freshIds = false;
+		std::set<std::string> audiobookIds = AudiobookIdsFromResponse(ok,
+			books, cachedAudiobookIds, freshIds);
+		loadShows(audiobookIds, freshIds);
+	});
+}
 
-	switch (tab) {
-		case TAB_PLAYLISTS:
-		{
-			send({{{ B_TRANSLATE("Liked Songs"), "Spotify"},
-			       {"spotify:collection", ""},
-			       {B_TRANSLATE("Liked Songs"), ""}, true, true}});
-			ReloadPlaylists();
-			break;
-		}
 
-		case TAB_TOP_TRACKS:
-			api->Content().GetTopItems("tracks", 20, [send](bool ok,
-					const nlohmann::json& data) {
-				if (!ok || !data.contains("items")) return;
-				std::vector<RowData> rows;
-				for (const auto& item : data["items"]) {
-					if (!item.is_object()) continue;
-					std::string name = item.value("name", "Unknown");
-					std::string aName = "Unknown", aUri;
-					if (item.contains("artists") && item["artists"].is_array()
-					        && !item["artists"].empty()) {
-						aName = item["artists"][0].value("name", "Unknown");
-						aUri  = item["artists"][0].value("uri", "");
-					}
-					rows.push_back({{name, aName},
-					                {item.value("uri", ""), aUri},
-					                {name, aName}});
-				}
-				send(rows);
-			});
-			break;
+void
+DiscoverWindow::_LoadFollowedArtistsTab(SpotifyApi* api,
+	const BMessenger& messenger, bool snapshot, int32 loadGeneration)
+{
+	fPageLoading[TAB_FOLLOWED_ARTISTS] = true;
+	std::string after = fPageCursor[TAB_FOLLOWED_ARTISTS];
+	api->Artists().GetFollowedArtists(after, 50,
+		[messenger, snapshot, loadGeneration](bool ok,
+				const nlohmann::json& data) {
+		HandleFollowedArtistsResponse(ok, data, messenger, snapshot,
+			loadGeneration);
+	});
+}
 
-		case TAB_TOP_ARTISTS:
-			api->Content().GetTopItems("artists", 20, [send](bool ok,
-					const nlohmann::json& data) {
-				if (!ok || !data.contains("items")) return;
-				std::vector<RowData> rows;
-				for (const auto& item : data["items"]) {
-					if (!item.is_object()) continue;
-					std::string name = item.value("name", "Unknown");
-					std::string genre = "Artist";
-					if (item.contains("genres") && item["genres"].is_array()
-					        && !item["genres"].empty())
-						genre = item["genres"][0].get<std::string>();
-					rows.push_back({{name, genre},
-					                {item.value("uri", ""), ""},
-					                {name, ""}});
-				}
-				send(rows);
-			});
-			break;
 
-		case TAB_NEW_RELEASES:
-			api->Content().GetNewReleases(20, [send](bool ok,
-					const nlohmann::json& data) {
-				if (!ok || !data.contains("albums")
-				        || !data["albums"].contains("items")) return;
-				std::vector<RowData> rows;
-				for (const auto& item : data["albums"]["items"]) {
-					if (!item.is_object()) continue;
-					std::string name = item.value("name", "Unknown");
-					std::string aName = "Unknown", aUri;
-					if (item.contains("artists") && item["artists"].is_array()
-					        && !item["artists"].empty()) {
-						aName = item["artists"][0].value("name", "Unknown");
-						aUri  = item["artists"][0].value("uri", "");
-					}
-					rows.push_back({{name, aName},
-					                {item.value("uri", ""), aUri},
-					                {name, aName}});
-				}
-				send(rows);
-			});
-			break;
+void
+DiscoverWindow::_LoadSavedEpisodesTab(SpotifyApi* api,
+	const BMessenger& messenger, bool snapshot, int32 loadGeneration)
+{
+	HaifySettings accountSettings = SettingsController::Load();
+	bool showProgress = accountSettings.grantedScopes.find(
+		"user-read-playback-position") != std::string::npos;
+	fPageLoading[TAB_SAVED_EPISODES] = true;
+	int32 offset = fPageOffset[TAB_SAVED_EPISODES];
+	api->Library().GetSavedEpisodes(offset, 50,
+		[messenger, offset, showProgress, snapshot, loadGeneration](bool ok,
+				const nlohmann::json& data) {
+		HandleSavedEpisodesResponse(ok, data, messenger, offset, showProgress,
+			snapshot, loadGeneration);
+	});
+}
 
-		case TAB_SAVED_ALBUMS:
-			api->Library().GetSavedAlbums(20, [send](bool ok,
-					const nlohmann::json& data) {
-				if (!ok || !data.contains("items")) return;
-				std::vector<RowData> rows;
-				for (const auto& item : data["items"]) {
-					if (!item.contains("album") || !item["album"].is_object()) continue;
-					const auto& a = item["album"];
-					std::string name = a.value("name", "Unknown");
-					std::string aName = "Unknown", aUri;
-					if (a.contains("artists") && a["artists"].is_array()
-					        && !a["artists"].empty()) {
-						aName = a["artists"][0].value("name", "Unknown");
-						aUri  = a["artists"][0].value("uri", "");
-					}
-					rows.push_back({{name, aName},
-					                {a.value("uri", ""), aUri},
-					                {name, aName}});
-				}
-				send(rows);
-			});
-			break;
 
-		case TAB_PODCASTS:
-		{
-			std::set<std::string> cachedAudiobookIds = fAudiobookIds;
-			auto loadShows = [api, send, messenger, loadGeneration](
-					const std::set<std::string>& audiobookIds, bool freshIds) {
-				if (freshIds) {
-					BMessage ids(kMsgAudiobookIdsUpdated);
-					ids.AddInt32("load_generation", loadGeneration);
-					for (const std::string& id : audiobookIds)
-						ids.AddString("audiobook_id", id.c_str());
-					messenger.SendMessage(&ids);
-				}
-				api->Library().GetSavedShows(20, [send, audiobookIds](bool ok,
-						const nlohmann::json& data) {
-					if (!ok || !data.contains("items")
-							|| !data["items"].is_array()) return;
-					std::vector<RowData> rows;
-					for (const auto& item : data["items"]) {
-						if (!item.is_object() || !item.contains("show")
-								|| !item["show"].is_object()) continue;
-						const auto& show = item["show"];
-						std::string id = JsonString(show, "id");
-						std::string uri = JsonString(show, "uri");
-						if (id.empty())
-							id = SpotifyItemIdForUri(uri);
-						if (JsonString(show, "type") != "show"
-								|| !PrimaryUriMatchesTab(TAB_PODCASTS, uri)
-								|| SpotifyEffectiveItemKind(kSpotifyItemShow, id,
-									audiobookIds) == kSpotifyItemAudiobook) {
-							continue;
-						}
-						std::string name = show.value("name", "Unknown");
-						std::string publisher = show.value("publisher", "Unknown");
-						rows.push_back({{name, publisher}, {uri, ""}, {name, ""}});
-					}
-					send(rows);
-				});
-			};
-			api->Library().GetAllSavedAudiobooks(
-				[loadShows, cachedAudiobookIds](bool ok,
-						const nlohmann::json& books) {
-				if (!ok || !books.is_array()) {
-					loadShows(cachedAudiobookIds, false);
-					return;
-				}
-				std::set<std::string> audiobookIds;
-				for (const auto& book : books) {
-					if (!book.is_object()
-							|| JsonString(book, "type") != "audiobook") continue;
-					std::string id = JsonString(book, "id");
-					if (id.empty())
-						id = SpotifyItemIdForUri(JsonString(book, "uri"));
-					if (!id.empty())
-						audiobookIds.insert(id);
-				}
-				loadShows(audiobookIds, true);
-			});
-			break;
-		}
+void
+DiscoverWindow::_LoadAudiobooksTab(SpotifyApi* api, const BMessenger& messenger,
+	bool snapshot, int32 loadGeneration)
+{
+	fPageLoading[TAB_AUDIOBOOKS] = true;
+	int32 offset = fPageOffset[TAB_AUDIOBOOKS];
+	api->Library().GetSavedAudiobooks(offset, 50,
+		[messenger, offset, snapshot, loadGeneration](bool ok,
+				const nlohmann::json& data) {
+		HandleAudiobooksResponse(ok, data, messenger, offset, snapshot,
+			loadGeneration);
+	});
+}
 
-		case TAB_FOLLOWED_ARTISTS:
-		{
-			fPageLoading[tab] = true;
-			std::string after = fPageCursor[tab];
-			api->Artists().GetFollowedArtists(after, 50,
-				[send, messenger, loadGeneration](bool ok,
-						const nlohmann::json& data) {
-					BMessage done(kMsgPageDone);
-					done.AddInt32("tab", TAB_FOLLOWED_ARTISTS);
-					done.AddInt32("load_generation", loadGeneration);
-					if (!ok) {
-						if (SpotifyResponseStatus(data) == 403)
-							send({{{B_TRANSLATE("Permission to read followed artists is missing"),
-								B_TRANSLATE("Reconnect Spotify in Settings")},
-								{"", ""}, {"", ""}}});
-						done.AddBool("has_more", false);
-						messenger.SendMessage(&done);
-						return;
-					}
-					if (!data.contains("artists")
-							|| !data["artists"].is_object()
-							|| !data["artists"].contains("items")
-							|| !data["artists"]["items"].is_array()) {
-						done.AddBool("has_more", false);
-						messenger.SendMessage(&done);
-						return;
-					}
-					std::vector<RowData> rows;
-					for (const auto& item : data["artists"]["items"]) {
-						if (!item.is_object()) continue;
-						std::string name = item.contains("name")
-							&& item["name"].is_string()
-							? item["name"].get<std::string>() : "Unknown";
-						std::string uri = item.contains("uri")
-							&& item["uri"].is_string()
-							? item["uri"].get<std::string>() : "";
-						std::string genre = "Artist";
-						if (item.contains("genres") && item["genres"].is_array()
-								&& !item["genres"].empty()
-								&& item["genres"][0].is_string())
-							genre = item["genres"][0].get<std::string>();
-						rows.push_back({{name, genre}, {uri, ""}, {name, ""}});
-					}
-					send(rows);
-					std::string next;
-					if (data["artists"].contains("cursors")
-							&& data["artists"]["cursors"].is_object()) {
-						const auto& cursors = data["artists"]["cursors"];
-						// Spotify returns JSON null rather than an empty string on
-						// the final cursor page. json::value<string>() throws for
-						// that valid response and previously terminated the app.
-						if (cursors.contains("after")
-								&& cursors["after"].is_string())
-							next = cursors["after"].get<std::string>();
-					}
-					if (next.empty() && rows.empty())
-						send({{{B_TRANSLATE("No followed artists"), ""},
-							{"", ""}, {"", ""}}});
-					done.AddString("next_cursor", next.c_str());
-					done.AddBool("has_more", !next.empty());
-					messenger.SendMessage(&done);
-				});
-			break;
-		}
-
-		case TAB_SAVED_EPISODES:
-		{
-			HaifySettings accountSettings = SettingsController::Load();
-			bool showProgress = accountSettings.grantedScopes.find(
-				"user-read-playback-position") != std::string::npos;
-			fPageLoading[tab] = true;
-			int32 offset = fPageOffset[tab];
-			api->Library().GetSavedEpisodes(offset, 50,
-				[send, messenger, offset, showProgress, loadGeneration](bool ok,
-						const nlohmann::json& data) {
-					BMessage done(kMsgPageDone);
-					done.AddInt32("tab", TAB_SAVED_EPISODES);
-					done.AddInt32("load_generation", loadGeneration);
-					if (!ok || !data.is_object() || !data.contains("items")
-							|| !data["items"].is_array()) {
-						done.AddBool("has_more", false);
-						messenger.SendMessage(&done);
-						return;
-					}
-					std::vector<RowData> rows;
-					for (const auto& saved : data["items"]) {
-						if (!saved.is_object() || !saved.contains("episode")
-								|| !saved["episode"].is_object()) continue;
-						const auto& episode = saved["episode"];
-						if (JsonString(episode, "type") != "episode")
-							continue;
-						std::string showName, showUri;
-						if (episode.contains("show") && episode["show"].is_object()) {
-							showName = JsonString(episode["show"], "name");
-							std::string showId = JsonString(episode["show"], "id");
-							showUri = !showId.empty()
-								? SpotifyUriForItemKind(kSpotifyItemShow, showId)
-								: JsonString(episode["show"], "uri");
-						}
-						std::string episodeId = JsonString(episode, "id");
-						std::string episodeUri = !episodeId.empty()
-							? SpotifyUriForItemKind(kSpotifyItemEpisode, episodeId)
-							: JsonString(episode, "uri");
-						if (!PrimaryUriMatchesTab(TAB_SAVED_EPISODES,
-								episodeUri))
-							continue;
-						std::string episodeName = JsonString(episode, "name");
-						if (episodeName.empty())
-							continue;
-						std::string progress;
-						if (showProgress && episode.contains("resume_point")
-								&& episode["resume_point"].is_object()) {
-							const auto& resume = episode["resume_point"];
-							progress = JsonBool(resume, "fully_played")
-								? B_TRANSLATE("Done")
-								: DurationText(JsonInt32(resume,
-									"resume_position_ms"));
-						}
-						rows.push_back({{episodeName, showName,
-							JsonString(episode, "release_date"),
-							DurationText(JsonInt32(episode, "duration_ms")), progress},
-							{episodeUri, showUri, "", "", ""},
-							{episodeName, showName, "", "", ""}});
-					}
-					send(rows);
-					int32 count = (int32)data["items"].size();
-					int32 total = JsonInt32(data, "total", offset + count);
-					done.AddInt32("next_offset", offset + count);
-					done.AddBool("has_more", count > 0
-						&& offset + count < total);
-					messenger.SendMessage(&done);
-				});
-			break;
-		}
-
-		case TAB_AUDIOBOOKS:
-		{
-			fPageLoading[tab] = true;
-			int32 offset = fPageOffset[tab];
-			api->Library().GetSavedAudiobooks(offset, 50,
-				[send, messenger, offset, loadGeneration](bool ok,
-						const nlohmann::json& data) {
-					BMessage done(kMsgPageDone);
-					done.AddInt32("tab", TAB_AUDIOBOOKS);
-					done.AddInt32("load_generation", loadGeneration);
-					if (!ok || !data.is_object() || !data.contains("items")
-							|| !data["items"].is_array()) {
-						done.AddBool("has_more", false);
-						messenger.SendMessage(&done);
-						return;
-					}
-					std::vector<RowData> rows;
-					for (const auto& book : data["items"]) {
-						if (!book.is_object()) continue;
-						if (JsonString(book, "type") != "audiobook") continue;
-						std::string id = JsonString(book, "id");
-						std::string uri = !id.empty()
-							? SpotifyUriForItemKind(kSpotifyItemAudiobook, id)
-							: JsonString(book, "uri");
-						if (!PrimaryUriMatchesTab(TAB_AUDIOBOOKS, uri))
-							continue;
-						std::string author;
-						if (book.contains("authors") && book["authors"].is_array()
-								&& !book["authors"].empty()
-								&& book["authors"][0].is_object())
-							author = JsonString(book["authors"][0], "name");
-						std::string name = JsonString(book, "name", "Unknown");
-						rows.push_back({{name, author}, {uri, ""}, {name, ""}});
-					}
-					send(rows);
-					int32 count = (int32)data["items"].size();
-					int32 total = JsonInt32(data, "total", offset + count);
-					done.AddInt32("next_offset", offset + count);
-					done.AddBool("has_more", count > 0
-						&& offset + count < total);
-					messenger.SendMessage(&done);
-				});
-			break;
-		}
-	}
+void
+DiscoverWindow::_LoadTab(int32 tab, bool nextPage)
+{
+	SpotifyApi* api = nullptr;
+	if (!_CanLoadTab(tab, nextPage, api))
+		return;
+	_PrepareLoadTab(tab, nextPage);
+	BMessenger messenger(this);
+	bool snapshot = !nextPage && tab != TAB_PLAYLISTS;
+	typedef void (DiscoverWindow::*Loader)(SpotifyApi*, const BMessenger&,
+		bool, int32);
+	static const Loader loaders[TAB_COUNT] = {
+		&DiscoverWindow::_LoadPlaylistsTab,
+		&DiscoverWindow::_LoadTopTracksTab,
+		&DiscoverWindow::_LoadTopArtistsTab,
+		&DiscoverWindow::_LoadNewReleasesTab,
+		&DiscoverWindow::_LoadSavedAlbumsTab,
+		&DiscoverWindow::_LoadPodcastsTab,
+		&DiscoverWindow::_LoadFollowedArtistsTab,
+		&DiscoverWindow::_LoadSavedEpisodesTab,
+		&DiscoverWindow::_LoadAudiobooksTab
+	};
+	(this->*loaders[tab])(api, messenger, snapshot, fTabLoadGeneration[tab]);
 }
 
 

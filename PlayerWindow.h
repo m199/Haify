@@ -23,6 +23,35 @@ public:
 	virtual void			MenusBeginning();
 
 private:
+	struct PlaybackMessageData {
+		bool isPlaying = false;
+		int32 progressMs = 0;
+		int32 durationMs = 0;
+		int32 volumePct = -1;
+		bool optimistic = false;
+		bool preserveCurrentArtwork = false;
+		bool volumeAuthoritative = true;
+		bool hasItem = true;
+		bool knownItemState = false;
+		std::string trackUri;
+		std::string repeatState;
+		bool shuffleState = false;
+		std::string effectiveTitle;
+		std::string effectiveArtist;
+		std::string effectiveAlbumId;
+		std::string effectiveArtistId;
+		std::string effectiveItemKind;
+		std::string effectiveOpenUri;
+		std::string effectiveParentUri;
+		std::string effectiveParentKind;
+		std::string effectiveShowId;
+		std::string effectiveAudiobookId;
+		std::string effectiveArtworkUrl;
+		std::string deviceId;
+		std::string deviceName;
+		std::string deviceType;
+	};
+
 	void					_InitMenu();
 	void					_InitLayout();
 	void					_PollPlayback();
@@ -32,6 +61,26 @@ private:
 	void					_ScheduleVerifyPoll(bigtime_t delay);
 	void					_ApplyPredictedNext();
 	void					_ApplyPlaybackMessage(BMessage* message);
+	PlaybackMessageData		_ReadPlaybackMessage(BMessage* message) const;
+	bool					_ShouldDeferPlaybackUpdate(
+								const PlaybackMessageData& update) const;
+	void					_ApplyPlaybackSeekGuard(
+								PlaybackMessageData& update,
+								bool trackChanged);
+	void					_ApplyPlaybackVolume(
+								PlaybackMessageData& update);
+	void					_ResolvePlaybackMetadata(
+								PlaybackMessageData& update,
+								bool trackChanged);
+	void					_StorePlaybackMetadata(
+								const PlaybackMessageData& update);
+	void					_StorePlaybackState(
+								const PlaybackMessageData& update);
+	void					_ApplyPlayerBarState(
+								const PlaybackMessageData& update);
+	void					_ApplyTrackChangedState(
+								const PlaybackMessageData& update);
+	void					_PublishPlaybackReplicantState(int32 progressMs);
 	bool					_HandlePlaybackMessage(BMessage* message);
 	bool					_HandleTransportMessage(BMessage* message);
 	bool					_HandleInterfaceMessage(BMessage* message);
@@ -70,6 +119,17 @@ private:
 								int32 progressMs) const;
 	void					_ReadLibrespotEvent();
 	void					_ApplyLibrespotEvent(
+								const std::map<std::string, std::string>& fields);
+	void					_ApplyLibrespotTrackChanged(
+								const std::map<std::string, std::string>& fields);
+	void					_ApplyLibrespotPositionEvent(
+								const std::string& event,
+								const std::map<std::string, std::string>& fields);
+	void					_ApplyLibrespotShuffleChanged(
+								const std::map<std::string, std::string>& fields);
+	void					_ApplyLibrespotRepeatChanged(
+								const std::map<std::string, std::string>& fields);
+	void					_ApplyLibrespotVolumeChanged(
 								const std::map<std::string, std::string>& fields);
 	void					_SetVolumeOptimistically(int32 volume);
 	bool					_AcceptReportedVolume(int32 volume);
@@ -124,6 +184,9 @@ private:
 	std::string				fCurrentAudiobookId;
 	std::string				fLastArtworkUrl;
 	std::string				fVolumeDeviceId;
+	std::string				fCurrentDeviceId;
+	std::string				fCurrentDeviceName;
+	std::string				fCurrentDeviceType;
 	std::string				fCurrentTrackUri;
 	std::string				fQueueTrackUri;
 	std::string				fLastLibrespotTrackEventId;

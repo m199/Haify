@@ -1104,8 +1104,8 @@ App::_ApplyLibrespotDevicePollResult(BMessage* message)
 			SettingsController::FinishLibrespotOAuthRegistration();
 			fLibrespotOAuthRegistration = false;
 			for (int32 i = 0; i < CountWindows(); i++) {
-				SettingsWindow* settings =
-					dynamic_cast<SettingsWindow*>(WindowAt(i));
+				SettingsWindow* settings
+					= dynamic_cast<SettingsWindow*>(WindowAt(i));
 				if (settings)
 					settings->PostMessage('lbOk');
 			}
@@ -1113,9 +1113,11 @@ App::_ApplyLibrespotDevicePollResult(BMessage* message)
 		const char* deviceId = message->GetString("device_id", "");
 		if (GetApi() && fLibrespotPid > 0 && deviceId && deviceId[0])
 			_TransferPlaybackToLibrespotDevice(deviceId);
-	} else if (fLibrespotPid > 0
-			&& fLibrespotTransferAttempts
-				< (fLibrespotOAuthRegistration ? 150 : 5)) {
+		return;
+	}
+
+	int maxAttempts = fLibrespotOAuthRegistration ? 150 : 5;
+	if (fLibrespotPid > 0 && fLibrespotTransferAttempts < maxAttempts) {
 		_ScheduleLibrespotTransfer(
 			fLibrespotOAuthRegistration ? 2000000LL : 1000000LL);
 	}
@@ -1126,17 +1128,19 @@ void
 App::_ApplyLibrespotPlaybackDecision(BMessage* message)
 {
 	const char* deviceId = message->GetString("device_id", "");
-	if (message->GetBool("transfer", false) && GetApi()
-			&& fLibrespotPid > 0 && deviceId && deviceId[0]) {
-		BMessenger app(this);
-		fApi->Playback().TransferPlayback(deviceId,
-			[app](bool ok, const nlohmann::json&) {
-			if (!ok)
-				return;
-			BMessage transferred(kMsgLibrespotPlaybackTransferred);
-			app.SendMessage(&transferred);
-		});
+	if (!message->GetBool("transfer", false) || !GetApi()
+			|| fLibrespotPid <= 0 || !deviceId || !deviceId[0]) {
+		return;
 	}
+
+	BMessenger app(this);
+	fApi->Playback().TransferPlayback(deviceId,
+		[app](bool ok, const nlohmann::json&) {
+		if (!ok)
+			return;
+		BMessage transferred(kMsgLibrespotPlaybackTransferred);
+		app.SendMessage(&transferred);
+	});
 }
 
 
@@ -1147,51 +1151,45 @@ App::_HandleWindowMessage(BMessage* message)
 		case MSG_DESKBAR_REPLICANT_CHANGED:
 			_ToggleDeskbarReplicant(message);
 			return true;
-
 		case MSG_SHOW_PLAYER_WINDOW:
 			_ShowPlayerWindow();
 			return true;
-
 		case MSG_HIDE_PLAYER_WINDOW:
 			_HidePlayerWindow();
 			return true;
-
 		case MSG_TOGGLE_PLAYER_WINDOW:
 			_TogglePlayerWindow();
 			return true;
-
 		case MSG_OPEN_ARTWORK:
 			_ShowArtworkWindow();
 			return true;
-
 		case MSG_OPEN_SETTINGS:
 			_ShowSettingsWindow();
 			return true;
-
 		case MSG_QUIT_APP:
 			PostMessage(B_QUIT_REQUESTED);
 			return true;
-
 		case MSG_OPEN_BROWSER:
 			_ShowDiscoverWindow();
 			return true;
-
 		case MSG_OPEN_PLAYLIST:
 			_OpenPlaylistWindow(message);
 			return true;
-
+		case MSG_SHOW_ARTIST:
+			_ShowArtistWindow(message);
+			return true;
 		case MSG_OPEN_QUEUE:
 			_ShowQueueWindow();
 			return true;
-
 		case MSG_OPEN_SEARCH:
 			_ShowSearchWindow();
 			return true;
-
+		case 'open':
+			_OpenSpotifyUri(message);
+			return true;
 		case MSG_SHOW_ALBUM:
 			_ShowAlbumWindow(message);
 			return true;
-
 		default:
 			return false;
 	}
@@ -1202,35 +1200,21 @@ bool
 App::_HandleStateMessage(BMessage* message)
 {
 	switch (message->what) {
-
 		case MSG_PLAYLISTS_CHANGED:
 			_BroadcastPlaylistsChanged(message);
 			return true;
-
 		case MSG_LIBRARY_CHANGED:
 			_BroadcastLibraryChanged(message);
 			return true;
-
 		case MSG_SPOTIFY_CAPABILITIES_CHANGED:
 			_ApplySpotifyCapabilitiesMessage(message);
 			return true;
-
 		case 'spAc':
 			_ApplySpotifyAccount(message);
 			return true;
-
-		case MSG_SHOW_ARTIST:
-			_ShowArtistWindow(message);
-			return true;
-
 		case 'pStU':
 			_BroadcastPlayingTrack(message->GetString("trackUri", ""));
 			return true;
-
-		case 'open':
-			_OpenSpotifyUri(message);
-			return true;
-
 		default:
 			return false;
 	}
@@ -1241,27 +1225,19 @@ bool
 App::_HandleReplicantMessage(BMessage* message)
 {
 	switch (message->what) {
-
 		case MSG_REGISTER_REPLICANT:
 			_RegisterReplicant(message);
 			return true;
-
 		case MSG_SEEKBAR_COLOR_CHANGED:
-			_BroadcastReplicantSettings(message);
-			return true;
-
 		case MSG_REPLICANT_APPEARANCE_CHANGED:
 			_BroadcastReplicantSettings(message);
 			return true;
-
 		case MSG_UNREGISTER_REPLICANT:
 			_UnregisterReplicant(message);
 			return true;
-
 		case MSG_REPLICANT_STATE:
 			_ApplyReplicantState(message);
 			return true;
-
 		default:
 			return false;
 	}
@@ -1286,11 +1262,9 @@ App::_HandlePlayerMessage(BMessage* message)
 		case 'play':
 			_ForwardPlayerCommand(message);
 			return true;
-
 		case 'poll':
 			_ForwardPlaybackPoll(message);
 			return true;
-
 		default:
 			return false;
 	}
@@ -1300,58 +1274,64 @@ App::_HandlePlayerMessage(BMessage* message)
 bool
 App::_HandleAuthLibrespotMessage(BMessage* message)
 {
+	return _HandleAuthMessage(message) || _HandleLibrespotMessage(message);
+}
+
+
+bool
+App::_HandleAuthMessage(BMessage* message)
+{
 	switch (message->what) {
 		case MSG_INIT_AUTH:
 			_InitAuth(false);
 			return true;
-
-		case kMsgRefreshAccessToken:
-			delete fTokenRefreshTimer;
-			fTokenRefreshTimer = nullptr;
-			_RefreshAccessToken(nullptr, true);
-			return true;
-
 		case MSG_AUTH_COMPLETE:
 			_ApplyAuthComplete(message);
 			return true;
-
-		case 'sout':
+		case kMsgRefreshAccessToken:
+			_RefreshAccessToken(nullptr, true);
+			return true;
+		case 'sgno':
 			_SignOut();
 			return true;
+		default:
+			return false;
+	}
+}
 
+
+bool
+App::_HandleLibrespotMessage(BMessage* message)
+{
+	switch (message->what) {
+		case 'stLb':
 		case 'lbSt':
 			_StartLibrespotFromMessage(message);
 			return true;
-
+		case 'rgLb':
 		case 'lbRg':
 			_RegisterLibrespotOAuth();
 			return true;
-
+		case 'spLb':
 		case 'lbSp':
 			_StopLibrespotFromMessage();
 			return true;
-
 		case MSG_TOGGLE_LIBRESPOT_RUNNING:
 			_ToggleLibrespotRunning();
 			return true;
-
 		case kMsgTransferLibrespotPlayback:
 			_TryTransferPlaybackToLibrespot();
 			return true;
-
 		case kMsgLibrespotDevicePollResult:
 			_ApplyLibrespotDevicePollResult(message);
 			return true;
-
 		case kMsgLibrespotPlaybackDecision:
 			_ApplyLibrespotPlaybackDecision(message);
 			return true;
-
 		case kMsgLibrespotPlaybackTransferred:
 			_SchedulePlaybackPollAfterLibrespotTransfer(
 				kLibrespotPlaybackPollDelay);
 			return true;
-
 		default:
 			return false;
 	}
@@ -1371,110 +1351,140 @@ App::MessageReceived(BMessage* message)
 	BApplication::MessageReceived(message);
 }
 
+
 void
 App::_InitAuth(bool silent)
 {
-	HaifySettings s = SettingsController::Load();
-	fApi->SetAccountId(s.spotifyAccountId);
+	HaifySettings settings = SettingsController::Load();
+	fApi->SetAccountId(settings.spotifyAccountId);
 
 	if (strlen(HAIFY_CLIENT_ID) == 0) {
-		if (!silent) {
-			BAlert* alert = new BAlert("Error", "HAIFY_CLIENT_ID missing in Config.h!", "OK", NULL, NULL, B_WIDTH_AS_USUAL, B_STOP_ALERT);
-			alert->Go();
-		}
+		if (!silent)
+			_ShowMissingClientIdAlert();
 		return;
 	}
 
 	if (silent) {
-		if ((!s.accessToken.empty() || !s.refreshToken.empty())
-				&& s.authScopeVersion != HAIFY_AUTH_SCOPE_VERSION) {
-			SettingsController::Update([](HaifySettings& settings) {
-				settings.accessToken.clear();
-				settings.refreshToken.clear();
-				settings.grantedScopes.clear();
-				settings.accessTokenExpiresAt = 0;
-			});
-			return;
-		}
-		if (!s.accessToken.empty() && s.accessTokenExpiresAt > time(nullptr) + 60) {
-			fApi->SetAccessToken(s.accessToken);
-			fIsAuthenticated = true;
-			_ScheduleTokenRefresh((int)(s.accessTokenExpiresAt - time(nullptr)));
-			RefreshSpotifyCapabilities(false);
-			_RefreshSpotifyAccount();
-			return;
-		}
-		if (!s.refreshToken.empty()) {
-			_RefreshAccessToken(nullptr, true);
-		}
+		_InitSilentAuth(settings);
 		return;
 	}
 
-	{
-		int32 generation;
-		{
-			BAutolock lock(&fTokenLock);
-			fTokenGeneration++;
-			generation = fTokenGeneration;
-		}
-		_CompleteTokenRefresh(false);
-		delete fOAuthSrv;
-		fOAuthSrv = nullptr;
+	_StartInteractiveOAuth(_BeginAuthGeneration());
+}
 
-		auto auth = std::make_shared<SpotifyAuth>(HAIFY_CLIENT_ID);
-		std::string authUrl = auth->BuildAuthUrl();
-		if (authUrl.empty()) {
-			BAlert* alert = new BAlert("Error",
-				"Could not generate secure OAuth parameters.", "OK", nullptr,
-				nullptr, B_WIDTH_AS_USUAL, B_STOP_ALERT);
-			alert->Go();
-			return;
-		}
-		std::string expectedState = auth->State();
-		BMessenger messenger(this);
-		fOAuthSrv = new OAuthCallbackServer(8765,
-			[auth, expectedState, messenger, generation](const std::string& code,
-					const std::string& state, const std::string& callbackError) {
-				if (!callbackError.empty() || state != expectedState) {
+
+void
+App::_ShowMissingClientIdAlert()
+{
+	BAlert* alert = new BAlert("Error",
+		"HAIFY_CLIENT_ID missing in Config.h!", "OK", NULL, NULL,
+		B_WIDTH_AS_USUAL, B_STOP_ALERT);
+	alert->Go();
+}
+
+
+bool
+App::_InitSilentAuth(const HaifySettings& settings)
+{
+	if ((!settings.accessToken.empty() || !settings.refreshToken.empty())
+			&& settings.authScopeVersion != HAIFY_AUTH_SCOPE_VERSION) {
+		SettingsController::Update([](HaifySettings& value) {
+			value.accessToken.clear();
+			value.refreshToken.clear();
+			value.grantedScopes.clear();
+			value.accessTokenExpiresAt = 0;
+		});
+		return false;
+	}
+	if (!settings.accessToken.empty()
+			&& settings.accessTokenExpiresAt > time(nullptr) + 60) {
+		fApi->SetAccessToken(settings.accessToken);
+		fIsAuthenticated = true;
+		_ScheduleTokenRefresh((int)(settings.accessTokenExpiresAt
+			- time(nullptr)));
+		RefreshSpotifyCapabilities(false);
+		_RefreshSpotifyAccount();
+		return true;
+	}
+	if (!settings.refreshToken.empty())
+		_RefreshAccessToken(nullptr, true);
+	return false;
+}
+
+
+int32
+App::_BeginAuthGeneration()
+{
+	int32 generation;
+	{
+		BAutolock lock(&fTokenLock);
+		fTokenGeneration++;
+		generation = fTokenGeneration;
+	}
+	_CompleteTokenRefresh(false);
+	delete fOAuthSrv;
+	fOAuthSrv = nullptr;
+	return generation;
+}
+
+
+void
+App::_StartInteractiveOAuth(int32 generation)
+{
+	auto auth = std::make_shared<SpotifyAuth>(HAIFY_CLIENT_ID);
+	std::string authUrl = auth->BuildAuthUrl();
+	if (authUrl.empty()) {
+		BAlert* alert = new BAlert("Error",
+			"Could not generate secure OAuth parameters.", "OK", nullptr,
+			nullptr, B_WIDTH_AS_USUAL, B_STOP_ALERT);
+		alert->Go();
+		return;
+	}
+	std::string expectedState = auth->State();
+	BMessenger messenger(this);
+	fOAuthSrv = new OAuthCallbackServer(8765,
+		[auth, expectedState, messenger, generation](const std::string& code,
+				const std::string& state, const std::string& callbackError) {
+			if (!callbackError.empty() || state != expectedState) {
+				BMessage msg(MSG_AUTH_COMPLETE);
+				msg.AddBool("ok", false);
+				msg.AddBool("silent", false);
+				msg.AddInt32("token_generation", generation);
+				msg.AddString("operation", "oauth_callback");
+				msg.AddString("error", callbackError.empty()
+					? "state_mismatch" : callbackError.c_str());
+				messenger.SendMessage(&msg);
+				return;
+			}
+			auth->ExchangeCode(code,
+				[messenger, generation](const TokenResult& result) {
 					BMessage msg(MSG_AUTH_COMPLETE);
-					msg.AddBool("ok", false);
+					AddTokenResult(msg, result);
 					msg.AddBool("silent", false);
 					msg.AddInt32("token_generation", generation);
-					msg.AddString("operation", "oauth_callback");
-					msg.AddString("error", callbackError.empty()
-						? "state_mismatch" : callbackError.c_str());
+					msg.AddString("operation", "authorization_code");
 					messenger.SendMessage(&msg);
-					return;
-				}
-				auth->ExchangeCode(code,
-					[messenger, generation](const TokenResult& result) {
-						BMessage msg(MSG_AUTH_COMPLETE);
-						AddTokenResult(msg, result);
-						msg.AddBool("silent", false);
-						msg.AddInt32("token_generation", generation);
-						msg.AddString("operation", "authorization_code");
-						messenger.SendMessage(&msg);
-					});
-			});
+				});
+		});
 
-		if (!fOAuthSrv->Start()) {
-			DEBUG_PRINT("Spotify OAuth callback server failed to start on port 8765\n");
-			if (!silent) {
-				BAlert* alert = new BAlert("Error", "Could not start local OAuth server. Port 8765 in use?", "OK", NULL, NULL, B_WIDTH_AS_USUAL, B_STOP_ALERT);
-				alert->Go();
-			}
-			delete fOAuthSrv;
-			fOAuthSrv = nullptr;
-			return;
-		}
+	if (!fOAuthSrv->Start()) {
+		DEBUG_PRINT("Spotify OAuth callback server failed to start on port 8765\n");
+		BAlert* alert = new BAlert("Error",
+			"Could not start local OAuth server. Port 8765 in use?", "OK",
+			NULL, NULL, B_WIDTH_AS_USUAL, B_STOP_ALERT);
+		alert->Go();
+		delete fOAuthSrv;
+		fOAuthSrv = nullptr;
+		return;
+	}
 
-		status_t openStatus = OpenUrl(authUrl);
-		if (openStatus != B_OK) {
-			DEBUG_PRINT("Spotify authorization page returned status %ld; "
-				"keeping callback server active\n", (long)openStatus);
-		}
+	status_t openStatus = OpenUrl(authUrl);
+	if (openStatus != B_OK) {
+		DEBUG_PRINT("Spotify authorization page returned status %ld; "
+			"keeping callback server active\n", (long)openStatus);
 	}
 }
+
 
 void
 App::_RefreshAccessToken(std::function<void(bool)> completion, bool silent)
@@ -1517,6 +1527,7 @@ App::_RefreshAccessToken(std::function<void(bool)> completion, bool silent)
 		});
 }
 
+
 void
 App::_CompleteTokenRefresh(bool ok)
 {
@@ -1530,6 +1541,7 @@ App::_CompleteTokenRefresh(bool ok)
 		waiter(ok);
 }
 
+
 void
 App::_ScheduleTokenRefresh(int expiresIn)
 {
@@ -1541,6 +1553,7 @@ App::_ScheduleTokenRefresh(int expiresIn)
 		(bigtime_t)delaySeconds * 1000000LL, 1);
 }
 
+
 bool
 App::QuitRequested()
 {
@@ -1549,37 +1562,46 @@ App::QuitRequested()
 	fApi->SetTokenRefreshHandler(nullptr);
 	_RemoveDeskbarReplicant();
 
-	SettingsController::Update([&](HaifySettings& s) {
-		s.browserWindowOpen = false;
-		s.queueWindowOpen   = false;
-		s.searchWindowOpen  = false;
-		s.artworkWindowOpen = fArtworkWindowOpen
+	SettingsController::Update([&](HaifySettings& settings) {
+		settings.browserWindowOpen = false;
+		settings.queueWindowOpen = false;
+		settings.searchWindowOpen = false;
+		settings.artworkWindowOpen = fArtworkWindowOpen
 			|| (fArtworkWindow && !fArtworkWindow->IsHidden());
 
 		for (int32 i = 0; i < CountWindows(); i++) {
-			BWindow* win = WindowAt(i);
-			if (!win) continue;
-			BRect f = win->Frame();
+			BWindow* window = WindowAt(i);
+			if (!window)
+				continue;
+			BRect frame = window->Frame();
 
-			if (dynamic_cast<DiscoverWindow*>(win)) {
-				s.browserWindowOpen = true;
-				s.browserWindowX = f.left;  s.browserWindowY = f.top;
-				s.browserWindowW = f.Width(); s.browserWindowH = f.Height();
-			} else if (dynamic_cast<QueueWindow*>(win)) {
-				s.queueWindowOpen = true;
-				s.queueWindowX = f.left;  s.queueWindowY = f.top;
-				s.queueWindowW = f.Width(); s.queueWindowH = f.Height();
-			} else if (dynamic_cast<SearchWindow*>(win)) {
-				s.searchWindowOpen = true;
-				s.searchWindowX = f.left;  s.searchWindowY = f.top;
-				s.searchWindowW = f.Width(); s.searchWindowH = f.Height();
+			if (dynamic_cast<DiscoverWindow*>(window)) {
+				settings.browserWindowOpen = true;
+				settings.browserWindowX = frame.left;
+				settings.browserWindowY = frame.top;
+				settings.browserWindowW = frame.Width();
+				settings.browserWindowH = frame.Height();
+			} else if (dynamic_cast<QueueWindow*>(window)) {
+				settings.queueWindowOpen = true;
+				settings.queueWindowX = frame.left;
+				settings.queueWindowY = frame.top;
+				settings.queueWindowW = frame.Width();
+				settings.queueWindowH = frame.Height();
+			} else if (dynamic_cast<SearchWindow*>(window)) {
+				settings.searchWindowOpen = true;
+				settings.searchWindowX = frame.left;
+				settings.searchWindowY = frame.top;
+				settings.searchWindowW = frame.Width();
+				settings.searchWindowH = frame.Height();
 			}
 		}
 
 		if (fArtworkWindow) {
-			BRect f = fArtworkWindow->Frame();
-			s.artworkWindowX = f.left;  s.artworkWindowY = f.top;
-			s.artworkWindowW = f.Width(); s.artworkWindowH = f.Height();
+			BRect frame = fArtworkWindow->Frame();
+			settings.artworkWindowX = frame.left;
+			settings.artworkWindowY = frame.top;
+			settings.artworkWindowW = frame.Width();
+			settings.artworkWindowH = frame.Height();
 		}
 	});
 	delete fTokenRefreshTimer;
@@ -1605,15 +1627,9 @@ App::_StartLibrespot(LibrespotTransferMode mode, bool registerOAuth)
 	}
 
 	HaifySettings s = SettingsController::Load();
-	std::string librespotPath = s.librespotPath.empty()
-		? SettingsController::FindLibrespotPath() : s.librespotPath;
-	if (librespotPath.empty()) {
-		BAlert* a = new BAlert("Haify",
-			"librespot not found. Please install librespot or set its path in File → Settings.",
-			"OK", nullptr, nullptr, B_WIDTH_AS_USUAL, B_WARNING_ALERT);
-		a->Go();
+	std::string librespotPath;
+	if (!_ResolveLibrespotPath(s, librespotPath))
 		return;
-	}
 
 	std::vector<std::string> args;
 	args.push_back(librespotPath);
@@ -1625,14 +1641,8 @@ App::_StartLibrespot(LibrespotTransferMode mode, bool registerOAuth)
 
 	std::string systemCachePath
 		= SettingsController::LibrespotSystemCachePath(s);
-	if (registerOAuth
-			&& !SettingsController::PrepareLibrespotOAuthRegistration(s)) {
-		BAlert* alert = new BAlert("Haify",
-			"Could not prepare the librespot OAuth registration.", "OK",
-			nullptr, nullptr, B_WIDTH_AS_USUAL, B_WARNING_ALERT);
-		alert->Go();
+	if (!_PrepareLibrespotOAuth(s, registerOAuth))
 		return;
-	}
 	fLibrespotOAuthRegistration = registerOAuth;
 	if (!systemCachePath.empty()) {
 		args.push_back("--system-cache");
@@ -1642,51 +1652,116 @@ App::_StartLibrespot(LibrespotTransferMode mode, bool registerOAuth)
 	if (hasEnableOAuthArgument)
 		args.push_back("--enable-oauth");
 
-	if (_WriteLibrespotEventScript()) {
-		unlink(SettingsController::LibrespotEventStatePath().c_str());
-		unlink((SettingsController::LibrespotEventStatePath()
-			+ ".playback").c_str());
-		args.push_back("--onevent=" + SettingsController::LibrespotEventScriptPath());
+	_AddLibrespotEventArgs(args);
+	_AddLibrespotPlaybackArgs(args, s, hasEnableOAuthArgument);
+	_AddLibrespotAdditionalArgs(args, s.librespotAdditionalArgs,
+		hasEnableOAuthArgument);
+	_SpawnLibrespot(args);
+}
+
+
+bool
+App::_ResolveLibrespotPath(const HaifySettings& settings,
+	std::string& librespotPath)
+{
+	librespotPath = settings.librespotPath.empty()
+		? SettingsController::FindLibrespotPath() : settings.librespotPath;
+	if (!librespotPath.empty())
+		return true;
+
+	BAlert* alert = new BAlert("Haify",
+		"librespot not found. Please install librespot or set its path in File → Settings.",
+		"OK", nullptr, nullptr, B_WIDTH_AS_USUAL, B_WARNING_ALERT);
+	alert->Go();
+	return false;
+}
+
+
+bool
+App::_PrepareLibrespotOAuth(const HaifySettings& settings, bool registerOAuth)
+{
+	if (!registerOAuth
+			|| SettingsController::PrepareLibrespotOAuthRegistration(settings)) {
+		return true;
 	}
 
+	BAlert* alert = new BAlert("Haify",
+		"Could not prepare the librespot OAuth registration.", "OK",
+		nullptr, nullptr, B_WIDTH_AS_USUAL, B_WARNING_ALERT);
+	alert->Go();
+	return false;
+}
+
+
+void
+App::_AddLibrespotEventArgs(std::vector<std::string>& args)
+{
+	if (!_WriteLibrespotEventScript())
+		return;
+
+	unlink(SettingsController::LibrespotEventStatePath().c_str());
+	unlink((SettingsController::LibrespotEventStatePath()
+		+ ".playback").c_str());
+	args.push_back("--onevent="
+		+ SettingsController::LibrespotEventScriptPath());
+}
+
+
+void
+App::_AddLibrespotPlaybackArgs(std::vector<std::string>& args,
+	const HaifySettings& settings, bool& hasEnableOAuthArgument)
+{
 	args.push_back("--backend");
-	args.push_back(s.librespotBackend.empty() ? "sdl" : s.librespotBackend);
+	args.push_back(settings.librespotBackend.empty()
+		? "sdl" : settings.librespotBackend);
 	args.push_back("--bitrate");
-	args.push_back(std::to_string(s.librespotBitrate));
+	args.push_back(std::to_string(settings.librespotBitrate));
 
 	args.push_back("--initial-volume");
-	args.push_back(std::to_string(s.librespotVolume));
+	args.push_back(std::to_string(settings.librespotVolume));
 
-	if (s.librespotAutoplay) {
+	if (settings.librespotAutoplay) {
 		args.push_back("--autoplay");
 		args.push_back("on");
 	}
-	if (s.librespotNormalization) args.push_back("--enable-volume-normalisation");
+	if (settings.librespotNormalization)
+		args.push_back("--enable-volume-normalisation");
 
 	args.push_back("--name");
-	args.push_back(s.librespotDeviceName.empty()
-		? LIBRESPOT_DEVICE_NAME : s.librespotDeviceName);
-	if (!s.librespotDeviceType.empty()) {
+	args.push_back(settings.librespotDeviceName.empty()
+		? LIBRESPOT_DEVICE_NAME : settings.librespotDeviceName);
+	if (!settings.librespotDeviceType.empty()) {
 		args.push_back("--device-type");
-		args.push_back(s.librespotDeviceType);
+		args.push_back(settings.librespotDeviceType);
 	}
-	if (s.librespotDisableDiscovery) args.push_back("--disable-discovery");
+	if (settings.librespotDisableDiscovery)
+		args.push_back("--disable-discovery");
+}
 
-	if (!s.librespotAdditionalArgs.empty()) {
-		std::istringstream iss(s.librespotAdditionalArgs);
-		std::string token;
-		while (iss >> token) {
-			if (token == "-j" || token == "--enable-oauth") {
-				if (hasEnableOAuthArgument)
-					continue;
-				hasEnableOAuthArgument = true;
-			}
-			args.push_back(token);
+
+void
+App::_AddLibrespotAdditionalArgs(std::vector<std::string>& args,
+	const std::string& additionalArgs, bool& hasEnableOAuthArgument)
+{
+	std::istringstream iss(additionalArgs);
+	std::string token;
+	while (iss >> token) {
+		if (token == "-j" || token == "--enable-oauth") {
+			if (hasEnableOAuthArgument)
+				continue;
+			hasEnableOAuthArgument = true;
 		}
+		args.push_back(token);
 	}
+}
 
+
+void
+App::_SpawnLibrespot(const std::vector<std::string>& args)
+{
 	std::vector<char*> argv;
-	for (auto& a : args) argv.push_back(const_cast<char*>(a.c_str()));
+	for (const auto& arg : args)
+		argv.push_back(const_cast<char*>(arg.c_str()));
 	argv.push_back(nullptr);
 
 	pid_t pid = fork();
@@ -1702,7 +1777,6 @@ App::_StartLibrespot(LibrespotTransferMode mode, bool registerOAuth)
 		fLibrespotOAuthRegistration = false;
 	}
 }
-
 
 void
 App::_ScheduleLibrespotTransfer(bigtime_t delay)

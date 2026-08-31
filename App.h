@@ -56,6 +56,8 @@ private:
 	bool					_HandleReplicantMessage(BMessage* message);
 	bool					_HandlePlayerMessage(BMessage* message);
 	bool					_HandleAuthLibrespotMessage(BMessage* message);
+	bool					_HandleAuthMessage(BMessage* message);
+	bool					_HandleLibrespotMessage(BMessage* message);
 	void					_ShowArtworkWindow();
 	void					_ToggleDeskbarReplicant(BMessage* message);
 	void					_ShowSettingsWindow();
@@ -118,6 +120,10 @@ private:
 	void					_InstallDeskbarReplicant();
 	void					_RemoveDeskbarReplicant();
 	void					_InitAuth(bool silent = false);
+	void					_ShowMissingClientIdAlert();
+	bool					_InitSilentAuth(const HaifySettings& settings);
+	int32					_BeginAuthGeneration();
+	void					_StartInteractiveOAuth(int32 generation);
 	void					_RefreshAccessToken(
 								std::function<void(bool)> completion = nullptr,
 								bool silent = true);
@@ -125,6 +131,24 @@ private:
 	void					_ScheduleTokenRefresh(int expiresIn);
 	void					_StartLibrespot(LibrespotTransferMode mode,
 								bool registerOAuth = false);
+	bool					_ResolveLibrespotPath(
+								const HaifySettings& settings,
+								std::string& librespotPath);
+	bool					_PrepareLibrespotOAuth(
+								const HaifySettings& settings,
+								bool registerOAuth);
+	void					_AddLibrespotEventArgs(
+								std::vector<std::string>& args);
+	void					_AddLibrespotPlaybackArgs(
+								std::vector<std::string>& args,
+								const HaifySettings& settings,
+								bool& hasEnableOAuthArgument);
+	void					_AddLibrespotAdditionalArgs(
+								std::vector<std::string>& args,
+								const std::string& additionalArgs,
+								bool& hasEnableOAuthArgument);
+	void					_SpawnLibrespot(
+								const std::vector<std::string>& args);
 	void					_StopLibrespot();
 	void					_ScheduleLibrespotTransfer(bigtime_t delay);
 	void					_SchedulePlaybackPollAfterLibrespotTransfer(
