@@ -36,7 +36,7 @@ PlaybackApi::Play(JsonCallback callback)
 
 void
 PlaybackApi::PlayTrack(const std::string& trackUri,
-    const std::string& contextUri, JsonCallback callback)
+    const std::string& contextUri, JsonCallback callback, int positionMs)
 {
     bool supportsOffset = SpotifyPlaybackContextSupportsOffset(trackUri,
         contextUri);
@@ -48,6 +48,21 @@ PlaybackApi::PlayTrack(const std::string& trackUri,
         };
     } else {
         request = {{"uris", {trackUri}}};
+    }
+    if (positionMs > 0)
+        request["position_ms"] = positionMs;
+    fPut("/me/player/play", request.dump(), callback);
+}
+
+void
+PlaybackApi::PlayUris(const std::vector<std::string>& uris,
+    JsonCallback callback)
+{
+    nlohmann::json request;
+    request["uris"] = nlohmann::json::array();
+    for (const std::string& uri : uris) {
+        if (!uri.empty())
+            request["uris"].push_back(uri);
     }
     fPut("/me/player/play", request.dump(), callback);
 }
@@ -78,10 +93,14 @@ PlaybackApi::Previous(JsonCallback callback)
 }
 
 void
-PlaybackApi::Seek(int positionMs, JsonCallback callback)
+PlaybackApi::Seek(int positionMs, JsonCallback callback,
+    const std::string& deviceId)
 {
-    fPut("/me/player/seek?position_ms=" + std::to_string(positionMs), "",
-        callback);
+    std::string path = "/me/player/seek?position_ms="
+        + std::to_string(positionMs);
+    if (!deviceId.empty())
+        path += "&device_id=" + SpotifyUrlEncode(deviceId);
+    fPut(path, "", callback);
 }
 
 void

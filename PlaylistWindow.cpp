@@ -11,6 +11,8 @@
 #include "HaifyDebug.h"
 #include "App.h"
 #include "UiLogic.h"
+#include "playlist/PlaylistCacheDocument.h"
+#include "playlist/PlaylistCacheFiles.h"
 #include "spotify/SpotifyUri.h"
 #include "spotify/api/SpotifyApi.h"
 #include "spotify/api/SpotifyResponse.h"
@@ -18,10 +20,8 @@
 #include <Alert.h>
 #include <Alignment.h>
 #include <Application.h>
-#include <Autolock.h>
 #include <Bitmap.h>
 #include <LayoutBuilder.h>
-#include <Locker.h>
 #include <MenuBar.h>
 #include <Menu.h>
 #include <MenuItem.h>
@@ -55,11 +55,7 @@
 #include <algorithm>
 #include <cstdio>
 #include <cstring>
-#include <map>
-#include <time.h>
-#include <thread>
 #include <utility>
-#include <unistd.h>
 
 #undef B_TRANSLATION_CONTEXT
 #define B_TRANSLATION_CONTEXT "PlaylistWindow"
@@ -85,9 +81,6 @@ static const uint32 kMsgApplyEpisodeSearch = 'aEps';
 static const uint32 kMsgRetryEpisodeSearch = 'rEps';
 static const int32 kLikedSongsIconResource = 2015;
 static const int32 kSearchIconResource = 2016;
-static const int32 kLikedSongsCacheVersion = 1;
-static const int32 kShowCacheVersion = 2;
-static const time_t kLikedSongsCacheMaxAge = 5 * 60;
 
 class ResourceIconView : public BView {
 public:
@@ -154,11 +147,6 @@ private:
 	BBitmap* fIcon;
 };
 
-static BLocker sCacheWriterLock("Haify playlist cache writer");
-static std::map<std::string, uint64> sCacheWriteGenerations;
-static uint64 sNextCacheWriteGeneration = 0;
-
-
 static BBitmap*
 LoadLikedSongsArtwork(float size)
 {
@@ -222,57 +210,6 @@ LoadLikedSongsArtwork(float size)
 	delete icon;
 	return artwork;
 }
-
-static void
-WriteCacheAsync(const std::string& path, nlohmann::json data)
-{
-	uint64 generation;
-	{
-		BAutolock lock(&sCacheWriterLock);
-		generation = ++sNextCacheWriteGeneration;
-		sCacheWriteGenerations[path] = generation;
-	}
-	std::thread([path, generation, data = std::move(data)]() mutable {
-		std::string serialized = data.dump();
-		std::string temporary = path + ".part-" + std::to_string(generation);
-		BFile file(temporary.c_str(), B_WRITE_ONLY | B_CREATE_FILE
-			| B_ERASE_FILE);
-		bool written = file.InitCheck() == B_OK
-			&& file.Write(serialized.data(), serialized.size())
-				== (ssize_t)serialized.size();
-		file.Unset();
-		bool current;
-		{
-			BAutolock lock(&sCacheWriterLock);
-			current = sCacheWriteGenerations[path] == generation;
-			if (current)
-				sCacheWriteGenerations.erase(path);
-		}
-		if (written && current) {
-			unlink(path.c_str());
-			rename(temporary.c_str(), path.c_str());
-		} else {
-			unlink(temporary.c_str());
-		}
-	}).detach();
-}
-
-static void
-CancelCacheWrite(const std::string& path)
-{
-	BAutolock lock(&sCacheWriterLock);
-	sCacheWriteGenerations[path] = ++sNextCacheWriteGeneration;
-}
-
-static std::string
-LowercaseSearchText(const std::string& title, const std::string& description)
-{
-	std::string text = title + "\n" + description;
-	for (char& character : text)
-		character = (char)tolower((unsigned char)character);
-	return text;
-}
-
 
 class PlaylistDetailsDialog : public BWindow {
 public:
@@ -429,46 +366,21 @@ TrackRowNumber(TrackRow* row, int32 fallback)
 	return field ? field->Value() : fallback;
 }
 
-static nlohmann::json
-TrackRowCacheJson(TrackRow* row, int32 rowIndex)
+static PlaylistCacheDocument::Track
+CachedTrackFromRow(TrackRow* row, int32 rowIndex)
 {
-	return {
-		{"number", TrackRowNumber(row, rowIndex + 1)},
-		{"title", TrackRowStringAt(row, 1)},
-		{"artist", TrackRowStringAt(row, 2)},
-		{"bpm", TrackRowStringAt(row, 3)},
-		{"key", TrackRowStringAt(row, 4)},
-		{"album", TrackRowStringAt(row, 5)},
-		{"duration", TrackRowStringAt(row, 6)},
-		{"uri", row->fTrackUri},
-		{"artist_uri", row->fArtistUri},
-		{"album_uri", row->fAlbumUri}
-	};
-}
-
-static bool
-ReadCacheJson(const BPath& path, nlohmann::json& j)
-{
-	BFile file(path.Path(), B_READ_ONLY);
-	if (file.InitCheck() != B_OK)
-		return false;
-
-	off_t size;
-	if (file.GetSize(&size) != B_OK)
-		return false;
-	if (size <= 0 || size > 50 * 1024 * 1024)
-		return false;
-
-	std::string content((size_t)size, '\0');
-	if (file.Read(&content[0], (size_t)size) != size)
-		return false;
-
-	try {
-		j = nlohmann::json::parse(content);
-		return true;
-	} catch (...) {
-		return false;
-	}
+	PlaylistCacheDocument::Track track;
+	track.number = TrackRowNumber(row, rowIndex + 1);
+	track.title = TrackRowStringAt(row, 1);
+	track.artist = TrackRowStringAt(row, 2);
+	track.bpm = TrackRowStringAt(row, 3);
+	track.key = TrackRowStringAt(row, 4);
+	track.album = TrackRowStringAt(row, 5);
+	track.duration = TrackRowStringAt(row, 6);
+	track.uri = row->fTrackUri;
+	track.artistUri = row->fArtistUri;
+	track.albumUri = row->fAlbumUri;
+	return track;
 }
 
 static std::string
@@ -504,58 +416,58 @@ JsonInt(const nlohmann::json& object, const char* key, int fallback = 0)
 }
 
 static TrackRow*
-CachedTrackRowFromJson(const nlohmann::json& track,
+CachedTrackRowFromCache(const PlaylistCacheDocument::Track& track,
 	const std::string& currentPlayingTrackUri)
 {
-	int32 number = JsonInt(track, "number");
-	TrackRow* row = new TrackRow(JsonString(track, "uri"), number - 1);
-	row->fArtistUri = JsonString(track, "artist_uri");
-	row->fAlbumUri = JsonString(track, "album_uri");
-	row->SetField(new BIntegerField(number), 0);
-	row->SetField(new TrackStringField(JsonString(track, "title").c_str()), 1);
-	row->SetField(new TrackStringField(JsonString(track, "artist").c_str()), 2);
-	row->SetField(new TrackStringField(JsonString(track, "bpm").c_str()), 3);
-	row->SetField(new TrackStringField(JsonString(track, "key").c_str()), 4);
-	row->SetField(new TrackStringField(JsonString(track, "album").c_str()), 5);
-	row->SetField(new TrackStringField(JsonString(track, "duration").c_str()), 6);
+	TrackRow* row = new TrackRow(track.uri, track.number - 1);
+	row->fArtistUri = track.artistUri;
+	row->fAlbumUri = track.albumUri;
+	row->SetField(new BIntegerField(track.number), 0);
+	row->SetField(new TrackStringField(track.title.c_str()), 1);
+	row->SetField(new TrackStringField(track.artist.c_str()), 2);
+	row->SetField(new TrackStringField(track.bpm.c_str()), 3);
+	row->SetField(new TrackStringField(track.key.c_str()), 4);
+	row->SetField(new TrackStringField(track.album.c_str()), 5);
+	row->SetField(new TrackStringField(track.duration.c_str()), 6);
 	row->SetPlaying(!currentPlayingTrackUri.empty()
 		&& row->fTrackUri == currentPlayingTrackUri);
 	return row;
 }
 
-static bool IsLikedSongsCacheFresh(const nlohmann::json& object);
-
-static bool
-PrepareTrackCacheHeader(const nlohmann::json& j, bool isPlaylist,
-	std::string& cachedSnapshotId)
-{
-	if (!j.contains("tracks") || !j["tracks"].is_array())
-		return false;
-	if (!isPlaylist)
-		return IsLikedSongsCacheFresh(j);
-	cachedSnapshotId = JsonString(j, "snapshot_id");
-	return !cachedSnapshotId.empty();
-}
-
 static void
-AddCachedTrackRows(const nlohmann::json& tracks, BColumnListView* trackList,
+AddCachedTrackRows(const std::vector<PlaylistCacheDocument::Track>& tracks,
+	BColumnListView* trackList,
 	const std::string& currentPlayingTrackUri)
 {
-	for (const auto& track : tracks) {
-		if (track.is_object())
-			trackList->AddRow(CachedTrackRowFromJson(track,
-				currentPlayingTrackUri));
-	}
+	for (const PlaylistCacheDocument::Track& track : tracks)
+		trackList->AddRow(CachedTrackRowFromCache(track,
+			currentPlayingTrackUri));
 }
 
-static void
-NormalizeTrackCachePage(int32& offset, int32& total, int32 rowCount)
+
+static std::string sFormatDate(const std::string& isoDate);
+
+
+static TrackRow*
+EpisodeRowFromEpisode(const PlaylistEpisode& episode,
+	const std::string& currentPlayingTrackUri)
 {
-	if (offset < rowCount)
-		offset = rowCount;
-	if (total < rowCount)
-		total = rowCount;
+	TrackRow* row = new TrackRow(episode.trackUri);
+	row->fDescription = episode.description;
+	row->SetField(new BIntegerField(episode.number), 0);
+	row->SetField(new TrackStringField(episode.title.c_str()), 1);
+	std::string displayDescription = FormatMediaDescription(
+		episode.description);
+	row->SetField(new TrackStringField(displayDescription.c_str()), 2);
+	row->SetField(new TrackStringField(""), 3);
+	row->SetField(new TrackStringField(""), 4);
+	row->SetField(new TrackStringField(sFormatDate(episode.date).c_str()), 5);
+	row->SetField(new TrackStringField(episode.duration.c_str()), 6);
+	row->SetPlaying(!currentPlayingTrackUri.empty()
+		&& row->fTrackUri == currentPlayingTrackUri);
+	return row;
 }
+
 
 static void
 SetCachedTrackInfo(BStringView* infoView, bool isPlaylist, int32 total,
@@ -609,43 +521,6 @@ FormatTrackDuration(int ms)
 	snprintf(buf, sizeof(buf), "%d:%02d", mins, seconds);
 	return std::string(buf);
 }
-
-static bool
-ShowCachePath(const std::string& showId, BPath& path, bool createDirectories)
-{
-	std::string file = SettingsController::CacheFilePath("shows",
-		showId + ".json", createDirectories);
-	return !file.empty() && path.SetTo(file.c_str()) == B_OK;
-}
-
-static bool
-LikedSongsCachePath(BPath& path, bool createDirectories)
-{
-	std::string file = SettingsController::CacheFilePath("library",
-		"liked-songs.json", createDirectories);
-	return !file.empty() && path.SetTo(file.c_str()) == B_OK;
-}
-
-static bool
-IsLikedSongsCacheFresh(const nlohmann::json& object)
-{
-	if (JsonInt(object, "version") < kLikedSongsCacheVersion)
-		return false;
-	time_t cachedAt = (time_t)JsonInt(object, "cached_at", 0);
-	time_t now = time(NULL);
-	return cachedAt > 0 && now >= cachedAt
-		&& now - cachedAt <= kLikedSongsCacheMaxAge;
-}
-
-static bool
-PlaylistCachePath(const std::string& playlistId, BPath& path,
-	bool createDirectories)
-{
-	std::string file = SettingsController::CacheFilePath("playlists",
-		playlistId + ".json", createDirectories);
-	return !file.empty() && path.SetTo(file.c_str()) == B_OK;
-}
-
 
 static void
 AddTrackToMessage(BMessage* msg, const nlohmann::json& track, int32 number,
@@ -1113,7 +988,7 @@ PlaylistWindow::_HandleTrackActionMessage(BMessage* message)
 			_ShowPlayableContextMenu(message);
 			return true;
 		case MSG_PLAY_PAUSE:
-			_PlayContextUri();
+			be_app->PostMessage(message);
 			return true;
 		case MSG_TRACK_INVOKED:
 			_PlayCurrentTrack();
@@ -1318,7 +1193,11 @@ PlaylistWindow::_HandleAppForwardMessage(BMessage* message)
 	switch (message->what) {
 		case MSG_OPEN_BROWSER:
 		case MSG_OPEN_PLAYLIST:
+		case MSG_SHOW_ARTIST:
+		case MSG_SHOW_ALBUM:
 		case MSG_INIT_AUTH:
+		case MSG_PLAY_PAUSE:
+		case 'open':
 			be_app->PostMessage(message);
 			return true;
 		case 'sout':
@@ -1545,6 +1424,7 @@ PlaylistWindow::_PlayTrackFromMessage(BMessage* message)
 			play.AddString("artist", artist->String());
 		break;
 	}
+	_AddFollowingTrackQueue(play, trackUri);
 	_AddPodcastNowPlayingContext(play);
 	be_app->PostMessage(&play);
 }
@@ -1567,6 +1447,7 @@ PlaylistWindow::_PlayCurrentTrack()
 		play.AddString("title", title->String());
 	if (!podcast && artist)
 		play.AddString("artist", artist->String());
+	_AddFollowingTrackQueue(play, row->fTrackUri);
 	_AddPodcastNowPlayingContext(play);
 	be_app->PostMessage(&play);
 	SetPlayingTrack(row->fTrackUri.c_str());
@@ -1580,20 +1461,33 @@ PlaylistWindow::_RemoveTrackFromLibrary(BMessage* message)
 	if (!*trackUri)
 		return;
 
-	for (int32 i = 0; i < fTrackList->CountRows(); i++) {
-		TrackRow* row = (TrackRow*)fTrackList->RowAt(i);
-		if (row && row->fTrackUri == trackUri) {
-			fTrackList->RemoveRow(row);
-			delete row;
-			break;
+	std::string uri = trackUri;
+	bool removeFromVisibleList = fUri == "spotify:collection";
+	if (removeFromVisibleList) {
+		for (int32 i = 0; i < fTrackList->CountRows(); i++) {
+			TrackRow* row = (TrackRow*)fTrackList->RowAt(i);
+			if (row && row->fTrackUri == uri) {
+				fTrackList->RemoveRow(row);
+				delete row;
+				break;
+			}
 		}
 	}
 	App* app = (App*)be_app;
 	SpotifyApi* api = app->GetApi();
 	if (!api)
 		return;
-	api->Library().RemoveLibraryItems({trackUri}, nullptr);
-	_DeleteCache();
+	api->Library().RemoveLibraryItems({uri}, [uri](bool ok,
+			const nlohmann::json&) {
+		if (!ok || SpotifyItemKindForUri(uri) != kSpotifyItemEpisode)
+			return;
+		BMessage changed(MSG_LIBRARY_CHANGED);
+		changed.AddString("operation", "remove");
+		changed.AddString("uri", uri.c_str());
+		be_app->PostMessage(&changed);
+	});
+	if (removeFromVisibleList)
+		_DeleteCache();
 }
 
 
@@ -1637,9 +1531,7 @@ PlaylistWindow::_AddMessageTrackToPlaylist(BMessage* message)
 	if (!api)
 		return;
 	api->Playlists().AddTrackToPlaylist(playlistId, trackUri, nullptr);
-	BPath path;
-	if (PlaylistCachePath(playlistId, path, false))
-		unlink(path.Path());
+	PlaylistCacheFiles::RemovePlaylist(playlistId);
 }
 
 
@@ -2337,27 +2229,36 @@ PlaylistWindow::_ApplyEpisodePage(BMessage* message)
 }
 
 
+static bool
+MessageEpisodeAt(BMessage* message, int32 index, PlaylistEpisode& episode)
+{
+	int32 number;
+	if (message->FindInt32("number", index, &number) != B_OK)
+		return false;
+
+	const char* title = message->FindString("title", index);
+	const char* description = message->FindString("description", index);
+	const char* date = message->FindString("date", index);
+	const char* duration = message->FindString("duration", index);
+	const char* trackUri = message->FindString("trackUri", index);
+	episode = MakePlaylistEpisode(number, title ? title : "",
+		description ? description : "", date ? date : "",
+		duration ? duration : "", trackUri ? trackUri : "");
+	return true;
+}
+
+
 size_t
 PlaylistWindow::_AppendEpisodePageItems(BMessage* message)
 {
 	size_t firstNewEpisode = fEpisodes.size();
-	const char *title, *description, *date, *duration, *trackUri;
-	int32 number;
-	for (int i = 0; message->FindInt32("number", i, &number) == B_OK; i++) {
-		title = message->FindString("title", i);
-		description = message->FindString("description", i);
-		date = message->FindString("date", i);
-		duration = message->FindString("duration", i);
-		trackUri = message->FindString("trackUri", i);
-		std::string uri = trackUri ? trackUri : "";
-		std::string titleStr = title ? title : "";
-		std::string dateStr = date ? date : "";
-		std::string durationStr = duration ? duration : "";
-		if (_HasEpisode(uri, titleStr, dateStr, durationStr))
+	PlaylistEpisode episode;
+	for (int32 i = 0; MessageEpisodeAt(message, i, episode); i++) {
+		if (_HasEpisode(episode.trackUri, episode.title, episode.date,
+				episode.duration)) {
 			continue;
-		fEpisodes.push_back({number, titleStr, description ? description : "",
-			dateStr, durationStr, uri,
-			LowercaseSearchText(titleStr, description ? description : "")});
+		}
+		fEpisodes.push_back(episode);
 	}
 	return firstNewEpisode;
 }
@@ -2379,25 +2280,14 @@ PlaylistWindow::_ApplyPodcastHeadPage(BMessage* message)
 	int32 nextOffset = message->GetInt32("next_offset", offset + pageCount);
 
 	bool reachedKnownEpisode = false;
-	const char *title, *description, *date, *duration, *trackUri;
-	int32 number;
-	for (int i = 0; message->FindInt32("number", i, &number) == B_OK; i++) {
-		title = message->FindString("title", i);
-		description = message->FindString("description", i);
-		date = message->FindString("date", i);
-		duration = message->FindString("duration", i);
-		trackUri = message->FindString("trackUri", i);
-		std::string uri = trackUri ? trackUri : "";
-		std::string titleStr = title ? title : "";
-		std::string dateStr = date ? date : "";
-		std::string durationStr = duration ? duration : "";
-		if (_HasEpisode(uri, titleStr, dateStr, durationStr)) {
+	PlaylistEpisode episode;
+	for (int32 i = 0; MessageEpisodeAt(message, i, episode); i++) {
+		if (_HasEpisode(episode.trackUri, episode.title, episode.date,
+				episode.duration)) {
 			reachedKnownEpisode = true;
 			break;
 		}
-		fPendingPodcastHeadEpisodes.push_back({number, titleStr,
-			description ? description : "", dateStr, durationStr, uri,
-			LowercaseSearchText(titleStr, description ? description : "")});
+		fPendingPodcastHeadEpisodes.push_back(episode);
 	}
 
 	if (!reachedKnownEpisode && pageCount > 0
@@ -2877,10 +2767,10 @@ void
 PlaylistWindow::ShowContextMenu(BView*, BPoint where, BPoint screenWhere)
 {
 	TrackRow* row = (TrackRow*)fTrackList->RowAt(where);
-	if (!row) row = (TrackRow*)fTrackList->CurrentSelection();
 	if (!row || row->fTrackUri.empty()) return;
 
-	fTrackList->AddToSelection(row);
+	fTrackList->DeselectAll();
+	fTrackList->SetFocusRow(row, true);
 
 	App* app = (App*)be_app;
 	SpotifyApi* api = app->GetApi();
@@ -3619,6 +3509,27 @@ PlaylistWindow::SetPlayingTrack(const char* trackUri)
 }
 
 void
+PlaylistWindow::_AddFollowingTrackQueue(BMessage& play,
+	const std::string& trackUri) const
+{
+	if (!fTrackList || trackUri.empty())
+		return;
+
+	bool found = false;
+	for (int32 index = 0; index < fTrackList->CountRows(); index++) {
+		TrackRow* row = (TrackRow*)fTrackList->RowAt(index);
+		if (!row || row->fTrackUri.empty())
+			continue;
+		if (!found) {
+			found = row->fTrackUri == trackUri;
+			continue;
+		}
+		play.AddString("next_queue_uri", row->fTrackUri.c_str());
+	}
+}
+
+
+void
 PlaylistWindow::_AddPodcastNowPlayingContext(BMessage& play) const
 {
 	if (SpotifyItemKindForUri(fUri) != kSpotifyItemShow)
@@ -4050,27 +3961,13 @@ PlaylistWindow::_RebuildEpisodeList(const std::string& filter)
 {
 	fTrackList->Clear();
 
-	std::string lf = filter;
-	for (char& c : lf) c = (char)tolower((unsigned char)c);
+	std::string normalizedFilter = NormalizePlaylistEpisodeFilter(filter);
 
 	for (const auto& ep : fEpisodes) {
-		if (!lf.empty()) {
-			if (ep.searchText.find(lf) == std::string::npos)
-				continue;
-		}
-		TrackRow* row = new TrackRow(ep.trackUri);
-		row->fDescription = ep.description;
-		row->SetField(new BIntegerField(ep.number),             0);
-		row->SetField(new TrackStringField(ep.title.c_str()),   1);
-		std::string displayDescription = FormatMediaDescription(ep.description);
-		row->SetField(new TrackStringField(displayDescription.c_str()), 2);
-		row->SetField(new TrackStringField(""),                     3);
-		row->SetField(new TrackStringField(""),                     4);
-		row->SetField(new TrackStringField(sFormatDate(ep.date).c_str()), 5);
-		row->SetField(new TrackStringField(ep.duration.c_str()),    6);
-		row->SetPlaying(!fCurrentPlayingTrackUri.empty()
-			&& row->fTrackUri == fCurrentPlayingTrackUri);
-		fTrackList->AddRow(row);
+		if (!PlaylistEpisodeMatchesFilter(ep, normalizedFilter))
+			continue;
+		fTrackList->AddRow(EpisodeRowFromEpisode(ep,
+			fCurrentPlayingTrackUri));
 	}
 }
 
@@ -4078,30 +3975,15 @@ void
 PlaylistWindow::_AppendEpisodeRows(size_t firstEpisode,
 	const std::string& filter)
 {
-	std::string lowerFilter = filter;
-	for (char& character : lowerFilter)
-		character = (char)tolower((unsigned char)character);
+	std::string normalizedFilter = NormalizePlaylistEpisodeFilter(filter);
 
 	for (size_t index = firstEpisode; index < fEpisodes.size(); index++) {
-		const EpisodeData& episode = fEpisodes[index];
-		if (!lowerFilter.empty()
-				&& episode.searchText.find(lowerFilter) == std::string::npos)
+		const PlaylistEpisode& episode = fEpisodes[index];
+		if (!PlaylistEpisodeMatchesFilter(episode, normalizedFilter))
 			continue;
 
-		TrackRow* row = new TrackRow(episode.trackUri);
-		row->fDescription = episode.description;
-		row->SetField(new BIntegerField(episode.number), 0);
-		row->SetField(new TrackStringField(episode.title.c_str()), 1);
-		std::string displayDescription = FormatMediaDescription(
-			episode.description);
-		row->SetField(new TrackStringField(displayDescription.c_str()), 2);
-		row->SetField(new TrackStringField(""), 3);
-		row->SetField(new TrackStringField(""), 4);
-		row->SetField(new TrackStringField(sFormatDate(episode.date).c_str()), 5);
-		row->SetField(new TrackStringField(episode.duration.c_str()), 6);
-		row->SetPlaying(!fCurrentPlayingTrackUri.empty()
-			&& row->fTrackUri == fCurrentPlayingTrackUri);
-		fTrackList->AddRow(row);
+		fTrackList->AddRow(EpisodeRowFromEpisode(episode,
+			fCurrentPlayingTrackUri));
 	}
 }
 
@@ -4272,32 +4154,28 @@ PlaylistWindow::_LoadCache()
 bool
 PlaylistWindow::_LoadTrackCache(bool isPlaylist)
 {
-	BPath path;
-	if (!_TrackCachePath(isPlaylist, path, false))
-		return false;
-
-	nlohmann::json j;
-	if (!ReadCacheJson(path, j))
-		return false;
-
 	try {
-		std::string cachedSnapshotId;
-		if (!PrepareTrackCacheHeader(j, isPlaylist, cachedSnapshotId))
+		PlaylistCacheFiles::TrackDocument document;
+		if (!PlaylistCacheFiles::ReadTrackDocument(isPlaylist,
+				SpotifyItemIdForUri(fUri), document)) {
 			return false;
+		}
 		if (isPlaylist) {
-			fCachedPlaylistSnapshotId = cachedSnapshotId;
+			fCachedPlaylistSnapshotId = document.snapshotId;
 			fPlaylistSnapshotId = fCachedPlaylistSnapshotId;
 		}
 
 		if (fTrackList)
 			fTrackList->Clear();
-		fPageTotal = JsonInt(j, "total");
-		fPageOffset = JsonInt(j, "next_offset");
+		fPageTotal = document.total;
+		fPageOffset = document.nextOffset;
 
-		AddCachedTrackRows(j["tracks"], fTrackList, fCurrentPlayingTrackUri);
-		NormalizeTrackCachePage(fPageOffset, fPageTotal,
-			fTrackList->CountRows());
-		fPageHasMore = fPageTotal <= 0 || fPageOffset < fPageTotal;
+		AddCachedTrackRows(document.tracks, fTrackList, fCurrentPlayingTrackUri);
+		CachedPageState pageState = ResolveCachedTrackPageState(fPageOffset,
+			fPageTotal, fTrackList->CountRows());
+		fPageOffset = pageState.offset;
+		fPageTotal = pageState.total;
+		fPageHasMore = pageState.hasMore;
 		SetCachedTrackInfo(fPlaylistInfo, isPlaylist, fPageTotal,
 			fTrackList->CountRows());
 
@@ -4313,47 +4191,31 @@ PlaylistWindow::_LoadTrackCache(bool isPlaylist)
 bool
 PlaylistWindow::_LoadShowCache()
 {
-	BPath path;
-	if (!ShowCachePath(SpotifyItemIdForUri(fUri), path, false))
-		return false;
-
-	nlohmann::json j;
-	if (!ReadCacheJson(path, j))
-		return false;
-
 	try {
-		if (!j.contains("episodes") || !j["episodes"].is_array())
+		PlaylistCacheFiles::ShowDocument document;
+		if (!PlaylistCacheFiles::ReadShowDocument(SpotifyItemIdForUri(fUri),
+				document)) {
 			return false;
-		if (JsonInt(j, "version") < kShowCacheVersion)
-			return false;
-		fEpisodeTotal = JsonInt(j, "total");
+		}
+		fEpisodeTotal = document.total;
 		fEpisodes.clear();
-		for (const auto& ep : j["episodes"]) {
-			EpisodeData d;
-			d.number = JsonInt(ep, "number");
-			d.title = JsonString(ep, "title");
-			d.description = JsonString(ep, "description");
-			d.date = JsonString(ep, "date");
-			d.duration = JsonString(ep, "duration");
-			d.trackUri = JsonString(ep, "uri");
-			d.searchText = LowercaseSearchText(d.title, d.description);
-			fEpisodes.push_back(d);
+		for (const PlaylistCacheDocument::Episode& cached
+				: document.episodes) {
+			fEpisodes.push_back(PlaylistEpisodeFromCache(cached));
 		}
 		_RenumberEpisodes();
-		if (fEpisodeTotal < (int32)fEpisodes.size())
-			fEpisodeTotal = (int32)fEpisodes.size();
-		bool hasNextOffset = j.contains("next_offset")
-			&& j["next_offset"].is_number_integer();
-		if (!hasNextOffset && fEpisodeTotal > (int32)fEpisodes.size()) {
+		CachedPageState pageState = ResolveCachedEpisodePageState(
+			document.nextOffset, fEpisodeTotal, (int32)fEpisodes.size(),
+			document.hasNextOffset);
+		if (!pageState.valid) {
 			fEpisodes.clear();
 			return false;
 		}
-		fEpisodeOffset = JsonInt(j, "next_offset", (int32)fEpisodes.size());
-		if (fEpisodeOffset < (int32)fEpisodes.size())
-			fEpisodeOffset = (int32)fEpisodes.size();
+		fEpisodeOffset = pageState.offset;
 		fPageOffset = fEpisodeOffset;
-		fPageTotal = fEpisodeTotal;
-		fPageHasMore = fEpisodeTotal <= 0 || fEpisodeOffset < fEpisodeTotal;
+		fEpisodeTotal = pageState.total;
+		fPageTotal = pageState.total;
+		fPageHasMore = pageState.hasMore;
 		return !fEpisodes.empty();
 	} catch (...) {
 		fEpisodes.clear();
@@ -4386,73 +4248,36 @@ PlaylistWindow::_WriteCacheNow()
 
 
 bool
-PlaylistWindow::_TrackCachePath(bool isPlaylist, BPath& path,
-	bool createDirectories) const
-{
-	if (isPlaylist)
-		return PlaylistCachePath(SpotifyItemIdForUri(fUri), path,
-			createDirectories);
-	return LikedSongsCachePath(path, createDirectories);
-}
-
-
-bool
 PlaylistWindow::_WriteTrackCache(bool isPlaylist)
 {
 	if (!fTrackList)
 		return false;
 	if (isPlaylist && fPlaylistSnapshotId.empty())
 		return false;
-	BPath path;
-	if (!_TrackCachePath(isPlaylist, path, true))
-		return false;
 
-	nlohmann::json j;
-	j["total"] = fPageTotal;
-	j["next_offset"] = fPageOffset;
-	if (isPlaylist) {
-		j["snapshot_id"] = fPlaylistSnapshotId;
-	} else {
-		j["version"] = kLikedSongsCacheVersion;
-		j["cached_at"] = (int)time(NULL);
-	}
-	j["tracks"] = nlohmann::json::array();
+	std::vector<PlaylistCacheDocument::Track> tracks;
 	for (int32 i = 0; i < fTrackList->CountRows(); i++) {
 		TrackRow* row = (TrackRow*)fTrackList->RowAt(i);
 		if (row)
-			j["tracks"].push_back(TrackRowCacheJson(row, i));
+			tracks.push_back(CachedTrackFromRow(row, i));
 	}
 
-	WriteCacheAsync(path.Path(), std::move(j));
-	return true;
+	return PlaylistCacheFiles::WriteTrackDocument(isPlaylist,
+		SpotifyItemIdForUri(fUri), fPageTotal, fPageOffset,
+		fPlaylistSnapshotId, tracks);
 }
 
 
 void
 PlaylistWindow::_WriteShowCache()
 {
-	BPath path;
-	if (!ShowCachePath(SpotifyItemIdForUri(fUri), path, true))
-		return;
+	std::vector<PlaylistCacheDocument::Episode> episodes;
+	for (const PlaylistEpisode& ep : fEpisodes)
+		episodes.push_back(CacheEpisodeFromPlaylistEpisode(ep));
 
-	nlohmann::json j;
-	j["version"] = kShowCacheVersion;
-	j["total"] = fEpisodeTotal;
-	j["next_offset"] = fEpisodeOffset;
-	j["complete"] = fEpisodeTotal <= 0 || fEpisodeOffset >= fEpisodeTotal;
-	j["episodes"] = nlohmann::json::array();
-	for (const EpisodeData& ep : fEpisodes) {
-		j["episodes"].push_back({
-			{"number",      ep.number},
-			{"title",       ep.title},
-			{"description", ep.description},
-			{"date",        ep.date},
-			{"duration",    ep.duration},
-			{"uri",         ep.trackUri}
-		});
-	}
-
-	WriteCacheAsync(path.Path(), std::move(j));
+	PlaylistCacheFiles::WriteShowDocument(SpotifyItemIdForUri(fUri),
+		fEpisodeTotal, fEpisodeOffset,
+		fEpisodeTotal <= 0 || fEpisodeOffset >= fEpisodeTotal, episodes);
 }
 
 void
@@ -4461,24 +4286,15 @@ PlaylistWindow::_DeleteCache()
 	delete fCacheSaveRunner;
 	fCacheSaveRunner = nullptr;
 	if (fUri == "spotify:collection") {
-		BPath path;
-		if (!LikedSongsCachePath(path, false)) return;
-		CancelCacheWrite(path.Path());
-		unlink(path.Path());
+		PlaylistCacheFiles::RemoveLikedSongs();
 		return;
 	}
 	if (SpotifyItemKindForUri(fUri) == kSpotifyItemPlaylist) {
-		BPath path;
-		if (!PlaylistCachePath(SpotifyItemIdForUri(fUri), path, false)) return;
-		CancelCacheWrite(path.Path());
-		unlink(path.Path());
+		PlaylistCacheFiles::RemovePlaylist(SpotifyItemIdForUri(fUri));
 		return;
 	}
 	if (SpotifyItemKindForUri(fUri) != kSpotifyItemShow) return;
-	BPath path;
-	if (!ShowCachePath(SpotifyItemIdForUri(fUri), path, false)) return;
-	CancelCacheWrite(path.Path());
-	unlink(path.Path());
+	PlaylistCacheFiles::RemoveShow(SpotifyItemIdForUri(fUri));
 }
 
 

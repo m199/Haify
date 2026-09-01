@@ -56,6 +56,7 @@ private:
 	void						_BroadcastReplicantAppearance();
 	bool						_HandleGeneralMessage(BMessage* message);
 	bool						_HandleAppearanceMessage(BMessage* message);
+	bool						_HandlePlaybackMessage(BMessage* message);
 	bool						_HandlePathLibrespotMessage(BMessage* message);
 	bool						_HandleSpotifyMessage(BMessage* message);
 	void						_RevertCurrentCategory();
@@ -102,6 +103,7 @@ private:
 	BPopUpMenu*					fBitrateMenu		= nullptr;
 	BSlider*					fVolumeSlider		= nullptr;
 	BCheckBox*					fAutoplayCheck		= nullptr;
+	BCheckBox*					fHaifyAutoplayCheck	= nullptr;
 	BCheckBox*					fNormalizationCheck	= nullptr;
 
 	BTextControl*				fDeviceNameControl	= nullptr;

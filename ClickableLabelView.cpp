@@ -68,10 +68,11 @@ void ClickableLabelView::MouseDown(BPoint where) {
     }
 
     if (fMsgWhat && !fText.empty()) {
-        BView* parent = Parent();
-        if (parent) {
+        BHandler* target = Window() ? static_cast<BHandler*>(Window())
+            : static_cast<BHandler*>(Parent());
+        if (target) {
             BMessage msg(fMsgWhat);
-            BMessenger(parent).SendMessage(&msg);
+            BMessenger(target).SendMessage(&msg);
         }
         BView::MouseDown(BPoint());
         return;

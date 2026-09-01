@@ -25,6 +25,13 @@ struct PlaylistMetadataPageState {
 	bool hasMore = false;
 };
 
+struct CachedPageState {
+	int offset = 0;
+	int total = 0;
+	bool hasMore = false;
+	bool valid = true;
+};
+
 enum NowPlayingTitleClickAction {
 	kNowPlayingTitleClickIgnore = 0,
 	kNowPlayingTitleClickShowAlbum,
@@ -130,6 +137,21 @@ ShouldPreserveCurrentAudiobookContext(bool optimistic, bool trackChanged,
 }
 
 inline bool
+ShouldCarryAudiobookContextAcrossChapterChange(bool optimistic,
+	bool trackChanged, const std::string& trackUri,
+	const std::string& currentParentKind,
+	const std::string& reportedParentKind,
+	const std::string& currentOpenUri, const std::string& reportedOpenUri)
+{
+	return !optimistic && trackChanged
+		&& SpotifyItemKindForUri(trackUri) == kSpotifyItemEpisode
+		&& currentParentKind == "audiobook"
+		&& reportedParentKind.empty()
+		&& SpotifyItemKindForUri(currentOpenUri) == kSpotifyItemAudiobook
+		&& SpotifyItemKindForUri(reportedOpenUri) != kSpotifyItemShow;
+}
+
+inline bool
 ShouldRetryStartupEmptyPlaybackPoll(bool hasItem, bool hadPlaybackState,
 	long long nowUs, long long retryUntilUs)
 {
@@ -155,6 +177,11 @@ inline NowPlayingTitleClickAction
 ResolveNowPlayingTitleClickAction(const std::string& albumId,
 	const std::string& openUri)
 {
+	SpotifyItemKind openKind = SpotifyItemKindForUri(openUri);
+	if (openKind == kSpotifyItemShow || openKind == kSpotifyItemAudiobook
+			|| openKind == kSpotifyItemEpisode) {
+		return kNowPlayingTitleClickOpenUri;
+	}
 	if (!albumId.empty())
 		return kNowPlayingTitleClickShowAlbum;
 	if (!openUri.empty())
@@ -166,11 +193,31 @@ inline NowPlayingSubtitleClickAction
 ResolveNowPlayingSubtitleClickAction(const std::string& artistId,
 	const std::string& openUri)
 {
+	SpotifyItemKind openKind = SpotifyItemKindForUri(openUri);
+	if (openKind == kSpotifyItemShow || openKind == kSpotifyItemAudiobook
+			|| openKind == kSpotifyItemEpisode) {
+		return kNowPlayingSubtitleClickOpenUri;
+	}
 	if (!artistId.empty())
 		return kNowPlayingSubtitleClickShowArtist;
 	if (!openUri.empty())
 		return kNowPlayingSubtitleClickOpenUri;
 	return kNowPlayingSubtitleClickIgnore;
+}
+
+inline bool
+NowPlayingUsesTrackIds(const std::string& itemKind,
+	const std::string& openUri)
+{
+	SpotifyItemKind effectiveKind = SpotifyItemKindForTypeName(itemKind);
+	SpotifyItemKind openKind = SpotifyItemKindForUri(openUri);
+	if (effectiveKind == kSpotifyItemEpisode
+			|| openKind == kSpotifyItemShow
+			|| openKind == kSpotifyItemAudiobook
+			|| openKind == kSpotifyItemEpisode) {
+		return false;
+	}
+	return true;
 }
 
 inline std::vector<std::string>
@@ -279,5 +326,31 @@ ResolvePlaylistMetadataPageState(int remoteTotal, int currentTotal,
 	state.hasMore = remoteTotal < 0
 		? (state.total <= 0 || pageOffset < state.total)
 		: pageOffset < state.total;
+	return state;
+}
+
+inline CachedPageState
+ResolveCachedTrackPageState(int cachedOffset, int cachedTotal,
+	int loadedRowCount)
+{
+	CachedPageState state;
+	state.offset = std::max(cachedOffset, loadedRowCount);
+	state.total = std::max(cachedTotal, loadedRowCount);
+	state.hasMore = state.total <= 0 || state.offset < state.total;
+	return state;
+}
+
+inline CachedPageState
+ResolveCachedEpisodePageState(int cachedOffset, int cachedTotal,
+	int loadedEpisodeCount, bool hasNextOffset)
+{
+	CachedPageState state;
+	state.valid = hasNextOffset || cachedTotal <= loadedEpisodeCount;
+	if (!state.valid)
+		return state;
+
+	state.total = std::max(cachedTotal, loadedEpisodeCount);
+	state.offset = std::max(cachedOffset, loadedEpisodeCount);
+	state.hasMore = state.total <= 0 || state.offset < state.total;
 	return state;
 }

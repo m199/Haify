@@ -232,9 +232,9 @@ DiscoverListView::_ShowContextMenuAt(BPoint screenWhere)
 		ConvertFromScreen(&where);
 
 	DiscoverRow* row = dynamic_cast<DiscoverRow*>(RowAt(where));
-	if (!row) row = dynamic_cast<DiscoverRow*>(CurrentSelection());
 	if (!row || row->fUris.empty()) return;
-	AddToSelection(row);
+	DeselectAll();
+	SetFocusRow(row, true);
 
 	int32 col = _ColumnAt(where.x);
 	if (col < 0 || col >= (int32)row->fUris.size()

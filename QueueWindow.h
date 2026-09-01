@@ -6,11 +6,13 @@
 
 class BColumnListView;
 class BMenuBar;
+class BMessageRunner;
 class BTabView;
 
 class QueueWindow : public BWindow {
 public:
 							QueueWindow();
+	virtual					~QueueWindow();
 	virtual bool			QuitRequested();
 	virtual void			MessageReceived(BMessage* message);
 
@@ -38,6 +40,7 @@ private:
 	BTabView*				fTabView		= nullptr;
 	BColumnListView*		fList			= nullptr;
 	BColumnListView*		fRecentList		= nullptr;
+	BMessageRunner*			fLiveRefreshRunner = nullptr;
 	std::string				fCurrentUri;
 	bool					fRecentLoaded	= false;
 };

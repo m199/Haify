@@ -17,6 +17,8 @@
 #include <Menu.h>
 #include <MenuItem.h>
 #include <MessageFilter.h>
+#include <MessageRunner.h>
+#include <Messenger.h>
 #include <ScrollBar.h>
 #include <TabView.h>
 #include <Catalog.h>
@@ -26,6 +28,8 @@
 #define B_TRANSLATION_CONTEXT "QueueWindow"
 
 static const uint32 kMsgTabSelected = 'tabS';
+static const uint32 kMsgLiveRefresh = 'qLiv';
+static const bigtime_t kQueueLiveRefreshInterval = 5000000LL;
 
 static bool
 IsSecondaryMouseClick(BMessage* message)
@@ -161,9 +165,9 @@ public:
 		}
 
 		QueueRow* row = dynamic_cast<QueueRow*>(RowAt(where));
-		if (!row) row = dynamic_cast<QueueRow*>(CurrentSelection());
 		if (!row || row->fUri.empty()) return;
-		AddToSelection(row);
+		DeselectAll();
+		SetFocusRow(row, true);
 
 		BPoint screen = where;
 		ConvertToScreen(&screen);
@@ -183,9 +187,9 @@ public:
 				else
 					ConvertFromScreen(&where);
 				QueueRow* row = dynamic_cast<QueueRow*>(RowAt(where));
-				if (!row) row = dynamic_cast<QueueRow*>(CurrentSelection());
 				if (row && !row->fUri.empty()) {
-					AddToSelection(row);
+					DeselectAll();
+					SetFocusRow(row, true);
 					App* app = (App*)be_app;
 					SpotifyApi* api = app->GetApi();
 					ShowTrackContextMenu(row->fUri, "", screen,
@@ -264,6 +268,15 @@ QueueWindow::QueueWindow()
 	}
 	_InitLayout();
 	_LoadQueue();
+	BMessage refresh(kMsgLiveRefresh);
+	fLiveRefreshRunner = new BMessageRunner(BMessenger(this), &refresh,
+		kQueueLiveRefreshInterval);
+}
+
+
+QueueWindow::~QueueWindow()
+{
+	delete fLiveRefreshRunner;
 }
 
 
@@ -352,8 +365,15 @@ QueueWindow::MessageReceived(BMessage* message)
 			_RefreshQueueAndRecent();
 			break;
 
+		case kMsgLiveRefresh:
+			_LoadQueue();
+			if (fRecentLoaded && fTabView && fTabView->Selection() == 1)
+				_LoadRecent();
+			break;
+
 		case 'pStU':
 			_ApplyPlayingTrack(message);
+			_LoadQueue();
 			break;
 
 		case 'qItm':

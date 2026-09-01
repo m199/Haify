@@ -378,11 +378,10 @@ private:
 			ConvertFromScreen(&point);
 
 		AlbumArtistRow* row = dynamic_cast<AlbumArtistRow*>(RowAt(point));
-		if (!row)
-			row = dynamic_cast<AlbumArtistRow*>(CurrentSelection());
 		if (!row || row->fAlbumId.empty())
 			return;
-		AddToSelection(row);
+		DeselectAll();
+		SetFocusRow(row, true);
 
 		std::string uri = SpotifyUriForItemKind(kSpotifyItemAlbum,
 			row->fAlbumId);
@@ -538,7 +537,6 @@ ArtistWindow::ArtistWindow(const std::string& artistId)
 	.End();
 
 	SetSizeLimits(495, 100000, 430, 100000);
-	_LoadData();
 }
 
 
@@ -682,11 +680,10 @@ void ArtistWindow::ShowTrackContextMenu(BPoint local, BPoint screen)
 {
 	TrackArtistRow* row =
 	    dynamic_cast<TrackArtistRow*>(fTrackList->RowAt(local));
-	if (!row)
-		row = dynamic_cast<TrackArtistRow*>(fTrackList->CurrentSelection());
 	if (!row || row->fTrackUri.empty()) return;
 
-	fTrackList->AddToSelection(row);
+	fTrackList->DeselectAll();
+	fTrackList->SetFocusRow(row, true);
 
 	App* app = (App*)be_app;
 	SpotifyApi* api = app->GetApi();

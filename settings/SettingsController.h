@@ -96,6 +96,7 @@ struct HaifySettings {
     int         librespotBitrate        = 320;
     int         librespotVolume         = 100;
     bool        librespotAutoplay       = true;
+    bool        haifyAutoplay           = false;
     bool        librespotNormalization  = false;
 
     std::string librespotDeviceName;

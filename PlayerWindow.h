@@ -1,10 +1,13 @@
 #ifndef PLAYERWINDOW_H
 #define PLAYERWINDOW_H
 
+#include "spotify/SpotifyUri.h"
+
 #include <Message.h>
 #include <Window.h>
 #include <map>
 #include <string>
+#include <vector>
 
 class BMenu;
 class BMenuBar;
@@ -58,6 +61,9 @@ private:
 	void					_SchedulePlaybackPoll(bigtime_t delay);
 	void					_FetchQueuePrediction();
 	void					_HandlePlaybackTick();
+	bool					_ShouldFetchQueuePrediction(
+								int32 remainingMs) const;
+	void					_ApplyFinishedTrackTransition();
 	void					_ScheduleVerifyPoll(bigtime_t delay);
 	void					_ApplyPredictedNext();
 	void					_ApplyPlaybackMessage(BMessage* message);
@@ -72,6 +78,8 @@ private:
 	void					_ResolvePlaybackMetadata(
 								PlaybackMessageData& update,
 								bool trackChanged);
+	void					_SyncAudiobookQueueForPlayback(
+								const PlaybackMessageData& update);
 	void					_StorePlaybackMetadata(
 								const PlaybackMessageData& update);
 	void					_StorePlaybackState(
@@ -88,10 +96,21 @@ private:
 	bool					_HandleAccountDeviceMessage(BMessage* message);
 	void					_ApplyPlaybackPollResult(BMessage* message);
 	void					_ApplyAudiobookContextResult(BMessage* message);
+	bool					_ShouldUseHaifyAutoplay(SpotifyItemKind kind,
+								const std::string& contextUri,
+								const std::vector<std::string>& queueUris,
+								bool audiobookQueue,
+								int32 startPositionMs) const;
+	void					_RequestHaifyAutoplay(
+								const std::string& seedUri);
+	void					_ApplyHaifyAutoplayResult(BMessage* message);
+	bool					_PlayNextHaifyAutoplayTrack();
+	void					_ClearHaifyAutoplay();
 	void					_PlayUri(BMessage* message);
 	void					_ApplyQueuePrediction(BMessage* message);
 	void					_ApplyVerifyPoll();
 	void					_TogglePlayPause();
+	bool					_PlayNextAudiobookChapter();
 	void					_SkipNextTrack();
 	void					_SkipPreviousTrack();
 	void					_SetVolumeFromMessage(BMessage* message);
@@ -114,7 +133,8 @@ private:
 	void					_ResolveAudiobookContextForPlayback(
 								const std::string& trackUri,
 								const std::string& parentKind,
-								const std::string& openUri);
+								const std::string& openUri,
+								bool metadataIncomplete);
 	void					_FillReplicantStateMessage(BMessage& message,
 								int32 progressMs) const;
 	void					_ReadLibrespotEvent();
@@ -196,6 +216,10 @@ private:
 	bool					fAudiobookContextRequestPending = false;
 	std::string				fAudiobookContextRequestTrackUri;
 	std::string				fLastAudiobookContextLookupTrackUri;
+	std::vector<std::string> fAudiobookNextUris;
+	bool					fHaifyAutoplayRequestPending = false;
+	std::string				fHaifyAutoplaySeedUri;
+	std::vector<std::string> fHaifyAutoplayNextUris;
 	bool					fHasPendingLibrespotTrack = false;
 	BMessage				fPendingLibrespotTrack;
 	BMessage				fPredictedNext;

@@ -1,6 +1,8 @@
 #ifndef PLAYLISTWINDOW_H
 #define PLAYLISTWINDOW_H
 
+#include "playlist/PlaylistEpisode.h"
+
 #include <Window.h>
 #include <Entry.h>
 #include <string>
@@ -37,16 +39,6 @@ public:
 	void					ShowContextMenu(BView* target, BPoint where, BPoint screenWhere);
 
 private:
-	struct EpisodeData {
-		int32       number;
-		std::string title;
-		std::string description;
-		std::string date;
-		std::string duration;
-		std::string trackUri;
-		std::string searchText;
-	};
-
 	void					_InitMenu();
 	void					_InitLayout(const char* playlistName);
 	void					_ShowRenamePlaylistDialog(BMessage* message);
@@ -55,6 +47,8 @@ private:
 	void					_ShowPlayableContextMenu(BMessage* message);
 	void					_PlayContextUri();
 	void					_PlayCurrentTrack();
+	void					_AddFollowingTrackQueue(BMessage& play,
+								const std::string& trackUri) const;
 	void					_RemoveTrackFromLibrary(BMessage* message);
 	void					_SavePlayableItemToLibrary(BMessage* message);
 	void					_AddMessageTrackToPlaylist(BMessage* message);
@@ -199,9 +193,6 @@ private:
 	void					_SaveCache();
 	void					_WriteCacheNow();
 	bool					_WriteTrackCache(bool isPlaylist);
-	bool					_TrackCachePath(bool isPlaylist,
-								BPath& path,
-								bool createDirectories) const;
 	void					_WriteShowCache();
 	void					_DeleteCache();
 
@@ -286,8 +277,8 @@ private:
 	bool					fEpisodeSearchPaging = false;
 	bool					fEpisodeSearchWaitingRetry = false;
 	bool					fEpisodeSearchFailed = false;
-	std::vector<EpisodeData> fEpisodes;
-	std::vector<EpisodeData> fPendingPodcastHeadEpisodes;
+	std::vector<PlaylistEpisode> fEpisodes;
+	std::vector<PlaylistEpisode> fPendingPodcastHeadEpisodes;
 };
 
 #endif

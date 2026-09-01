@@ -4,6 +4,7 @@
 
 #include <functional>
 #include <string>
+#include <vector>
 
 class PlaybackApi {
 public:
@@ -21,13 +22,17 @@ public:
     void            Play(JsonCallback callback);
     void            PlayTrack(const std::string& trackUri,
                               const std::string& contextUri,
+                              JsonCallback callback,
+                              int positionMs = 0);
+    void            PlayUris(const std::vector<std::string>& uris,
                               JsonCallback callback);
     void            PlayContext(const std::string& contextUri,
                                 JsonCallback callback);
     void            Pause(JsonCallback callback);
     void            Next(JsonCallback callback);
     void            Previous(JsonCallback callback);
-    void            Seek(int positionMs, JsonCallback callback);
+    void            Seek(int positionMs, JsonCallback callback,
+                              const std::string& deviceId = "");
     void            SetVolume(int percent, JsonCallback callback,
                               const std::string& deviceId = "");
     void            GetDevices(JsonCallback callback);

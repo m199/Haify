@@ -46,6 +46,7 @@ static const rgb_color kWhite       = { 255, 255, 255, 255 };
 #include <Window.h>
 
 #include <algorithm>
+#include <cctype>
 #include <cstdio>
 #include <math.h>
 #include <string.h>
@@ -68,6 +69,22 @@ _SetTransparentBackground(BView* view, bool transparent)
     view->SetFlags(transparent
         ? view->Flags() | B_TRANSPARENT_BACKGROUND
         : view->Flags() & ~B_TRANSPARENT_BACKGROUND);
+}
+
+
+static std::string
+TrimTrackInfoText(const char* text)
+{
+    std::string value = text ? text : "";
+    size_t begin = 0;
+    while (begin < value.size()
+            && std::isspace((unsigned char)value[begin])) {
+        begin++;
+    }
+    size_t end = value.size();
+    while (end > begin && std::isspace((unsigned char)value[end - 1]))
+        end--;
+    return value.substr(begin, end - begin);
 }
 
 
@@ -317,8 +334,8 @@ public:
 
     void SetTrack(const char* title, const char* artist)
     {
-        fTitle = title ? title : "";
-        fArtist = artist ? artist : "";
+        fTitle = TrimTrackInfoText(title);
+        fArtist = TrimTrackInfoText(artist);
         InvalidateLayout();
         Invalidate();
     }

@@ -6,7 +6,7 @@
 #define HAIFY_SETTINGS_FILE "Haify_settings"
 
 #define HAIFY_CLIENT_ID     "006877f3073c4796a6e7dedc31aadd46"
-#define HAIFY_AUTH_SCOPE_VERSION 2
+#define HAIFY_AUTH_SCOPE_VERSION 3
 
 #define SPOTIFY_API_BASE    "https://api.spotify.com/v1"
 #define SPOTIFY_AUTH_URL    "https://accounts.spotify.com/authorize"
@@ -27,6 +27,7 @@
                             "playlist-read-collaborative user-library-read " \
                             "user-library-modify playlist-modify-public " \
                             "playlist-modify-private user-follow-read user-follow-modify " \
-                            "user-read-recently-played user-top-read user-read-private"
+                            "user-read-recently-played user-top-read " \
+                            "user-read-private user-read-playback-position"
 
 #define LIBRESPOT_DEVICE_NAME "Haify"

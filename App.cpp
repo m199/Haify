@@ -524,6 +524,7 @@ App::_ShowArtistWindow(BMessage* message)
 	else {
 		window = new ArtistWindow(idString);
 		window->Show();
+		window->PostMessage('lddt');
 	}
 	_SendCurrentTrackTo(window);
 }
@@ -740,6 +741,7 @@ App::_OpenArtistUri(const std::string& id)
 	else {
 		window = new ArtistWindow(id);
 		window->Show();
+		window->PostMessage('lddt');
 	}
 	_SendCurrentTrackTo(window);
 }

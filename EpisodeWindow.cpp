@@ -2,18 +2,22 @@
 
 #include "App.h"
 #include "ArtworkView.h"
+#include "ClickableLabelView.h"
 #include "Messages.h"
 #include "NowPlayingFields.h"
 #include "spotify/SpotifyUri.h"
 #include "spotify/api/SpotifyApi.h"
 
+#include <Alignment.h>
 #include <Application.h>
-#include <Button.h>
 #include <Catalog.h>
 #include <Font.h>
 #include <GroupView.h>
 #include <InterfaceDefs.h>
 #include <LayoutBuilder.h>
+#include <Menu.h>
+#include <MenuBar.h>
+#include <MenuItem.h>
 #include <Message.h>
 #include <Messenger.h>
 #include <ScrollView.h>
@@ -121,48 +125,65 @@ EpisodeWindow::EpisodeWindow(const std::string& episodeId)
     fArtwork->ShowLoading();
     fArtwork->SetExplicitMinSize(BSize(140, 140));
     fArtwork->SetExplicitMaxSize(BSize(140, 140));
+    fArtwork->SetExplicitPreferredSize(BSize(140, 140));
 
     fName = new BStringView("episodeName", B_TRANSLATE("Loading…"));
     BFont titleFont(be_bold_font);
     titleFont.SetSize(be_plain_font->Size() * 1.5f);
     fName->SetFont(&titleFont);
-    fShow = new BStringView("episodeShow", "");
+    fName->SetExplicitMinSize(BSize(0, B_SIZE_UNSET));
+    fName->SetExplicitMaxSize(BSize(B_SIZE_UNLIMITED, B_SIZE_UNSET));
+    fName->SetExplicitAlignment(BAlignment(B_ALIGN_USE_FULL_WIDTH,
+        B_ALIGN_VERTICAL_CENTER));
+    fShow = new ClickableLabelView("episodeShow", 'eShw');
+
+    fMenuBar = new BMenuBar("episodeMenuBar");
+    BMenu* episodeMenu = new BMenu(B_TRANSLATE("Episode"));
+    fPlayMenuItem = new BMenuItem(B_TRANSLATE("Play"),
+        new BMessage('ePly'));
+    fQueueMenuItem = new BMenuItem(B_TRANSLATE("Add to Queue"),
+        new BMessage('eQue'));
+    fSaveMenuItem = new BMenuItem(B_TRANSLATE("Save"),
+        new BMessage('eSav'));
+    fOpenShowMenuItem = new BMenuItem(B_TRANSLATE("Open Show"),
+        new BMessage('eShw'));
+    episodeMenu->AddItem(fPlayMenuItem);
+    episodeMenu->AddItem(fQueueMenuItem);
+    episodeMenu->AddSeparatorItem();
+    episodeMenu->AddItem(fSaveMenuItem);
+    episodeMenu->AddSeparatorItem();
+    episodeMenu->AddItem(fOpenShowMenuItem);
+    fMenuBar->AddItem(episodeMenu);
 
     fDescription = new BTextView("episodeDescription");
     fDescription->MakeEditable(false);
     fDescription->MakeSelectable(true);
     fDescription->SetWordWrap(true);
+    fDescription->SetExplicitMinSize(BSize(0, 120));
+    fDescription->SetExplicitMaxSize(BSize(B_SIZE_UNLIMITED,
+        B_SIZE_UNLIMITED));
 
-    fPlay = new BButton("playEpisode", B_TRANSLATE("Play"),
-        new BMessage('ePly'));
-    fSave = new BButton("saveEpisode", B_TRANSLATE("Save"),
-        new BMessage('eSav'));
-    fQueue = new BButton("queueEpisode", B_TRANSLATE("Add to Queue"),
-        new BMessage('eQue'));
-    fOpenShow = new BButton("openShow", B_TRANSLATE("Open Show"),
-        new BMessage('eShw'));
+    BScrollView* descriptionScroll = new BScrollView(
+        "episodeDescriptionScroll", fDescription, 0, true, true);
+    descriptionScroll->SetExplicitMinSize(BSize(0, 160));
+    descriptionScroll->SetExplicitMaxSize(BSize(B_SIZE_UNLIMITED,
+        B_SIZE_UNLIMITED));
 
     BLayoutBuilder::Group<>(this, B_VERTICAL, 0)
         .SetInsets(0)
-        .AddGroup(B_VERTICAL, B_USE_DEFAULT_SPACING, 1.0f)
-            .SetInsets(B_USE_DEFAULT_SPACING)
+        .Add(fMenuBar)
+        .AddGroup(B_VERTICAL, 0, 1.0f)
+            .SetInsets(0)
             .AddGroup(B_HORIZONTAL, B_USE_DEFAULT_SPACING)
+                .SetInsets(B_USE_DEFAULT_SPACING)
                 .Add(fArtwork)
                 .AddGroup(B_VERTICAL, B_USE_SMALL_SPACING)
                     .Add(fName)
                     .Add(fShow)
                     .AddGlue()
-                    .AddGroup(B_HORIZONTAL, B_USE_SMALL_SPACING)
-                        .Add(fPlay)
-                        .Add(fQueue)
-                        .Add(fSave)
-                        .Add(fOpenShow)
-                        .AddGlue()
-                    .End()
                 .End()
             .End()
-            .Add(new BScrollView("episodeDescriptionScroll", fDescription,
-                0, false, true), 1.0f)
+            .Add(descriptionScroll, 1.0f)
         .End()
     .End();
 
@@ -197,8 +218,9 @@ void EpisodeWindow::_LoadArtwork(const std::string& url)
 void EpisodeWindow::_UpdateSaved(bool saved)
 {
     fSaved = saved;
-    if (fSave)
-        fSave->SetLabel(saved ? B_TRANSLATE("Remove") : B_TRANSLATE("Save"));
+    if (fSaveMenuItem)
+        fSaveMenuItem->SetLabel(saved ? B_TRANSLATE("Remove")
+            : B_TRANSLATE("Save"));
 }
 
 void EpisodeWindow::_ApplyLibraryChanged(BMessage* message)
@@ -227,9 +249,9 @@ void EpisodeWindow::_ApplyEpisodeData(BMessage* message)
         description = prefix;
     }
     fDescription->SetText(description.String());
-    fPlay->SetEnabled(playable);
-    fQueue->SetEnabled(playable);
-    fOpenShow->SetEnabled(!fShowUri.empty());
+    fPlayMenuItem->SetEnabled(playable);
+    fQueueMenuItem->SetEnabled(playable);
+    fOpenShowMenuItem->SetEnabled(!fShowUri.empty());
     SetTitle(message->GetString("name", B_TRANSLATE("Episode")));
     _LoadArtwork(message->GetString("image", ""));
 }

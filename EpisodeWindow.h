@@ -5,7 +5,9 @@
 #include <string>
 
 class ArtworkView;
-class BButton;
+class ClickableLabelView;
+class BMenuBar;
+class BMenuItem;
 class BStringView;
 class BTextView;
 
@@ -34,11 +36,12 @@ private:
     bool fSaved = false;
 
     ArtworkView* fArtwork = nullptr;
+    BMenuBar* fMenuBar = nullptr;
+    BMenuItem* fPlayMenuItem = nullptr;
+    BMenuItem* fSaveMenuItem = nullptr;
+    BMenuItem* fQueueMenuItem = nullptr;
+    BMenuItem* fOpenShowMenuItem = nullptr;
     BStringView* fName = nullptr;
-    BStringView* fShow = nullptr;
+    ClickableLabelView* fShow = nullptr;
     BTextView* fDescription = nullptr;
-    BButton* fPlay = nullptr;
-    BButton* fSave = nullptr;
-    BButton* fQueue = nullptr;
-    BButton* fOpenShow = nullptr;
 };

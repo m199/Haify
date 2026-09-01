@@ -8,6 +8,7 @@
 #include "MediaHeaderStyle.h"
 #include "Messages.h"
 #include "NowPlayingFields.h"
+#include "TrackContextMenu.h"
 #include "spotify/SpotifyUri.h"
 #include "spotify/api/SpotifyApi.h"
 
@@ -36,6 +37,8 @@
 
 #undef B_TRANSLATION_CONTEXT
 #define B_TRANSLATION_CONTEXT "AudiobookWindow"
+
+static const uint32 kMsgResumeAudiobook = 'aRes';
 
 static std::string
 AudiobookJsonString(const nlohmann::json& object, const char* key,
@@ -187,6 +190,15 @@ AddAudiobookImage(BMessage& message, const nlohmann::json& book)
 }
 
 static void
+PostAudiobookLibraryChange(const char* operation, const std::string& uri)
+{
+	BMessage changed(MSG_LIBRARY_CHANGED);
+	changed.AddString("operation", operation);
+	changed.AddString("uri", uri.c_str());
+	be_app->PostMessage(&changed);
+}
+
+static void
 SendAudiobookDataMessage(BMessenger self, const std::string& audiobookId,
 	const nlohmann::json& book)
 {
@@ -269,6 +281,102 @@ FontLineHeight(const BFont& font)
 	return height.ascent + height.descent + height.leading;
 }
 
+static std::string
+AudiobookDurationText(int32 milliseconds)
+{
+	int32 seconds = milliseconds / 1000;
+	char duration[32];
+	snprintf(duration, sizeof(duration), "%d:%02d", seconds / 60,
+		seconds % 60);
+	return duration;
+}
+
+static std::string
+AudiobookProgressText(bool resumeKnown, bool fullyPlayed,
+	int32 resumePositionMs)
+{
+	if (!resumeKnown)
+		return "";
+	if (fullyPlayed)
+		return B_TRANSLATE("Done");
+	if (resumePositionMs <= 0)
+		return "";
+	return AudiobookDurationText(resumePositionMs);
+}
+
+class AudiobookChapterRow : public DiscoverRow {
+public:
+	AudiobookChapterRow(const std::vector<std::string>& values,
+		const std::vector<std::string>& uris,
+		const std::vector<std::string>& titles, bool playable,
+		bool resumeKnown, bool fullyPlayed, int32 resumePositionMs)
+		: DiscoverRow(values, uris, titles, playable),
+		  fPlayable(playable),
+		  fResumeKnown(resumeKnown),
+		  fFullyPlayed(fullyPlayed),
+		  fResumePositionMs(resumePositionMs)
+	{
+	}
+
+	bool fPlayable;
+	bool fResumeKnown;
+	bool fFullyPlayed;
+	int32 fResumePositionMs;
+};
+
+struct AudiobookResumeCandidate {
+	std::string uri;
+	std::string title;
+	int32 startPositionMs = 0;
+};
+
+static bool
+HasResumeCandidate(const AudiobookResumeCandidate& candidate)
+{
+	return !candidate.uri.empty();
+}
+
+static void
+SetResumeCandidate(AudiobookResumeCandidate& candidate,
+	AudiobookChapterRow* row, int32 startPositionMs)
+{
+	candidate.uri = row->fUris[0];
+	candidate.title = row->fTitles.empty() ? "" : row->fTitles[0];
+	candidate.startPositionMs = startPositionMs;
+}
+
+static void
+UpdateResumeCandidates(AudiobookChapterRow* row,
+	AudiobookResumeCandidate& firstPlayable,
+	AudiobookResumeCandidate& firstUnplayed,
+	AudiobookResumeCandidate& inProgress)
+{
+	if (!row || !row->fPlayable || row->fUris.empty()
+			|| row->fUris[0].empty()) {
+		return;
+	}
+	if (!HasResumeCandidate(firstPlayable))
+		SetResumeCandidate(firstPlayable, row, 0);
+	if (!row->fResumeKnown || row->fFullyPlayed)
+		return;
+	if (!HasResumeCandidate(firstUnplayed))
+		SetResumeCandidate(firstUnplayed, row, 0);
+	if (row->fResumePositionMs > 0)
+		SetResumeCandidate(inProgress, row, row->fResumePositionMs);
+}
+
+static bool
+ApplyResumeCandidate(const AudiobookResumeCandidate& candidate,
+	std::string& uri, std::string& title, int32& startPositionMs)
+{
+	if (!HasResumeCandidate(candidate))
+		return false;
+	uri = candidate.uri;
+	title = candidate.title;
+	startPositionMs = candidate.startPositionMs;
+	return true;
+}
+
 AudiobookWindow::AudiobookWindow(const std::string& audiobookId)
 	: BWindow(BRect(170, 110, 800, 650), B_TRANSLATE("Audiobook"),
 		B_DOCUMENT_WINDOW, B_ASYNCHRONOUS_CONTROLS),
@@ -289,6 +397,9 @@ AudiobookWindow::AudiobookWindow(const std::string& audiobookId)
 		new BMessage('aSav'));
 	fSaveMenuItem->SetEnabled(false);
 	audiobookMenu->AddItem(fSaveMenuItem);
+	audiobookMenu->AddSeparatorItem();
+	audiobookMenu->AddItem(new BMenuItem(B_TRANSLATE("Close Window"),
+		new BMessage(B_QUIT_REQUESTED), 'W'));
 	fMenuBar->AddItem(audiobookMenu);
 
 	fName = new BTextView("audiobookName");
@@ -313,6 +424,13 @@ AudiobookWindow::AudiobookWindow(const std::string& audiobookId)
 	fNarrators->SetExplicitMaxSize(BSize(B_SIZE_UNLIMITED, B_SIZE_UNSET));
 	fNarrators->SetExplicitAlignment(BAlignment(B_ALIGN_USE_FULL_WIDTH,
 		B_ALIGN_VERTICAL_CENTER));
+	fResume = new BButton("resumeAudiobook", B_TRANSLATE("Play"),
+		new BMessage(kMsgResumeAudiobook));
+	fResume->SetExplicitMinSize(BSize(
+		MediaHeaderStyle::kActionButtonMinWidth, B_SIZE_UNSET));
+	fResume->SetExplicitAlignment(BAlignment(B_ALIGN_LEFT,
+		B_ALIGN_VERTICAL_CENTER));
+	fResume->SetEnabled(false);
 	fSave = new BButton("saveAudiobook", B_TRANSLATE("Add to Audiobooks"),
 		new BMessage('aSav'));
 	fSave->SetExplicitMinSize(BSize(
@@ -323,8 +441,9 @@ AudiobookWindow::AudiobookWindow(const std::string& audiobookId)
 	fDescription = new MediaDescriptionView("audiobookDescription");
 
 	fChapterList = new DiscoverListView("Chapters", {
-		{B_TRANSLATE("Chapter"), 390, kColPlayOnDouble},
-		{B_TRANSLATE("Duration"), 90, kColNone}
+		{B_TRANSLATE("Chapter"), 300, kColPlayOnDouble},
+		{B_TRANSLATE("Duration"), 80, kColNone},
+		{B_TRANSLATE("Status"), 90, kColNone}
 	}, -1, true);
 	fChapterList->SetExplicitMinSize(BSize(B_SIZE_UNSET, 96));
 	fChapterList->SetExplicitPreferredSize(BSize(B_SIZE_UNSET, 136));
@@ -348,7 +467,11 @@ AudiobookWindow::AudiobookWindow(const std::string& audiobookId)
 			.Add(fNarrators, 0.0f)
 		.End()
 		.AddGlue()
-		.Add(fSave, 0.0f)
+		.AddGroup(B_HORIZONTAL, B_USE_SMALL_SPACING, 0.0f)
+			.Add(fSave, 0.0f)
+			.Add(fResume, 0.0f)
+			.AddGlue()
+		.End()
 	.End();
 
 	BSplitView* contentSplit = new BSplitView(B_VERTICAL,
@@ -432,6 +555,22 @@ AudiobookWindow::_LoadChapters(int32 offset)
 						AudiobookJsonInt32(chapter, "duration_ms"));
 					message.AddBool("playable",
 						AudiobookJsonBool(chapter, "is_playable", true));
+					bool resumeKnown = false;
+					bool fullyPlayed = false;
+					int32 resumePositionMs = 0;
+					if (chapter.contains("resume_point")
+							&& chapter["resume_point"].is_object()) {
+						const nlohmann::json& resume = chapter["resume_point"];
+						resumeKnown = true;
+						fullyPlayed = AudiobookJsonBool(resume,
+							"fully_played");
+						resumePositionMs = AudiobookJsonInt32(resume,
+							"resume_position_ms");
+					}
+					message.AddBool("resume_known", resumeKnown);
+					message.AddBool("fully_played", fullyPlayed);
+					message.AddInt32("resume_position_ms",
+						resumePositionMs);
 					std::string reason;
 					if (chapter.contains("restrictions")
 							&& chapter["restrictions"].is_object())
@@ -503,11 +642,53 @@ AudiobookWindow::_UpdateSavedControls()
 	fSaveMenuItem->SetEnabled(enabled);
 }
 
-std::string
-AudiobookWindow::_NextPlayableChapterUri(const std::string& currentUri) const
+void
+AudiobookWindow::_UpdateResumeControl()
+{
+	if (!fResume)
+		return;
+
+	std::string uri;
+	std::string title;
+	int32 startPositionMs = 0;
+	bool canResume = _FindResumeChapter(uri, title, startPositionMs);
+	fResume->SetEnabled(canResume);
+	fResume->SetLabel(startPositionMs > 0
+		? B_TRANSLATE("Resume") : B_TRANSLATE("Play"));
+}
+
+bool
+AudiobookWindow::_FindResumeChapter(std::string& uri, std::string& title,
+	int32& startPositionMs) const
+{
+	uri.clear();
+	title.clear();
+	startPositionMs = 0;
+	if (!fChapterList)
+		return false;
+
+	AudiobookResumeCandidate firstPlayable;
+	AudiobookResumeCandidate firstUnplayed;
+	AudiobookResumeCandidate inProgress;
+
+	for (int32 index = 0; index < fChapterList->CountRows(); index++) {
+		AudiobookChapterRow* row = dynamic_cast<AudiobookChapterRow*>(
+			fChapterList->RowAt(index));
+		UpdateResumeCandidates(row, firstPlayable, firstUnplayed,
+			inProgress);
+	}
+
+	return ApplyResumeCandidate(inProgress, uri, title, startPositionMs)
+		|| ApplyResumeCandidate(firstUnplayed, uri, title, startPositionMs)
+		|| ApplyResumeCandidate(firstPlayable, uri, title, startPositionMs);
+}
+
+void
+AudiobookWindow::_AddFollowingChapterQueue(BMessage& play,
+	const std::string& currentUri) const
 {
 	if (!fChapterList || currentUri.empty())
-		return "";
+		return;
 
 	for (int32 index = 0; index < fChapterList->CountRows(); index++) {
 		DiscoverRow* row = dynamic_cast<DiscoverRow*>(
@@ -521,12 +702,11 @@ AudiobookWindow::_NextPlayableChapterUri(const std::string& currentUri) const
 				fChapterList->RowAt(next));
 			if (nextRow && !nextRow->fUris.empty()
 					&& !nextRow->fUris[0].empty()) {
-				return nextRow->fUris[0];
+				play.AddString("next_queue_uri", nextRow->fUris[0].c_str());
 			}
 		}
 		break;
 	}
-	return "";
 }
 
 
@@ -625,25 +805,34 @@ AudiobookWindow::_ApplyChapters(BMessage* message)
 		const char* title = nullptr;
 		int32 durationMs = 0;
 		bool playable = true;
+		bool resumeKnown = false;
+		bool fullyPlayed = false;
+		int32 resumePositionMs = 0;
 		message->FindString("title", i, &title);
 		message->FindInt32("duration_ms", i, &durationMs);
 		message->FindBool("playable", i, &playable);
+		message->FindBool("resume_known", i, &resumeKnown);
+		message->FindBool("fully_played", i, &fullyPlayed);
+		message->FindInt32("resume_position_ms", i, &resumePositionMs);
 		std::string chapterUri = uri ? uri : "";
 		std::string chapterTitle = title ? title : "Unknown";
-		int32 seconds = durationMs / 1000;
-		char duration[32];
-		snprintf(duration, sizeof(duration), "%d:%02d", seconds / 60,
-			seconds % 60);
+		std::string duration = AudiobookDurationText(durationMs);
+		std::string progress = AudiobookProgressText(resumeKnown,
+			fullyPlayed, resumePositionMs);
 		std::string displayTitle = chapterTitle;
 		if (!playable) displayTitle += B_TRANSLATE(" (Unavailable)");
-		fChapterList->AddRow(new DiscoverRow(
-			{displayTitle, duration},
-			{playable ? chapterUri : "", ""},
-			{chapterTitle, ""}));
+		fChapterList->AddRow(new AudiobookChapterRow(
+			{displayTitle, duration, progress},
+			{playable ? chapterUri : "", "", ""},
+			{chapterTitle, "", ""}, playable, resumeKnown, fullyPlayed,
+			resumePositionMs));
 	}
 	int32 next = message->GetInt32("next_offset", 0);
-	if (next > 0 && next < message->GetInt32("total", 0))
+	if (next > 0 && next < message->GetInt32("total", 0)) {
 		_LoadChapters(next);
+		return;
+	}
+	_UpdateResumeControl();
 }
 
 
@@ -652,59 +841,114 @@ AudiobookWindow::_PlayChapter(BMessage* message)
 {
 	const char* uri = message->GetString("uri", "");
 	if (!*uri)
+		uri = message->GetString("trackUri", "");
+	if (!*uri)
+		return;
+
+	const char* title = message->GetString("title", "");
+	if (!*title && fChapterList) {
+		for (int32 index = 0; index < fChapterList->CountRows(); index++) {
+			DiscoverRow* row = dynamic_cast<DiscoverRow*>(
+				fChapterList->RowAt(index));
+			if (!row || row->fUris.empty() || row->fUris[0] != uri)
+				continue;
+			if (!row->fTitles.empty())
+				title = row->fTitles[0].c_str();
+			break;
+		}
+	}
+
+	_PlayChapterUri(uri, title, message->GetInt32("start_position_ms", 0));
+}
+
+
+void
+AudiobookWindow::_PlayChapterUri(const std::string& uri, const char* title,
+	int32 startPositionMs)
+{
+	if (uri.empty())
 		return;
 
 	std::string audiobookUri = fAudiobookUri.empty()
 		? SpotifyUriForItemKind(kSpotifyItemAudiobook, fAudiobookId)
 		: fAudiobookUri;
 	BMessage play('play');
-	play.AddString("uri", uri);
-	play.AddString("title", message->GetString("title", ""));
+	play.AddString("uri", uri.c_str());
+	play.AddString("title", title ? title : "");
 	play.AddString("artist", fName->Text());
 	play.AddString(kNowPlayingItemKindField, "chapter");
 	play.AddString(kNowPlayingPrimaryOpenUriField, audiobookUri.c_str());
 	play.AddString(kNowPlayingParentUriField, audiobookUri.c_str());
 	play.AddString(kNowPlayingParentKindField, "audiobook");
 	play.AddString(kNowPlayingAudiobookIdField, fAudiobookId.c_str());
-	std::string nextUri = _NextPlayableChapterUri(uri);
-	if (!nextUri.empty())
-		play.AddString("next_queue_uri", nextUri.c_str());
+	if (startPositionMs > 0)
+		play.AddInt32("start_position_ms", startPositionMs);
+	_AddFollowingChapterQueue(play, uri);
 	be_app->PostMessage(&play);
 }
 
 
 void
-AudiobookWindow::_RequestChapterDetail(BMessage* message)
+AudiobookWindow::_ResumeAudiobook()
 {
-	const char* uri = message->GetString("uri", "");
-	std::string chapterUri = uri ? uri : "";
-	if (SpotifyItemKindForUri(chapterUri) != kSpotifyItemEpisode)
+	std::string uri;
+	std::string title;
+	int32 startPositionMs = 0;
+	if (!_FindResumeChapter(uri, title, startPositionMs))
 		return;
-
-	App* app = dynamic_cast<App*>(be_app);
-	SpotifyApi* api = app ? app->GetApi() : nullptr;
-	if (!api)
-		return;
-
-	BMessenger self(this);
-	api->Content().GetChapter(SpotifyItemIdForUri(chapterUri),
-		[self](bool ok, const nlohmann::json& chapter) {
-			if (!ok || !chapter.is_object()) return;
-			BMessage detail('cDtl');
-			detail.AddString("name", chapter.value("name", "Chapter").c_str());
-			detail.AddString("description",
-				chapter.value("description", "").c_str());
-			self.SendMessage(&detail);
-		});
+	_PlayChapterUri(uri, title.c_str(), startPositionMs);
 }
 
 
 void
-AudiobookWindow::_ShowChapterDetail(BMessage* message)
+AudiobookWindow::_ShowChapterContextMenu(BMessage* message)
 {
-	BAlert* alert = new BAlert(message->GetString("name", "Chapter"),
-		message->GetString("description", ""), B_TRANSLATE("OK"));
-	alert->Go();
+	const char* uri = message->GetString("uri", "");
+	if (!uri || !*uri)
+		return;
+	BPoint screen;
+	if (message->FindPoint("screenPt", &screen) != B_OK)
+		return;
+
+	App* app = dynamic_cast<App*>(be_app);
+	SpotifyApi* api = app ? app->GetApi() : nullptr;
+	std::string audiobookUri = fAudiobookUri.empty()
+		? SpotifyUriForItemKind(kSpotifyItemAudiobook, fAudiobookId)
+		: fAudiobookUri;
+	ShowPlayableItemContextMenu(uri, audiobookUri, screen, BMessenger(this),
+		api);
+}
+
+
+void
+AudiobookWindow::_ShowPlayableContextMenu(BMessage* message)
+{
+	App* app = dynamic_cast<App*>(be_app);
+	ShowPlayableItemContextMenu(message->GetString("uri", ""),
+		message->GetString("context_uri", ""),
+		message->GetPoint("screen_point", BPoint()), BMessenger(this),
+		app ? app->GetApi() : nullptr,
+		message->GetBool("library_only", false), true,
+		message->GetBool("saved", false));
+}
+
+
+void
+AudiobookWindow::_RemoveChapterFromLibrary(BMessage* message)
+{
+	const char* uri = message->GetString("trackUri", "");
+	std::string removedUri = uri ? uri : "";
+	if (!SpotifyItemIsPlayable(SpotifyItemKindForUri(removedUri)))
+		return;
+	App* app = dynamic_cast<App*>(be_app);
+	SpotifyApi* api = app ? app->GetApi() : nullptr;
+	if (!api)
+		return;
+	api->Library().RemoveLibraryItems({removedUri}, [removedUri](bool ok,
+			const nlohmann::json&) {
+		if (ok)
+			PostAudiobookLibraryChange("remove", removedUri);
+	});
 }
 
 
@@ -772,15 +1016,31 @@ AudiobookWindow::MessageReceived(BMessage* message)
 			break;
 
 		case 'rClk':
-			_RequestChapterDetail(message);
+			_ShowChapterContextMenu(message);
 			break;
 
-		case 'cDtl':
-			_ShowChapterDetail(message);
+		case 'iCmR':
+			_ShowPlayableContextMenu(message);
+			break;
+
+		case 'tply':
+			_PlayChapter(message);
+			break;
+
+		case 'remL':
+			_RemoveChapterFromLibrary(message);
+			break;
+
+		case 'open':
+			be_app->PostMessage(message);
 			break;
 
 		case 'aSav':
 			_ToggleSaved();
+			break;
+
+		case kMsgResumeAudiobook:
+			_ResumeAudiobook();
 			break;
 
 		case MSG_SPOTIFY_CAPABILITIES_CHANGED:

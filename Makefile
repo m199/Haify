@@ -7,6 +7,9 @@ SRCS = App.cpp PlayerWindow.cpp NowPlayingItem.cpp NowPlayingItemMapper.cpp Play
 	PlayerBarView.cpp PlaybackSeekBarView.cpp IconButtonView.cpp ClickableLabelView.cpp \
 	ArtworkView.cpp MediaDescriptionView.cpp DescriptionTextFormatter.cpp DiscoverListView.cpp TrackContextMenu.cpp TextInputDialog.cpp \
 	network/HttpClient.cpp network/OAuthCallbackServer.cpp network/ImageCache.cpp \
+	playlist/PlaylistCacheDocument.cpp \
+	playlist/PlaylistEpisode.cpp \
+	playlist/PlaylistCacheFiles.cpp \
 	spotify/auth/SpotifyAuth.cpp spotify/api/SpotifyApi.cpp spotify/api/ArtistApi.cpp spotify/api/ContentApi.cpp spotify/api/LibraryApi.cpp spotify/api/PlaybackApi.cpp spotify/api/PlaylistApi.cpp spotify/api/ProfileApi.cpp spotify/api/SpotifyRequestClient.cpp spotify/api/SpotifyResponse.cpp spotify/api/SpotifyUrl.cpp spotify/SpotifyCapabilities.cpp \
 	settings/SettingsController.cpp
 RDEFS = Haify.rdef
