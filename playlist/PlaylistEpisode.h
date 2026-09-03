@@ -4,7 +4,9 @@
 
 #include <SupportDefs.h>
 
+#include <cstddef>
 #include <string>
+#include <vector>
 
 struct PlaylistEpisode {
 	int32		number = 0;
@@ -26,3 +28,11 @@ PlaylistCacheDocument::Episode CacheEpisodeFromPlaylistEpisode(
 std::string NormalizePlaylistEpisodeFilter(const std::string& filter);
 bool PlaylistEpisodeMatchesFilter(const PlaylistEpisode& episode,
 	const std::string& normalizedFilter);
+bool PlaylistEpisodeListContains(const std::vector<PlaylistEpisode>& episodes,
+	const PlaylistEpisode& candidate);
+size_t AppendMissingPlaylistEpisodes(std::vector<PlaylistEpisode>& episodes,
+	const std::vector<PlaylistEpisode>& incoming);
+bool CollectMissingPlaylistHeadEpisodes(
+	const std::vector<PlaylistEpisode>& existing,
+	const std::vector<PlaylistEpisode>& incoming,
+	std::vector<PlaylistEpisode>& pending);

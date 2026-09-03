@@ -59,18 +59,6 @@ ContentApi::GetNewReleases(int limit, JsonCallback callback)
 }
 
 void
-ContentApi::GetRecommendations(const std::string& seedTrackId, int limit,
-    JsonCallback callback)
-{
-    int recommendationLimit = std::max(1, std::min(limit, 100));
-    std::string path = "/recommendations?limit="
-        + std::to_string(recommendationLimit)
-        + "&seed_tracks=" + SpotifyUrlEncode(seedTrackId);
-    fEraseCache(path);
-    fGet(path, callback);
-}
-
-void
 ContentApi::InvalidateNewReleases()
 {
     fInvalidateCachePrefix("/search?q=tag%3Anew");

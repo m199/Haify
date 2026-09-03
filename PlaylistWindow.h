@@ -2,6 +2,7 @@
 #define PLAYLISTWINDOW_H
 
 #include "playlist/PlaylistEpisode.h"
+#include "spotify/SpotifyUri.h"
 
 #include <Window.h>
 #include <Entry.h>
@@ -26,6 +27,7 @@ class BView;
 class BStringColumn;
 class TrackListView;
 class MediaDescriptionView;
+struct PlaylistContentTarget;
 class SpotifyApi;
 
 class PlaylistWindow : public BWindow {
@@ -41,6 +43,10 @@ public:
 private:
 	void					_InitMenu();
 	void					_InitLayout(const char* playlistName);
+	void					_InitTrackList(SpotifyItemKind kind);
+	void					_InitPodcastLayout();
+	void					_InitAlbumLayout(float artworkSize);
+	void					_InitDefaultLayout();
 	void					_ShowRenamePlaylistDialog(BMessage* message);
 	void					_RenamePlaylist(BMessage* message);
 	void					_PlayTrackFromMessage(BMessage* message);
@@ -108,6 +114,7 @@ private:
 	void					_ApplyTrackPage(BMessage* message);
 	void					_AddTrackPageRows(BMessage* message);
 	void					_LoadData(bool ignoreEpisodeCache = false);
+	void					_ResetLoadState();
 	bool					_PrepareCollectionLoad(SpotifyApi& api);
 	bool					_PreparePlaylistLoad(SpotifyApi& api,
 								const std::string& playlistId);
@@ -117,6 +124,11 @@ private:
 								const std::string& showId,
 								bool ignoreEpisodeCache);
 	void					_LoadNextPage();
+	bool					_LoadTargetPage(SpotifyApi& api,
+								const BMessenger& messenger,
+								const PlaylistContentTarget& target,
+								int32 offset, int32 limit,
+								int32 searchGeneration);
 	void					_LoadCollectionPage(SpotifyApi& api,
 								const BMessenger& messenger, int32 offset,
 								int32 limit, int32 searchGeneration);
@@ -181,18 +193,14 @@ private:
 	void					_RefreshPlaylistSnapshot();
 	void					_UpdatePlaylistTrackInfo();
 	void					_UpdatePlaylistMenuState();
-	bool					_HasEpisode(const std::string& uri,
-								const std::string& title,
-								const std::string& date,
-								const std::string& duration) const;
 	void					_RefreshPodcastHead(int32 offset);
 	void					_FinishPodcastHeadRefresh();
 	bool					_LoadCache();
-	bool					_LoadTrackCache(bool isPlaylist);
+	bool					_LoadTrackCache();
 	bool					_LoadShowCache();
 	void					_SaveCache();
 	void					_WriteCacheNow();
-	bool					_WriteTrackCache(bool isPlaylist);
+	bool					_WriteTrackCache();
 	void					_WriteShowCache();
 	void					_DeleteCache();
 

@@ -48,6 +48,88 @@ IsListContentView(BView* view)
 	return !view->Name() || strcmp(view->Name(), "header") != 0;
 }
 
+static std::string
+QueueItemUri(const nlohmann::json& item)
+{
+	if (!item.is_object())
+		return "";
+	return item.value("uri", "");
+}
+
+static bool
+QueueContainsOnlyUri(const nlohmann::json& queue, const std::string& uri)
+{
+	if (uri.empty() || !queue.is_array() || queue.empty())
+		return false;
+
+	bool hasItem = false;
+	for (const auto& item : queue) {
+		std::string itemUri = QueueItemUri(item);
+		if (itemUri.empty())
+			continue;
+		hasItem = true;
+		if (itemUri != uri)
+			return false;
+	}
+	return hasItem;
+}
+
+static std::string
+FormatQueueDuration(int milliseconds)
+{
+	int seconds = milliseconds / 1000;
+	char buffer[16];
+	snprintf(buffer, sizeof(buffer), "%d:%02d", seconds / 60,
+		seconds % 60);
+	return buffer;
+}
+
+static std::string
+QueueItemArtist(const nlohmann::json& item)
+{
+	std::string type = item.value("type", "");
+	if (type == "episode") {
+		if (item.contains("show") && item["show"].is_object())
+			return item["show"].value("name", "");
+		return "";
+	}
+	if (item.contains("artists") && item["artists"].is_array()
+			&& !item["artists"].empty()) {
+		return item["artists"][0].value("name", "");
+	}
+	return "";
+}
+
+static void
+AddQueueMessageItem(BMessage& message, const nlohmann::json& item,
+	bool playing)
+{
+	std::string uri = QueueItemUri(item);
+	std::string title = item.value("name", "");
+	std::string artist = QueueItemArtist(item);
+	std::string duration = FormatQueueDuration(item.value("duration_ms", 0));
+
+	message.AddString("uri", uri.c_str());
+	message.AddString("title", title.c_str());
+	message.AddString("artist", artist.c_str());
+	message.AddString("duration", duration.c_str());
+	message.AddBool("playing", playing);
+}
+
+static void
+AddQueuedItems(BMessage& message, const nlohmann::json& queue,
+	const std::string& currentPlayingUri)
+{
+	bool echoedCurrentQueue = QueueContainsOnlyUri(queue, currentPlayingUri);
+	for (const auto& item : queue) {
+		if (!item.is_object())
+			continue;
+		if (echoedCurrentQueue && QueueItemUri(item) == currentPlayingUri)
+			continue;
+		AddQueueMessageItem(message, item, false);
+	}
+}
+
 static bool
 FindScreenPoint(BMessage* message, BView* view, BPoint& screen)
 {
@@ -624,46 +706,16 @@ QueueWindow::_LoadQueue()
 			const nlohmann::json& data) {
 		if (!ok) return;
 
-		auto parseMs = [](int ms) -> std::string {
-			int s = ms / 1000;
-			char buf[16];
-			snprintf(buf, sizeof(buf), "%d:%02d", s / 60, s % 60);
-			return buf;
-		};
-
-		auto addItem = [&](BMessage* msg, const nlohmann::json& item, bool playing) {
-			std::string type  = item.value("type", "");
-			std::string uri   = item.value("uri",  "");
-			std::string title = item.value("name", "");
-			std::string artist;
-			if (type == "episode") {
-				if (item.contains("show") && item["show"].is_object())
-					artist = item["show"].value("name", "");
-			} else {
-				if (item.contains("artists") && item["artists"].is_array()
-						&& !item["artists"].empty())
-					artist = item["artists"][0].value("name", "");
-			}
-			std::string dur = parseMs(item.value("duration_ms", 0));
-
-			msg->AddString("uri",      uri.c_str());
-			msg->AddString("title",    title.c_str());
-			msg->AddString("artist",   artist.c_str());
-			msg->AddString("duration", dur.c_str());
-			msg->AddBool("playing",    playing);
-		};
-
 		BMessage* msg = new BMessage('qItm');
 
+		std::string currentPlayingUri;
 		if (data.contains("currently_playing")
 				&& data["currently_playing"].is_object()) {
-			addItem(msg, data["currently_playing"], true);
+			currentPlayingUri = QueueItemUri(data["currently_playing"]);
+			AddQueueMessageItem(*msg, data["currently_playing"], true);
 		}
-		if (data.contains("queue") && data["queue"].is_array()) {
-			for (const auto& item : data["queue"])
-				if (item.is_object())
-					addItem(msg, item, false);
-		}
+		if (data.contains("queue") && data["queue"].is_array())
+			AddQueuedItems(*msg, data["queue"], currentPlayingUri);
 
 		self.SendMessage(msg);
 		delete msg;

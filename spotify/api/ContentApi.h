@@ -26,8 +26,6 @@ public:
     void            Search(const std::string& query, const std::string& types,
                            JsonCallback callback);
     void            GetNewReleases(int limit, JsonCallback callback);
-    void            GetRecommendations(const std::string& seedTrackId,
-                                       int limit, JsonCallback callback);
     void            InvalidateNewReleases();
     void            GetTopItems(const std::string& type, int limit,
                                 JsonCallback callback);

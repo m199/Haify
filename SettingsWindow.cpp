@@ -60,8 +60,6 @@ static const uint32 kMsgSeekbarDefault   = 'skdf';
 static const uint32 kMsgReplicantColor   = 'rpcl';
 static const uint32 kMsgReplicantAuto    = 'rpau';
 static const uint32 kMsgReplicantDefault = 'rpdf';
-static const uint32 kMsgLibrespotAutoplay = 'lAut';
-static const uint32 kMsgHaifyAutoplay    = 'hAut';
 static const uint32 kMsgBrowse           = 'brow';
 static const uint32 kMsgPanelResult      = 'pRes';
 static const uint32 kMsgBrowseCache      = 'bCaP';
@@ -491,11 +489,7 @@ SettingsWindow::_InitLayout()
 		fVolumeSlider->SetLimitLabels("0", "100");
 
 		fAutoplayCheck = new BCheckBox("autoplay",
-			B_TRANSLATE("Use librespot autoplay"),
-			new BMessage(kMsgLibrespotAutoplay));
-		fHaifyAutoplayCheck = new BCheckBox("haifyAutoplay",
-			B_TRANSLATE("Use Haify autoplay recommendations"),
-			new BMessage(kMsgHaifyAutoplay));
+			B_TRANSLATE("Use librespot autoplay"), nullptr);
 		fNormalizationCheck = new BCheckBox("normalization",
 			B_TRANSLATE("Enable volume normalization"), nullptr);
 
@@ -506,7 +500,6 @@ SettingsWindow::_InitLayout()
 			.Add(fBitrateField)
 			.Add(fVolumeSlider)
 			.Add(fAutoplayCheck)
-			.Add(fHaifyAutoplayCheck)
 			.Add(fNormalizationCheck)
 			.AddGlue()
 		.End();
@@ -787,8 +780,6 @@ SettingsWindow::_LoadPlaybackCategory(const HaifySettings& settings)
 	fVolumeSlider->SetValue(settings.librespotVolume);
 	fAutoplayCheck->SetValue(settings.librespotAutoplay
 		? B_CONTROL_ON : B_CONTROL_OFF);
-	fHaifyAutoplayCheck->SetValue(settings.haifyAutoplay
-		? B_CONTROL_ON : B_CONTROL_OFF);
 	fNormalizationCheck->SetValue(settings.librespotNormalization
 		? B_CONTROL_ON : B_CONTROL_OFF);
 }
@@ -965,10 +956,6 @@ SettingsWindow::_Save()
 		settings.librespotVolume = fVolumeSlider->Value();
 		settings.librespotAutoplay
 			= fAutoplayCheck->Value() == B_CONTROL_ON;
-		settings.haifyAutoplay
-			= fHaifyAutoplayCheck->Value() == B_CONTROL_ON;
-		if (settings.librespotAutoplay && settings.haifyAutoplay)
-			settings.librespotAutoplay = false;
 		settings.librespotNormalization
 			= fNormalizationCheck->Value() == B_CONTROL_ON;
 		settings.librespotDeviceName = fDeviceNameControl->Text();
@@ -1111,7 +1098,6 @@ void
 SettingsWindow::MessageReceived(BMessage* message)
 {
 	if (_HandleGeneralMessage(message) || _HandleAppearanceMessage(message)
-			|| _HandlePlaybackMessage(message)
 			|| _HandlePathLibrespotMessage(message)
 			|| _HandleSpotifyMessage(message)) {
 		return;
@@ -1186,26 +1172,6 @@ SettingsWindow::_HandleAppearanceMessage(BMessage* message)
 			_UpdateSeekbarPreview();
 			_UpdateReplicantPreview();
 			BWindow::MessageReceived(message);
-			return true;
-
-		default:
-			return false;
-	}
-}
-
-
-bool
-SettingsWindow::_HandlePlaybackMessage(BMessage* message)
-{
-	switch (message->what) {
-		case kMsgLibrespotAutoplay:
-			if (fAutoplayCheck->Value() == B_CONTROL_ON)
-				fHaifyAutoplayCheck->SetValue(B_CONTROL_OFF);
-			return true;
-
-		case kMsgHaifyAutoplay:
-			if (fHaifyAutoplayCheck->Value() == B_CONTROL_ON)
-				fAutoplayCheck->SetValue(B_CONTROL_OFF);
 			return true;
 
 		default:

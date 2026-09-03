@@ -55,9 +55,7 @@ static const uint32 kMsgVerifyPoll = 'vpol';
 static const uint32 kMsgPlaybackTick = 'ptik';
 static const uint32 kMsgPlaybackPollResult = 'pbrs';
 static const uint32 kMsgAudiobookContextResult = 'abcr';
-static const uint32 kMsgHaifyAutoplayResult = 'hApr';
 static const uint32 kMsgApplyMuteToggle = 'amte';
-static const int32 kHaifyAutoplayRecommendationLimit = 20;
 
 
 static bool
@@ -194,48 +192,6 @@ _QueueUrisFromMessage(BMessage* message)
 			uris.push_back(uri);
 	}
 	return uris;
-}
-
-
-static std::vector<std::string>
-_RecommendationUrisFromJson(const nlohmann::json& data,
-	const std::string& seedUri)
-{
-	std::vector<std::string> uris;
-	if (!data.is_object() || !data.contains("tracks")
-			|| !data["tracks"].is_array()) {
-		return uris;
-	}
-
-	for (const auto& track : data["tracks"]) {
-		if (!track.is_object() || !track.contains("uri")
-				|| !track["uri"].is_string()) {
-			continue;
-		}
-		std::string uri = track["uri"].get<std::string>();
-		if (uri != seedUri
-				&& SpotifyItemKindForUri(uri) == kSpotifyItemTrack) {
-			uris.push_back(uri);
-		}
-	}
-	return uris;
-}
-
-
-static void
-_SendHaifyAutoplayResult(BMessenger self, const std::string& seedUri,
-	bool ok, const nlohmann::json& data)
-{
-	BMessage message(kMsgHaifyAutoplayResult);
-	message.AddString("seed_uri", seedUri.c_str());
-	message.AddBool("ok", ok);
-	if (ok) {
-		for (const std::string& uri
-				: _RecommendationUrisFromJson(data, seedUri)) {
-			message.AddString("uri", uri.c_str());
-		}
-	}
-	self.SendMessage(&message);
 }
 
 
@@ -525,16 +481,14 @@ PlayerWindow::_ShouldFetchQueuePrediction(int32 remainingMs) const
 {
 	return remainingMs <= kQueuePrefetchRemainingMs && !fHasPredictedNext
 		&& !fQueueRequestPending && fQueueTrackUri != fCurrentTrackUri
-		&& fCurrentParentKind != "audiobook"
-		&& !fHaifyAutoplayRequestPending
-		&& fHaifyAutoplayNextUris.empty();
+		&& fCurrentParentKind != "audiobook";
 }
 
 
 void
 PlayerWindow::_ApplyFinishedTrackTransition()
 {
-	if (_PlayNextAudiobookChapter() || _PlayNextHaifyAutoplayTrack())
+	if (_PlayNextAudiobookChapter())
 		return;
 	if (fHasPredictedNext)
 		_ApplyPredictedNext();
@@ -808,8 +762,6 @@ PlayerWindow::_ApplyTrackChangedState(const PlaybackMessageData& update)
 		fOptimisticUntilUs = 0;
 	}
 	fCurrentTrackUri = update.trackUri;
-	if (!update.optimistic && fCurrentTrackUri != fHaifyAutoplaySeedUri)
-		_ClearHaifyAutoplay();
 	fQueueTrackUri.clear();
 	fHasPredictedNext = false;
 	fPredictedNext.MakeEmpty();
@@ -1013,18 +965,11 @@ PlayerWindow::_PlayUri(BMessage* message)
 
 	SpotifyItemKind kind = SpotifyItemKindForUri(uriStr);
 	if (SpotifyItemIsPlayable(kind)) {
-		int32 startPositionMs = message->GetInt32("start_position_ms", 0);
-		bool haifyAutoplay = _ShouldUseHaifyAutoplay(kind, contextUri,
-			queueUris, audiobookQueue, startPositionMs);
 		_ApplyOptimisticPlay(message);
 		if (audiobookQueue)
 			fAudiobookNextUris = queueUris;
 		else
 			fAudiobookNextUris.clear();
-		if (haifyAutoplay)
-			_RequestHaifyAutoplay(uriStr);
-		else
-			_ClearHaifyAutoplay();
 
 		if (kind == kSpotifyItemTrack) {
 			_RequestTrackMetadataUpdate(api, BMessenger(this),
@@ -1032,6 +977,7 @@ PlayerWindow::_PlayUri(BMessage* message)
 				fVolumePct);
 		}
 
+		int32 startPositionMs = message->GetInt32("start_position_ms", 0);
 		_StartPlayableUri(api, uriStr, contextUri, queueUris,
 			audiobookQueue, startPositionMs);
 		_ScheduleVerifyPoll(kVerifyPollDelay);
@@ -1039,7 +985,6 @@ PlayerWindow::_PlayUri(BMessage* message)
 	}
 
 	fAudiobookNextUris.clear();
-	_ClearHaifyAutoplay();
 	api->Playback().PlayContext(uriStr, nullptr);
 	_ScheduleVerifyPoll(kVerifyPollDelay);
 }
@@ -1455,107 +1400,6 @@ PlayerWindow::_ApplyAudiobookContextResult(BMessage* message)
 }
 
 
-bool
-PlayerWindow::_ShouldUseHaifyAutoplay(SpotifyItemKind kind,
-	const std::string& contextUri, const std::vector<std::string>& queueUris,
-	bool audiobookQueue, int32 startPositionMs) const
-{
-	HaifySettings settings = SettingsController::Load();
-	return settings.haifyAutoplay && kind == kSpotifyItemTrack
-		&& contextUri.empty() && queueUris.empty() && !audiobookQueue
-		&& startPositionMs <= 0;
-}
-
-
-void
-PlayerWindow::_RequestHaifyAutoplay(const std::string& seedUri)
-{
-	App* app = dynamic_cast<App*>(be_app);
-	SpotifyApi* api = app ? app->GetApi() : nullptr;
-	if (!api || seedUri.empty())
-		return;
-
-	fHaifyAutoplayRequestPending = true;
-	fHaifyAutoplaySeedUri = seedUri;
-	fHaifyAutoplayNextUris.clear();
-
-	BMessenger self(this);
-	std::string seedId = SpotifyItemIdForUri(seedUri);
-	if (seedId.empty()) {
-		_ClearHaifyAutoplay();
-		return;
-	}
-	api->Content().GetRecommendations(seedId,
-		kHaifyAutoplayRecommendationLimit,
-		[self, seedUri](bool ok, const nlohmann::json& data) {
-			_SendHaifyAutoplayResult(self, seedUri, ok, data);
-		});
-}
-
-
-void
-PlayerWindow::_ApplyHaifyAutoplayResult(BMessage* message)
-{
-	const char* seedUri = message->GetString("seed_uri", "");
-	if (!seedUri || fHaifyAutoplaySeedUri != seedUri)
-		return;
-
-	fHaifyAutoplayRequestPending = false;
-	fHaifyAutoplayNextUris.clear();
-	if (!message->GetBool("ok", false))
-		return;
-
-	const char* uri = nullptr;
-	for (int32 index = 0; message->FindString("uri", index, &uri) == B_OK;
-			index++) {
-		if (uri && uri[0])
-			fHaifyAutoplayNextUris.push_back(uri);
-	}
-	_HandlePlaybackTick();
-}
-
-
-bool
-PlayerWindow::_PlayNextHaifyAutoplayTrack()
-{
-	if (fCurrentParentKind == "audiobook" || fHaifyAutoplayNextUris.empty())
-		return false;
-
-	App* app = dynamic_cast<App*>(be_app);
-	SpotifyApi* api = app ? app->GetApi() : nullptr;
-	if (!api)
-		return false;
-
-	std::string nextUri = fHaifyAutoplayNextUris.front();
-	fHaifyAutoplayNextUris.erase(fHaifyAutoplayNextUris.begin());
-	if (nextUri.empty())
-		return false;
-
-	BMessage play('play');
-	play.AddString("uri", nextUri.c_str());
-	play.AddString(kNowPlayingItemKindField, "track");
-	play.AddString(kNowPlayingPrimaryOpenUriField, nextUri.c_str());
-	play.AddString(kNowPlayingParentKindField, "track");
-	_ApplyOptimisticPlay(&play);
-
-	_RequestTrackMetadataUpdate(api, BMessenger(this),
-		SpotifyItemIdForUri(nextUri), fRepeatState, fShuffleOn, fVolumePct);
-	api->Playback().PlayTrack(nextUri, "", nullptr);
-	_RequestHaifyAutoplay(nextUri);
-	_ScheduleVerifyPoll(kVerifyPollDelay);
-	return true;
-}
-
-
-void
-PlayerWindow::_ClearHaifyAutoplay()
-{
-	fHaifyAutoplayRequestPending = false;
-	fHaifyAutoplaySeedUri.clear();
-	fHaifyAutoplayNextUris.clear();
-}
-
-
 void
 PlayerWindow::_ApplyQueuePrediction(BMessage* message)
 {
@@ -1606,8 +1450,6 @@ void
 PlayerWindow::_SkipNextTrack()
 {
 	if (_PlayNextAudiobookChapter())
-		return;
-	if (_PlayNextHaifyAutoplayTrack())
 		return;
 
 	App* app = (App*)be_app;
@@ -2019,10 +1861,6 @@ PlayerWindow::_HandlePlaybackMessage(BMessage* message)
 
 		case kMsgAudiobookContextResult:
 			_ApplyAudiobookContextResult(message);
-			return true;
-
-		case kMsgHaifyAutoplayResult:
-			_ApplyHaifyAutoplayResult(message);
 			return true;
 
 		case MSG_SYNC_REPLICANT_STATE:

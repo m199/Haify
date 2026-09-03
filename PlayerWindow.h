@@ -1,8 +1,6 @@
 #ifndef PLAYERWINDOW_H
 #define PLAYERWINDOW_H
 
-#include "spotify/SpotifyUri.h"
-
 #include <Message.h>
 #include <Window.h>
 #include <map>
@@ -96,16 +94,6 @@ private:
 	bool					_HandleAccountDeviceMessage(BMessage* message);
 	void					_ApplyPlaybackPollResult(BMessage* message);
 	void					_ApplyAudiobookContextResult(BMessage* message);
-	bool					_ShouldUseHaifyAutoplay(SpotifyItemKind kind,
-								const std::string& contextUri,
-								const std::vector<std::string>& queueUris,
-								bool audiobookQueue,
-								int32 startPositionMs) const;
-	void					_RequestHaifyAutoplay(
-								const std::string& seedUri);
-	void					_ApplyHaifyAutoplayResult(BMessage* message);
-	bool					_PlayNextHaifyAutoplayTrack();
-	void					_ClearHaifyAutoplay();
 	void					_PlayUri(BMessage* message);
 	void					_ApplyQueuePrediction(BMessage* message);
 	void					_ApplyVerifyPoll();
@@ -217,9 +205,6 @@ private:
 	std::string				fAudiobookContextRequestTrackUri;
 	std::string				fLastAudiobookContextLookupTrackUri;
 	std::vector<std::string> fAudiobookNextUris;
-	bool					fHaifyAutoplayRequestPending = false;
-	std::string				fHaifyAutoplaySeedUri;
-	std::vector<std::string> fHaifyAutoplayNextUris;
 	bool					fHasPendingLibrespotTrack = false;
 	BMessage				fPendingLibrespotTrack;
 	BMessage				fPredictedNext;

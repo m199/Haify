@@ -540,9 +540,6 @@ LoadLibrespotSettings(const nlohmann::json& j, HaifySettings& s)
     JsonGetInt(j, "librespot_bitrate", s.librespotBitrate);
     JsonGetInt(j, "librespot_volume", s.librespotVolume);
     JsonGetBool(j, "librespot_autoplay", s.librespotAutoplay);
-    JsonGetBool(j, "haify_autoplay", s.haifyAutoplay);
-    if (s.librespotAutoplay && s.haifyAutoplay)
-        s.librespotAutoplay = false;
     JsonGetBool(j, "librespot_normalization", s.librespotNormalization);
     JsonGetString(j, "librespot_device_name", s.librespotDeviceName);
     JsonGetString(j, "librespot_device_type", s.librespotDeviceType);
@@ -715,7 +712,6 @@ status_t SettingsController::Save(const HaifySettings& s)
         {"librespot_bitrate",            s.librespotBitrate},
         {"librespot_volume",             s.librespotVolume},
         {"librespot_autoplay",           s.librespotAutoplay},
-        {"haify_autoplay",               s.haifyAutoplay},
         {"librespot_normalization",      s.librespotNormalization},
 
         {"librespot_device_name",        s.librespotDeviceName},

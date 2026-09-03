@@ -7,6 +7,11 @@ SRCS = App.cpp PlayerWindow.cpp NowPlayingItem.cpp NowPlayingItemMapper.cpp Play
 	PlayerBarView.cpp PlaybackSeekBarView.cpp IconButtonView.cpp ClickableLabelView.cpp \
 	ArtworkView.cpp MediaDescriptionView.cpp DescriptionTextFormatter.cpp DiscoverListView.cpp TrackContextMenu.cpp TextInputDialog.cpp \
 	network/HttpClient.cpp network/OAuthCallbackServer.cpp network/ImageCache.cpp \
+	playlist/PlaylistContent.cpp \
+	playlist/PlaylistTrackListView.cpp \
+	playlist/PlaylistTrackRow.cpp \
+	playlist/PlaylistCacheRows.cpp \
+	playlist/PlaylistEpisodeRows.cpp \
 	playlist/PlaylistCacheDocument.cpp \
 	playlist/PlaylistEpisode.cpp \
 	playlist/PlaylistCacheFiles.cpp \

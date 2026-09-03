@@ -72,3 +72,55 @@ PlaylistEpisodeMatchesFilter(const PlaylistEpisode& episode,
 	return normalizedFilter.empty()
 		|| episode.searchText.find(normalizedFilter) != std::string::npos;
 }
+
+
+static bool
+PlaylistEpisodeMatchesIdentity(const PlaylistEpisode& episode,
+	const PlaylistEpisode& candidate)
+{
+	if (!candidate.trackUri.empty())
+		return episode.trackUri == candidate.trackUri;
+	return episode.trackUri.empty() && episode.title == candidate.title
+		&& episode.date == candidate.date
+		&& episode.duration == candidate.duration;
+}
+
+
+bool
+PlaylistEpisodeListContains(const std::vector<PlaylistEpisode>& episodes,
+	const PlaylistEpisode& candidate)
+{
+	for (const PlaylistEpisode& episode : episodes) {
+		if (PlaylistEpisodeMatchesIdentity(episode, candidate))
+			return true;
+	}
+	return false;
+}
+
+
+size_t
+AppendMissingPlaylistEpisodes(std::vector<PlaylistEpisode>& episodes,
+	const std::vector<PlaylistEpisode>& incoming)
+{
+	size_t firstNewEpisode = episodes.size();
+	for (const PlaylistEpisode& episode : incoming) {
+		if (!PlaylistEpisodeListContains(episodes, episode))
+			episodes.push_back(episode);
+	}
+	return firstNewEpisode;
+}
+
+
+bool
+CollectMissingPlaylistHeadEpisodes(
+	const std::vector<PlaylistEpisode>& existing,
+	const std::vector<PlaylistEpisode>& incoming,
+	std::vector<PlaylistEpisode>& pending)
+{
+	for (const PlaylistEpisode& episode : incoming) {
+		if (PlaylistEpisodeListContains(existing, episode))
+			return true;
+		pending.push_back(episode);
+	}
+	return false;
+}

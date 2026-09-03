@@ -1,6 +1,7 @@
 #include "PlaylistCacheFiles.h"
 
 #include "SettingsController.h"
+#include "spotify/SpotifyUri.h"
 
 #include <Autolock.h>
 #include <File.h>
@@ -289,6 +290,28 @@ PlaylistCacheFiles::TrackPath(bool isPlaylist, const std::string& playlistId,
 
 
 bool
+PlaylistCacheFiles::UriUsesTrackCache(const std::string& uri)
+{
+	return uri == "spotify:collection"
+		|| SpotifyItemKindForUri(uri) == kSpotifyItemPlaylist;
+}
+
+
+bool
+PlaylistCacheFiles::UriUsesShowCache(const std::string& uri)
+{
+	return SpotifyItemKindForUri(uri) == kSpotifyItemShow;
+}
+
+
+bool
+PlaylistCacheFiles::UriUsesPlaylistTrackCache(const std::string& uri)
+{
+	return SpotifyItemKindForUri(uri) == kSpotifyItemPlaylist;
+}
+
+
+bool
 PlaylistCacheFiles::ReadTrackDocument(const BPath& path, bool isPlaylist,
 	PlaylistCacheFiles::TrackDocument& document)
 {
@@ -326,6 +349,19 @@ PlaylistCacheFiles::ReadTrackDocument(bool isPlaylist,
 
 
 bool
+PlaylistCacheFiles::ReadTrackDocumentForUri(const std::string& uri,
+	TrackDocument& document, bool* isPlaylist)
+{
+	bool playlist = UriUsesPlaylistTrackCache(uri);
+	if (!UriUsesTrackCache(uri))
+		return false;
+	if (isPlaylist)
+		*isPlaylist = playlist;
+	return ReadTrackDocument(playlist, SpotifyItemIdForUri(uri), document);
+}
+
+
+bool
 PlaylistCacheFiles::ReadShowDocument(const BPath& path,
 	PlaylistCacheFiles::ShowDocument& document)
 {
@@ -358,6 +394,16 @@ PlaylistCacheFiles::ReadShowDocument(const std::string& showId,
 }
 
 
+bool
+PlaylistCacheFiles::ReadShowDocumentForUri(const std::string& uri,
+	ShowDocument& document)
+{
+	if (!UriUsesShowCache(uri))
+		return false;
+	return ReadShowDocument(SpotifyItemIdForUri(uri), document);
+}
+
+
 void
 PlaylistCacheFiles::WriteTrackDocument(const std::string& path, bool isPlaylist,
 	int32 total, int32 nextOffset, const std::string& snapshotId,
@@ -386,6 +432,19 @@ PlaylistCacheFiles::WriteTrackDocument(bool isPlaylist,
 }
 
 
+bool
+PlaylistCacheFiles::WriteTrackDocumentForUri(const std::string& uri,
+	int32 total, int32 nextOffset, const std::string& snapshotId,
+	const std::vector<PlaylistCacheDocument::Track>& tracks)
+{
+	bool playlist = UriUsesPlaylistTrackCache(uri);
+	if (!UriUsesTrackCache(uri))
+		return false;
+	return WriteTrackDocument(playlist, SpotifyItemIdForUri(uri), total,
+		nextOffset, snapshotId, tracks);
+}
+
+
 static void
 WriteShowDocumentToPath(const std::string& path, int32 total,
 	int32 nextOffset, bool complete,
@@ -407,6 +466,18 @@ PlaylistCacheFiles::WriteShowDocument(const std::string& showId, int32 total,
 	if (!ShowPath(showId, path, true))
 		return;
 	WriteShowDocumentToPath(path.Path(), total, nextOffset, complete,
+		episodes);
+}
+
+
+void
+PlaylistCacheFiles::WriteShowDocumentForUri(const std::string& uri, int32 total,
+	int32 nextOffset, bool complete,
+	const std::vector<PlaylistCacheDocument::Episode>& episodes)
+{
+	if (!UriUsesShowCache(uri))
+		return;
+	WriteShowDocument(SpotifyItemIdForUri(uri), total, nextOffset, complete,
 		episodes);
 }
 
@@ -441,4 +512,23 @@ PlaylistCacheFiles::RemoveShow(const std::string& showId)
 		return;
 	CancelWrite(path.Path());
 	unlink(path.Path());
+}
+
+
+void
+PlaylistCacheFiles::RemoveForUri(const std::string& uri)
+{
+	if (uri == "spotify:collection") {
+		RemoveLikedSongs();
+		return;
+	}
+
+	SpotifyItemKind kind = SpotifyItemKindForUri(uri);
+	std::string id = SpotifyItemIdForUri(uri);
+	if (kind == kSpotifyItemPlaylist) {
+		RemovePlaylist(id);
+		return;
+	}
+	if (kind == kSpotifyItemShow)
+		RemoveShow(id);
 }
