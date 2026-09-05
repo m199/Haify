@@ -59,7 +59,7 @@ PlaylistEpisodeRowFromEpisode(const PlaylistEpisode& episode,
 {
 	TrackRow* row = new TrackRow(episode.trackUri);
 	row->fDescription = episode.description;
-	row->SetField(new BIntegerField(episode.number), 0);
+	row->SetField(new TrackIntegerField(episode.number), 0);
 	row->SetField(new TrackStringField(episode.title.c_str()), 1);
 	std::string displayDescription = FormatMediaDescription(
 		episode.description);

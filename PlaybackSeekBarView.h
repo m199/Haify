@@ -21,6 +21,7 @@ public:
     void            SetColors(rgb_color bg, rgb_color fill);
     void            SetTransparentBackground(bool transparent);
     void            SetTarget(BMessenger target);
+    void            SetLayoutScale(float scale);
 
     bigtime_t       Duration() const { return fDuration; }
     bigtime_t       Position() const { return fPosition; }
@@ -45,6 +46,7 @@ private:
     bigtime_t       fPosition   = 0;
     bool            fTracking   = false;
     bool            fTransparentBackground = false;
+    float           fLayoutScale = 1.0f;
 
     rgb_color       fBg;
     rgb_color       fFill;

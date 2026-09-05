@@ -1,10 +1,14 @@
 #ifndef DISCOVER_LIST_VIEW_H
 #define DISCOVER_LIST_VIEW_H
 
+#include "DropMarkerController.h"
+
 #include <ColumnListView.h>
 #include <ColumnTypes.h>
 #include <string>
 #include <vector>
+
+class BMessageRunner;
 
 enum ColAction {
 	kColNone = 0,
@@ -26,6 +30,9 @@ public:
 							  fEnabled(enabled) {}
 	bool				fIsPlaying;
 	bool				fEnabled;
+	int32				fDropMarkerPosition = 0;
+	bool				fDropTargetHighlight = false;
+	bool				fDropTargetFillToRight = false;
 };
 
 class BoldStringColumn : public BStringColumn {
@@ -42,12 +49,17 @@ public:
 						            const std::vector<std::string>& uris,
 						            const std::vector<std::string>& titles,
 						            bool writable = true, bool owned = false);
+	bool				SetDropFeedback(int32 markerPosition,
+							bool targetHighlight);
 
 	std::vector<std::string>	fUris;
 	std::vector<std::string>	fTitles;
 	bool				fWritable;
 	bool				fOwned;
 	bool				fIsPlaying = false;
+	int32				fDropMarkerPosition = 0;
+	bool				fDropTargetHighlight = false;
+	int32				fFieldCount = 0;
 };
 
 class DiscoverListView : public BColumnListView {
@@ -56,14 +68,24 @@ public:
 						                 const std::vector<ColDef>& cols,
 						                 int32 logicalTab = -1,
 						                 bool showHorizontalScrollbar = false);
+	virtual				~DiscoverListView();
 	virtual void		SelectionChanged();
 	virtual void		ItemInvoked();
 	virtual bool		InitiateDrag(BPoint point, bool wasSelected);
 	virtual void		MouseDown(BPoint where);
+	virtual void		MouseMoved(BPoint point, uint32 transit,
+							const BMessage* dragMessage);
+	virtual void		Draw(BRect update) override;
 	virtual void		MessageReceived(BMessage* message);
 	virtual void		AttachedToWindow();
 	void				SetPlayingUri(const std::string& uri);
 	void				ForwardDroppedMessage(BMessage* message);
+	void				UpdateDropMarker(BPoint screenWhere);
+	void				UpdateDropTarget(BPoint screenWhere);
+	void				ClearDropMarker();
+	void				UpdateDropMarkerFromDrag(BPoint screenWhere,
+							const BMessage* dragMessage);
+	void				SetDropFeedbackFlags(DropFeedbackFlags flags);
 
 private:
 	void				_ShowContextMenuAt(BPoint screenWhere);
@@ -78,10 +100,15 @@ private:
 	void				_PostRouteClick(DiscoverRow* row,
 							const std::string& uri,
 							const std::string& title);
+	void				_StartDropMarkerCleanupRunner();
+	void				_StopDropMarkerCleanupRunner();
+	void				_ClearDropMarkerIfDragEnded();
 	int32				_ColumnAt(float x) const;
 	std::vector<ColAction>	fActions;
 	int32				fLogicalTab;
+	DropMarkerController fDropMarker;
 	bool				fFiltersInstalled = false;
+	BMessageRunner*		fDropMarkerCleanupRunner = nullptr;
 };
 
 #endif

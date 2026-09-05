@@ -1,6 +1,7 @@
 #include "PlaylistWindow.h"
 #include "ArtworkView.h"
 #include "DescriptionTextFormatter.h"
+#include "HaifyDragState.h"
 #include "MediaDescriptionView.h"
 #include "TrackContextMenu.h"
 #include "TextInputDialog.h"
@@ -21,6 +22,7 @@
 #include "spotify/SpotifyUri.h"
 #include "spotify/api/SpotifyApi.h"
 #include "spotify/api/SpotifyResponse.h"
+#include "UiScale.h"
 
 #include <Alert.h>
 #include <Alignment.h>
@@ -676,6 +678,10 @@ PlaylistWindow::_HandleTrackActionMessage(BMessage* message)
 		case 'drpT':
 			_HandleTrackDrop(message);
 			return true;
+		case MSG_HAIFY_DRAG_ENDED:
+			if (fTrackList)
+				fTrackList->ClearDropMarker();
+			return true;
 		default:
 			return false;
 	}
@@ -1300,6 +1306,7 @@ PlaylistWindow::_RemovePendingTrackRows()
 void
 PlaylistWindow::_HandleTrackDrop(BMessage* message)
 {
+	ClearHaifyActiveDragMessage();
 	const char* trackUri = message->GetString("trackUri", "");
 	if (!trackUri || !trackUri[0])
 		trackUri = message->GetString("uri", "");
@@ -1327,19 +1334,23 @@ void
 PlaylistWindow::_HandleTrackReorderDrop(BMessage* message, int32 sourceIndex)
 {
 	BPoint point = message->DropPoint();
-	fTrackList->ConvertFromScreen(&point);
+	if (BView* outline = fTrackList->ScrollView())
+		outline->ConvertFromScreen(&point);
+	else
+		fTrackList->ConvertFromScreen(&point);
 	BRow* targetRow = fTrackList->RowAt(point);
-	int32 targetIndex = fTrackList->CountRows();
+	int32 insertBefore = fTrackList->CountRows();
 	for (int32 i = 0; i < fTrackList->CountRows(); i++) {
 		if (fTrackList->RowAt(i) == targetRow) {
-			targetIndex = i;
+			insertBefore = i;
+			BRect rowRect;
+			if (fTrackList->GetRowRect(targetRow, &rowRect)
+					&& point.y >= rowRect.top + rowRect.Height() / 2.0f) {
+				insertBefore++;
+			}
 			break;
 		}
 	}
-	if (targetIndex == sourceIndex)
-		return;
-	int32 insertBefore = ResolvePlaylistDropInsertBefore(
-		sourceIndex, targetIndex, fTrackList->CountRows());
 	_BeginTrackReorder(sourceIndex, 1, insertBefore);
 }
 
@@ -1358,7 +1369,7 @@ PlaylistWindow::_AddDroppedPlayableItem(BMessage* message, const char* trackUri)
 		(int32)fTrackList->CountRows());
 	int32 nextNum = playlistPosition + 1;
 	TrackRow* row = new TrackRow(trackUri, playlistPosition);
-	row->SetField(new BIntegerField(nextNum), 0);
+	row->SetField(new TrackIntegerField(nextNum), 0);
 	row->SetField(new TrackStringField(title), 1);
 	row->SetField(new TrackStringField(artist), 2);
 	row->SetField(new TrackStringField(""), 3);
@@ -1634,7 +1645,7 @@ PlaylistWindow::_AddTrackPageRows(BMessage* message)
 		TrackRow* row = new TrackRow(trackUri ? trackUri : "", number - 1);
 		row->fArtistUri = artistUri ? artistUri : "";
 		row->fAlbumUri = albumUri ? albumUri : "";
-		row->SetField(new BIntegerField(number), 0);
+		row->SetField(new TrackIntegerField(number), 0);
 		row->SetField(new TrackStringField(title ? title : ""), 1);
 		row->SetField(new TrackStringField(artist ? artist : ""), 2);
 		row->SetField(new TrackStringField(bpm ? bpm : ""), 3);
@@ -2151,16 +2162,14 @@ PlaylistWindow::_InitLayout(const char* playlistName)
 	bool isPodcast = kind == kSpotifyItemShow;
 	bool isAlbum = kind == kSpotifyItemAlbum;
 	bool isLikedSongs = (fUri == "spotify:collection");
-	float artworkSize = MediaHeaderStyle::kArtworkSize;
+	float artworkSize = MediaHeaderStyle::ArtworkSize();
 
 	ArtworkView* coverView = new ArtworkView("CoverView");
 	if (isLikedSongs)
 		coverView->AdoptBitmap(LoadLikedSongsArtwork(artworkSize));
 	else
 		coverView->ShowLoading();
-	coverView->SetExplicitMinSize(BSize(artworkSize, artworkSize));
-	coverView->SetExplicitMaxSize(BSize(artworkSize, artworkSize));
-	coverView->SetExplicitPreferredSize(BSize(artworkSize, artworkSize));
+	MediaHeaderStyle::ApplyArtworkSize(coverView);
 	coverView->SetExplicitAlignment(BAlignment(B_ALIGN_LEFT, B_ALIGN_TOP));
 	fCoverView = coverView;
 
@@ -2192,13 +2201,18 @@ PlaylistWindow::_InitLayout(const char* playlistName)
 	_InitTrackList(kind);
 
 	if (isPodcast) {
-		const float podcastInfoWidth = 170.0f;
-		const float podcastSearchInfoHeight = be_plain_font->Size() * 1.35f;
+		const float lineHeight = UiScale::LineHeight();
+		const float podcastInfoWidth = std::max(
+			MediaHeaderStyle::ActionButtonMinWidth(),
+			MediaHeaderStyle::Scaled(170.0f));
+		const float podcastTitleHeight = lineHeight * 3.2f;
+		const float podcastSearchInfoHeight = lineHeight * 1.4f;
 		fPlaylistName->SetExplicitMinSize(BSize(
 			podcastInfoWidth, B_SIZE_UNSET));
 		fPlaylistName->SetExplicitPreferredSize(BSize(
 			podcastInfoWidth, B_SIZE_UNSET));
-		fPlaylistName->SetExplicitMaxSize(BSize(podcastInfoWidth, 42));
+		fPlaylistName->SetExplicitMaxSize(BSize(podcastInfoWidth,
+			podcastTitleHeight));
 		fPlaylistInfo->SetExplicitMinSize(BSize(
 			podcastInfoWidth, B_SIZE_UNSET));
 		fPlaylistInfo->SetExplicitPreferredSize(BSize(
@@ -2229,7 +2243,7 @@ PlaylistWindow::_InitLayout(const char* playlistName)
 		fSubscribeButton = new BButton("subBtn", B_TRANSLATE("Subscribe"),
 			new BMessage('subS'));
 		fSubscribeButton->SetExplicitMinSize(BSize(
-			MediaHeaderStyle::kActionButtonMinWidth, B_SIZE_UNSET));
+			MediaHeaderStyle::ActionButtonMinWidth(), B_SIZE_UNSET));
 		fSubscribeButton->SetExplicitAlignment(BAlignment(B_ALIGN_LEFT,
 			B_ALIGN_VERTICAL_CENTER));
 		fSubscribeButton->SetEnabled(false);
@@ -2237,8 +2251,10 @@ PlaylistWindow::_InitLayout(const char* playlistName)
 		fDescriptionView = new MediaDescriptionView("DescriptionView");
 		fDescriptionScroll = new BScrollView("DescScroll", fDescriptionView,
 			0, false, true, B_FANCY_BORDER);
-		fDescriptionScroll->SetExplicitMinSize(BSize(B_SIZE_UNSET, 72));
-		fDescriptionScroll->SetExplicitPreferredSize(BSize(B_SIZE_UNSET, 94));
+		fDescriptionScroll->SetExplicitMinSize(BSize(B_SIZE_UNSET,
+			MediaHeaderStyle::Scaled(72.0f)));
+		fDescriptionScroll->SetExplicitPreferredSize(BSize(B_SIZE_UNSET,
+			MediaHeaderStyle::Scaled(94.0f)));
 		fDescriptionScroll->SetExplicitMaxSize(
 			BSize(B_SIZE_UNLIMITED, B_SIZE_UNLIMITED));
 	}
@@ -2247,7 +2263,7 @@ PlaylistWindow::_InitLayout(const char* playlistName)
 			B_TRANSLATE("Add to Saved Albums"),
 			new BMessage(kMsgToggleAlbumSaved));
 		fAlbumSaveButton->SetExplicitMinSize(BSize(
-			MediaHeaderStyle::kActionButtonMinWidth, B_SIZE_UNSET));
+			MediaHeaderStyle::ActionButtonMinWidth(), B_SIZE_UNSET));
 		fAlbumSaveButton->SetExplicitAlignment(BAlignment(B_ALIGN_LEFT,
 			B_ALIGN_VERTICAL_CENTER));
 		fAlbumSaveButton->SetEnabled(false);
@@ -2289,10 +2305,12 @@ PlaylistWindow::_InitTrackList(SpotifyItemKind kind)
 	bool isPodcast = kind == kSpotifyItemShow;
 
 	fTrackList = new TrackListView("TrackList", 0, B_PLAIN_BORDER, true);
+	_UpdateTrackDropMarkerMode();
 	fTrackList->SetSelectionMode(B_MULTIPLE_SELECTION_LIST);
 	fTrackList->SetExplicitMaxSize(BSize(B_SIZE_UNLIMITED, B_SIZE_UNLIMITED));
 
-	fTrackList->AddColumn(new BIntegerColumn("#", 40, 30, 60, B_ALIGN_RIGHT),
+	fTrackList->AddColumn(new TrackIntegerColumn("#", 40, 30, 60,
+		B_ALIGN_RIGHT),
 		0);
 	fTrackList->AddColumn(new TrackStringColumn(B_TRANSLATE("Title"), 200,
 		80, 400, B_TRUNCATE_END), 1);
@@ -2410,7 +2428,8 @@ PlaylistWindow::_InitPodcastLayout()
 					.Add(fDescriptionScroll, 1.0f)
 					.AddGroup(B_HORIZONTAL, B_USE_SMALL_SPACING, 0.0f)
 						.Add(new ResourceIconView("searchIcon",
-							kSearchIconResource, 16.0f), 0.0f)
+							kSearchIconResource,
+							MediaHeaderStyle::Scaled(16.0f)), 0.0f)
 						.Add(fSearchBox, 1.0f)
 					.End()
 				.End()
@@ -2573,6 +2592,20 @@ PlaylistWindow::_UpdatePlaylistMenuState()
 	if (fPlaylistDeleteItem)
 		fPlaylistDeleteItem->SetLabel(fPlaylistOwned
 			? B_TRANSLATE("Delete Playlist") : B_TRANSLATE("Unfollow Playlist"));
+	_UpdateTrackDropMarkerMode();
+}
+
+
+void
+PlaylistWindow::_UpdateTrackDropMarkerMode()
+{
+	if (!fTrackList)
+		return;
+	bool mutationPending = fTrackRemovalPending || fTrackReorderPending
+		|| fPlaylistClearPending;
+	fTrackList->SetDropFeedbackFlags(PlaylistCanAcceptDrop(fUri,
+		fPlaylistOwned, mutationPending) ? kDropFeedbackInsertMarker
+			: kDropFeedbackNone);
 }
 
 void

@@ -1,5 +1,6 @@
 #include "DiscoverWindow.h"
 #include "DiscoverListView.h"
+#include "HaifyDragState.h"
 #include "TextInputDialog.h"
 #include "Messages.h"
 #include "SettingsController.h"
@@ -62,6 +63,8 @@ static const uint32 kMsgCacheLoaded = 'dCch';
 static const uint32 kMsgSaveCache = 'dCsv';
 static const uint32 kMsgLibraryStateCached = 'dLSt';
 static const uint32 kMsgAudiobookIdsUpdated = 'dAId';
+static const uint32 kMsgDropTabSwitch = 'dTsW';
+static const bigtime_t kDropTabSwitchDelay = 350000LL;
 static const int32 kDiscoverCacheVersion = 5;
 static const int32 kMaxDiscoverCachedRowsPerTab = 500;
 static const int32 kDiscoverCacheBatchRows = 50;
@@ -120,6 +123,33 @@ PrimaryUriMatchesTab(int32 tab, const std::string& uri)
 	if (tab == TAB_SAVED_EPISODES) return kind == kSpotifyItemEpisode;
 	if (tab == TAB_AUDIOBOOKS) return kind == kSpotifyItemAudiobook;
 	return tab == TAB_PLAYLISTS && kind == kSpotifyItemPlaylist;
+}
+
+static std::string
+DraggedSpotifyUri(BMessage* message)
+{
+	const char* uri = message ? message->GetString("uri", "") : "";
+	if (!uri || !uri[0])
+		uri = message ? message->GetString("trackUri", "") : "";
+	if (!uri || !uri[0])
+		uri = message ? message->GetString("albumUri", "") : "";
+	return uri ? uri : "";
+}
+
+
+static bool
+HaifyDragButtonStillDown(BView* view, BPoint* currentWhere = nullptr)
+{
+	BMessage drag;
+	if (!GetHaifyActiveDragMessage(drag) || !view)
+		return false;
+
+	BPoint where;
+	uint32 buttons = 0;
+	view->GetMouse(&where, &buttons, false);
+	if (currentWhere)
+		*currentWhere = where;
+	return (buttons & B_PRIMARY_MOUSE_BUTTON) != 0;
 }
 
 struct RowData {
@@ -450,6 +480,43 @@ class DiscoverTabView : public BTabView {
 public:
 	DiscoverTabView() : BTabView("tabs", B_WIDTH_FROM_LABEL) {}
 
+	void SetValidDropTargets(const std::vector<int32>& targets)
+	{
+		if (fValidDropTargets == targets)
+			return;
+		fValidDropTargets = targets;
+		Invalidate();
+	}
+
+	void SetPendingDropTarget(int32 visual)
+	{
+		if (fPendingDropTarget == visual)
+			return;
+		fPendingDropTarget = visual;
+		Invalidate();
+	}
+
+	void ClearDropTarget()
+	{
+		if (fValidDropTargets.empty() && fPendingDropTarget < 0)
+			return;
+		fValidDropTargets.clear();
+		fPendingDropTarget = -1;
+		Invalidate();
+	}
+
+	int32 VisualTabAt(BPoint where) const
+	{
+		return _TabAt(where);
+	}
+
+	int32 DropTargetTabAt(BPoint where) const
+	{
+		if (where.y < 0.0f || where.y > TabHeight() + 1.0f)
+			return -1;
+		return _TabAt(where);
+	}
+
 	virtual void Select(int32 tab) {
 		BTabView::Select(tab);
 		if (Window()) {
@@ -471,6 +538,28 @@ public:
 
 	virtual void MouseMoved(BPoint where, uint32 transit,
 		const BMessage* dragMessage) {
+		if (dragMessage && dragMessage->what == 'drag') {
+			BPoint currentWhere;
+			if (!HaifyDragButtonStillDown(this, &currentWhere)) {
+				ClearHaifyActiveDragMessage();
+				if (be_app)
+					be_app->PostMessage(MSG_HAIFY_DRAG_ENDED);
+				BTabView::MouseMoved(where, transit, dragMessage);
+				return;
+			}
+			BPoint screen = currentWhere;
+			ConvertToScreen(&screen);
+			BMessage hover(*dragMessage);
+			hover.what = MSG_DISCOVER_DRAG_HOVER;
+			hover.AddPoint("screenPt", screen);
+			int32 visualTab = DropTargetTabAt(currentWhere);
+			if (visualTab >= 0)
+				hover.AddInt32("visualTab", visualTab);
+			if (Window())
+				Window()->PostMessage(&hover);
+			BTabView::MouseMoved(where, transit, dragMessage);
+			return;
+		}
 		if (fSource >= 0) {
 			if (!fDragging && std::fabs(where.x - fStart.x) >= 4.0f)
 				fDragging = true;
@@ -487,6 +576,12 @@ public:
 	}
 
 	virtual void MouseUp(BPoint where) {
+		BMessage drag;
+		if (GetHaifyActiveDragMessage(drag)) {
+			ClearHaifyActiveDragMessage();
+			if (be_app)
+				be_app->PostMessage(MSG_HAIFY_DRAG_ENDED);
+		}
 		if (fDragging && fSource >= 0 && fTarget >= 0
 				&& fSource != fTarget && Window()) {
 			BMessage reorder('tRdr');
@@ -512,8 +607,17 @@ public:
 
 	virtual void Draw(BRect update) {
 		BTabView::Draw(update);
-		if (fDragging && fTarget >= 0 && fTarget < CountTabs()) {
-			BRect frame = TabFrame(fTarget);
+		for (int32 target : fValidDropTargets) {
+			if (target < 0 || target >= CountTabs())
+				continue;
+			BRect frame = TabFrame(target);
+			SetHighColor(tint_color(ui_color(B_CONTROL_HIGHLIGHT_COLOR),
+				B_LIGHTEN_1_TINT));
+			StrokeRect(frame.InsetByCopy(2, 2));
+		}
+		int32 target = fDragging ? fTarget : fPendingDropTarget;
+		if (target >= 0 && target < CountTabs()) {
+			BRect frame = TabFrame(target);
 			SetHighColor(ui_color(B_CONTROL_HIGHLIGHT_COLOR));
 			StrokeRect(frame.InsetByCopy(1, 1));
 		}
@@ -530,6 +634,8 @@ private:
 
 	int32 fSource = -1;
 	int32 fTarget = -1;
+	int32 fPendingDropTarget = -1;
+	std::vector<int32> fValidDropTargets;
 	BPoint fStart;
 	bool fDragging = false;
 };
@@ -545,6 +651,7 @@ public:
 			return B_DISPATCH_MESSAGE;
 		if (target && fWindow->ForwardDroppedMessage(message, *target))
 			return B_SKIP_MESSAGE;
+		ClearHaifyActiveDragMessage();
 		BMessage drop(*message);
 		drop.what = 'dDrp';
 		fWindow->PostMessage(&drop);
@@ -603,6 +710,8 @@ DiscoverWindow::DiscoverWindow()
 
 DiscoverWindow::~DiscoverWindow()
 {
+	delete fDropTabSwitchRunner;
+	fDropTabSwitchRunner = nullptr;
 	delete fCacheSaveRunner;
 	fCacheSaveRunner = nullptr;
 	_WriteCacheNow();
@@ -650,7 +759,11 @@ DiscoverWindow::_LogicalTab(int32 visual) const
 BColumnListView*
 DiscoverWindow::_MakeList(int32 i)
 {
-	return new DiscoverListView(kTabDefs[i].label, kTabCols[i], i, true);
+	DiscoverListView* list = new DiscoverListView(kTabDefs[i].label,
+		kTabCols[i], i, true);
+	list->SetDropFeedbackFlags(i == TAB_PLAYLISTS ? kDropFeedbackTargetRow
+		: kDropFeedbackNone);
+	return list;
 }
 
 
@@ -1058,6 +1171,30 @@ bool
 DiscoverWindow::_HandleLibraryActionMessage(BMessage* message)
 {
 	switch (message->what) {
+		case MSG_DISCOVER_DRAG_HOVER:
+			_HandleDiscoverDragHover(message);
+			return true;
+
+		case MSG_DISCOVER_DRAG_EXIT:
+			_ClearDropMarkers();
+			return true;
+
+		case MSG_HAIFY_DRAG_ENDED:
+			_ClearDropMarkers();
+			return true;
+
+		case kMsgDropTabSwitch:
+			if (message->GetInt32("tab", -1) == fPendingDropTab
+					&& HaifyActiveDragGenerationMatches(
+						message->GetInt32("dragGeneration", -1))
+					&& _IsPointerOverDropTargetTab(fPendingDropTab)) {
+				_SelectDropTargetTab(fPendingDropTab);
+				_CancelDropTabSwitch();
+			} else {
+				_ClearDropMarkers();
+			}
+			return true;
+
 		case 'dDrp':
 			_HandleDiscoverDrop(message);
 			return true;
@@ -1795,23 +1932,212 @@ DiscoverWindow::_ApplyLibraryStateCached(BMessage* message)
 
 
 void
-DiscoverWindow::_HandleDiscoverDrop(BMessage* message)
+DiscoverWindow::_HandleDiscoverDragHover(BMessage* message)
 {
-	const char* uri = message->GetString("uri", "");
-	if (!uri || !uri[0])
-		uri = message->GetString("trackUri", "");
-	if (!uri || !uri[0])
-		uri = message->GetString("albumUri", "");
-	if (!uri || !uri[0])
-		return;
-	int32 targetTab = message->GetInt32("tab", -1);
-	std::string targetUri = message->GetString("targetUri", "");
-	if (targetTab == TAB_PLAYLISTS && !targetUri.empty()
-			&& _HandlePlaylistDrop(uri, targetUri,
-				message->GetBool("targetWritable", false))) {
+	std::string uri = DraggedSpotifyUri(message);
+	int32 logical = _DropTargetTabForUri(uri);
+	if (logical < 0) {
+		_ClearDropMarkers();
 		return;
 	}
+	if (!_IsTabEffectivelyVisible(logical)) {
+		_ClearDropMarkers();
+		return;
+	}
+	_SetValidDropTargetTab(logical);
+
+	BPoint screenWhere = message->GetPoint("screenPt", BPoint(-1.0f, -1.0f));
+	int32 visualUnderMouse = -1;
+	bool isTabHover = message->FindInt32("visualTab", &visualUnderMouse)
+		== B_OK;
+	int32 logicalUnderMouse = isTabHover ? _LogicalTab(visualUnderMouse) : -1;
+	if (isTabHover && logicalUnderMouse == logical)
+		_ScheduleDropTabSwitch(logical);
+	else
+		_CancelDropTabSwitch();
+
+	if (_LogicalTab(fTabView ? fTabView->Selection() : -1) != logical) {
+		for (int32 i = 0; i < TAB_COUNT; i++) {
+			if (DiscoverListView* list =
+					dynamic_cast<DiscoverListView*>(fLists[i])) {
+				list->ClearDropMarker();
+			}
+		}
+		return;
+	}
+
+	_UpdateDropMarkers(logical, screenWhere);
+}
+
+
+void
+DiscoverWindow::_HandleDiscoverDrop(BMessage* message)
+{
+	_ClearDropMarkers();
+	ClearHaifyActiveDragMessage();
+	std::string uri = DraggedSpotifyUri(message);
+	if (uri.empty())
+		return;
+	int32 targetTab = message->GetInt32("tab", -1);
+	int32 expectedTab = _DropTargetTabForUri(uri);
+	if (expectedTab < 0 || targetTab != expectedTab)
+		return;
+
+	std::string targetUri = message->GetString("targetUri", "");
+	if (targetTab == TAB_PLAYLISTS) {
+		if (!targetUri.empty())
+			_HandlePlaylistDrop(uri, targetUri,
+				message->GetBool("targetWritable", false));
+		return;
+	}
+
 	_HandleLibraryDrop(uri);
+}
+
+
+int32
+DiscoverWindow::_DropTargetTabForUri(const std::string& uri) const
+{
+	const char* targetId = SpotifyLibraryTargetId(SpotifyItemKindForUri(uri));
+	if (!targetId || !targetId[0])
+		return -1;
+	for (int32 i = 0; i < TAB_COUNT; i++) {
+		if (strcmp(kTabDefs[i].id, targetId) == 0) {
+			if (i == TAB_AUDIOBOOKS && !_AudiobooksEnabled())
+				return -1;
+			return i;
+		}
+	}
+	return -1;
+}
+
+
+bool
+DiscoverWindow::_SelectDropTargetTab(int32 logicalTab)
+{
+	if (logicalTab < 0 || logicalTab >= TAB_COUNT || !fTabView)
+		return false;
+	if (!_IsTabEffectivelyVisible(logicalTab))
+		return false;
+
+	int32 selected = _LogicalTab(fTabView->Selection());
+	if (selected == logicalTab)
+		return true;
+	for (int32 visual = 0; visual < fTabView->CountTabs(); visual++) {
+		if (fTabMap[visual] == logicalTab) {
+			fTabView->Select(visual);
+			return true;
+		}
+	}
+	return false;
+}
+
+
+int32
+DiscoverWindow::_VisualTabForLogical(int32 logicalTab) const
+{
+	if (!fTabView)
+		return -1;
+	for (int32 visual = 0; visual < fTabView->CountTabs(); visual++) {
+		if (fTabMap[visual] == logicalTab)
+			return visual;
+	}
+	return -1;
+}
+
+
+bool
+DiscoverWindow::_IsPointerOverDropTargetTab(int32 logicalTab) const
+{
+	DiscoverTabView* tabs = dynamic_cast<DiscoverTabView*>(fTabView);
+	BMessage drag;
+	if (!tabs || !GetHaifyActiveDragMessage(drag))
+		return false;
+
+	BPoint where;
+	uint32 buttons = 0;
+	tabs->GetMouse(&where, &buttons, false);
+	if ((buttons & B_PRIMARY_MOUSE_BUTTON) == 0)
+		return false;
+
+	return _LogicalTab(tabs->DropTargetTabAt(where)) == logicalTab;
+}
+
+
+void
+DiscoverWindow::_SetValidDropTargetTab(int32 logicalTab)
+{
+	DiscoverTabView* tabs = dynamic_cast<DiscoverTabView*>(fTabView);
+	if (!tabs)
+		return;
+	std::vector<int32> targets;
+	int32 visual = _VisualTabForLogical(logicalTab);
+	if (visual >= 0)
+		targets.push_back(visual);
+	tabs->SetValidDropTargets(targets);
+}
+
+
+void
+DiscoverWindow::_ScheduleDropTabSwitch(int32 logicalTab)
+{
+	if (_LogicalTab(fTabView ? fTabView->Selection() : -1) == logicalTab)
+		return;
+	if (fPendingDropTab == logicalTab && fDropTabSwitchRunner)
+		return;
+	int32 dragGeneration = HaifyActiveDragGeneration();
+	if (dragGeneration < 0)
+		return;
+	_CancelDropTabSwitch();
+	fPendingDropTab = logicalTab;
+	if (DiscoverTabView* tabs = dynamic_cast<DiscoverTabView*>(fTabView))
+		tabs->SetPendingDropTarget(_VisualTabForLogical(logicalTab));
+	BMessage message(kMsgDropTabSwitch);
+	message.AddInt32("tab", logicalTab);
+	message.AddInt32("dragGeneration", dragGeneration);
+	fDropTabSwitchRunner = new BMessageRunner(BMessenger(this), &message,
+		kDropTabSwitchDelay, 1);
+}
+
+
+void
+DiscoverWindow::_CancelDropTabSwitch()
+{
+	delete fDropTabSwitchRunner;
+	fDropTabSwitchRunner = nullptr;
+	fPendingDropTab = -1;
+	if (DiscoverTabView* tabs = dynamic_cast<DiscoverTabView*>(fTabView))
+		tabs->SetPendingDropTarget(-1);
+}
+
+
+void
+DiscoverWindow::_UpdateDropMarkers(int32 logicalTab, BPoint screenWhere)
+{
+	_SetValidDropTargetTab(logicalTab);
+	for (int32 i = 0; i < TAB_COUNT; i++) {
+		DiscoverListView* list = dynamic_cast<DiscoverListView*>(fLists[i]);
+		if (!list)
+			continue;
+		if (i == logicalTab)
+			list->UpdateDropTarget(screenWhere);
+		else
+			list->ClearDropMarker();
+	}
+}
+
+
+void
+DiscoverWindow::_ClearDropMarkers()
+{
+	_CancelDropTabSwitch();
+	if (DiscoverTabView* tabs = dynamic_cast<DiscoverTabView*>(fTabView))
+		tabs->ClearDropTarget();
+	for (int32 i = 0; i < TAB_COUNT; i++) {
+		DiscoverListView* list = dynamic_cast<DiscoverListView*>(fLists[i]);
+		if (list)
+			list->ClearDropMarker();
+	}
 }
 
 

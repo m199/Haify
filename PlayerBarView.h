@@ -50,6 +50,7 @@ public:
     virtual void    DoLayout() override;
     virtual void    Draw(BRect updateRect) override;
     virtual void    DrawAfterChildren(BRect updateRect) override;
+    virtual void    FrameResized(float width, float height) override;
     virtual void    FrameMoved(BPoint newPosition) override;
     virtual void    MouseDown(BPoint where) override;
     virtual void    MessageReceived(BMessage* msg) override;
@@ -85,6 +86,8 @@ private:
     void    _ApplySeekBarColors();
     void    _LoadReplicantAppearance();
     bool    _ApplyReplicantAppearance(const BMessage* message);
+    void    _LayoutDragger();
+    void    _UpdateAddTrackButtonEnabled();
 
     TrackInfoView*          fTrackInfoView  = nullptr;
     BButton*                fAddTrackButton = nullptr;
@@ -125,6 +128,7 @@ private:
     rgb_color               fReplicantColor = { 255, 255, 255, 255 };
     rgb_color               fActiveReplicantColor = { 255, 255, 255, 255 };
     bool                    fReplicantColorRefreshPending = false;
+    float                   fLayoutScale    = 1.0f;
     std::string             fRepeatState    = "off";
     std::string             fCurrentAlbumId;
     std::string             fCurrentArtistId;

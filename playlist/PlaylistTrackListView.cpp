@@ -1,5 +1,7 @@
 #include "PlaylistTrackListView.h"
 
+#include "DropMarkerStyle.h"
+#include "HaifyDragState.h"
 #include "HaifyDebug.h"
 #include "Messages.h"
 #include "PlaylistTrackRow.h"
@@ -8,17 +10,22 @@
 
 #include <Application.h>
 #include <ColumnTypes.h>
+#include <InterfaceDefs.h>
 #include <Message.h>
 #include <MessageFilter.h>
+#include <MessageRunner.h>
+#include <Messenger.h>
 #include <Rect.h>
 #include <ScrollBar.h>
 #include <View.h>
 #include <Window.h>
 
+#include <algorithm>
 #include <cstring>
 #include <string>
 
 static const uint32 kMsgCheckLazyLoad = 'ckLm';
+static const uint32 kMsgDropMarkerCleanup = 'dmCl';
 
 namespace {
 
@@ -52,6 +59,35 @@ FindTrackScreenPoint(BMessage* message, BView* view, BPoint& screen)
 		return false;
 	screen = view->ConvertToScreen(where);
 	return true;
+}
+
+
+bool
+FindTrackMouseMovedScreenPoint(BMessage* message, BView* view, BPoint& screen)
+{
+	if (message->FindPoint("screen_where", &screen) == B_OK)
+		return true;
+
+	BPoint where;
+	if (message->FindPoint("where", &where) != B_OK)
+		return false;
+
+	screen = view->ConvertToScreen(where);
+	return true;
+}
+
+
+BPoint
+TrackRowPointFromScreen(BColumnListView* list, BPoint screen)
+{
+	if (!list)
+		return screen;
+	BPoint point = screen;
+	if (BView* outline = list->ScrollView())
+		outline->ConvertFromScreen(&point);
+	else
+		list->ConvertFromScreen(&point);
+	return point;
 }
 
 }
@@ -101,11 +137,67 @@ private:
 };
 
 
+class TrackMouseMovedFilter : public BMessageFilter {
+public:
+	TrackMouseMovedFilter(TrackListView* owner)
+		:
+		BMessageFilter(B_ANY_DELIVERY, B_ANY_SOURCE, B_MOUSE_MOVED),
+		fOwner(owner)
+	{
+	}
+
+	virtual filter_result Filter(BMessage* message, BHandler** target)
+	{
+		if (!fOwner || !message || message->what != B_MOUSE_MOVED)
+			return B_DISPATCH_MESSAGE;
+		BMessage drag;
+		if (!GetHaifyActiveDragMessage(drag) || drag.what != 'drag')
+			return B_DISPATCH_MESSAGE;
+
+		BView* view = dynamic_cast<BView*>(*target);
+		if (!IsTrackListContentView(view))
+			return B_DISPATCH_MESSAGE;
+		for (BView* parent = view; parent; parent = parent->Parent()) {
+			if (parent == fOwner || parent == fOwner->ScrollView()) {
+				int32 buttons = 0;
+				if (message->FindInt32("buttons", &buttons) == B_OK
+						&& (buttons & B_PRIMARY_MOUSE_BUTTON) == 0) {
+					fOwner->ClearDropMarker();
+					ClearHaifyActiveDragMessage();
+					if (be_app)
+						be_app->PostMessage(MSG_HAIFY_DRAG_ENDED);
+					return B_DISPATCH_MESSAGE;
+				}
+				BPoint screen;
+				if (FindTrackMouseMovedScreenPoint(message, view, screen))
+					fOwner->UpdateDropMarkerFromDrag(screen, &drag);
+				break;
+			}
+		}
+		return B_DISPATCH_MESSAGE;
+	}
+
+private:
+	TrackListView* fOwner;
+};
+
+
 TrackListView::TrackListView(const char* name, uint32 flags,
 	border_style border, bool showHorizontalScrollbar)
 	:
-	BColumnListView(name, flags, border, showHorizontalScrollbar)
+	BColumnListView(name, flags, border, showHorizontalScrollbar),
+	fDropMarker(this, [](BRow* row, int32 position, bool target) {
+		TrackRow* trackRow = dynamic_cast<TrackRow*>(row);
+		(void)target;
+		return trackRow && trackRow->SetDropMarkerPosition(position);
+	})
 {
+}
+
+
+TrackListView::~TrackListView()
+{
+	_StopDropMarkerCleanupRunner();
 }
 
 
@@ -113,10 +205,13 @@ void
 TrackListView::AttachedToWindow()
 {
 	BColumnListView::AttachedToWindow();
-	if (BView* outline = ScrollView())
+	if (BView* outline = ScrollView()) {
 		outline->AddFilter(new RightClickFilter(this));
-	else
+		outline->AddFilter(new TrackMouseMovedFilter(this));
+	} else {
 		AddFilter(new RightClickFilter(this));
+		AddFilter(new TrackMouseMovedFilter(this));
+	}
 }
 
 
@@ -147,6 +242,10 @@ TrackListView::MouseDown(BPoint point)
 void
 TrackListView::MessageReceived(BMessage* message)
 {
+	if (message->what == kMsgDropMarkerCleanup) {
+		_ClearDropMarkerIfDragEnded();
+		return;
+	}
 	if (message->what == 'rCf!') {
 		BPoint screen;
 		if (message->FindPoint("screenPt", &screen) == B_OK) {
@@ -165,6 +264,8 @@ TrackListView::MessageReceived(BMessage* message)
 	}
 	if (message->WasDropped() && message->what == 'drag') {
 		DEBUG_PRINT("TrackListView: Posting 'drag' drop to Window\n");
+		ClearDropMarker();
+		ClearHaifyActiveDragMessage();
 		Window()->PostMessage(message);
 		return;
 	}
@@ -236,6 +337,8 @@ TrackListView::InitiateDrag(BPoint point, bool wasSelected)
 
 			BRect dragRect(point.x - 100, point.y - 10, point.x + 100,
 				point.y + 10);
+			DeselectAll();
+			SetHaifyActiveDragMessage(dragMessage);
 			DragMessage(&dragMessage, dragRect, this);
 			return true;
 		}
@@ -250,9 +353,25 @@ void
 TrackListView::MouseMoved(BPoint point, uint32 transit,
 	const BMessage* dragMessage)
 {
+	if (transit == B_EXITED_VIEW)
+		ClearDropMarker();
+	else if (dragMessage && dragMessage->what == 'drag') {
+		_UpdateDropMarker(point, dragMessage);
+		if (Window())
+			Window()->PostMessage(kMsgCheckLazyLoad);
+		return;
+	}
 	BColumnListView::MouseMoved(point, transit, dragMessage);
 	if (Window())
 		Window()->PostMessage(kMsgCheckLazyLoad);
+}
+
+
+void
+TrackListView::Draw(BRect update)
+{
+	BColumnListView::Draw(update);
+	fDropMarker.Draw(this);
 }
 
 
@@ -317,11 +436,104 @@ TrackListView::_ColumnAt(float x) const
 		BColumn* column = ColumnAt(i);
 		if (!column)
 			break;
+		if (!column->IsVisible())
+			continue;
 		left += column->Width();
 		if (x < left)
-			return i;
+			return column->LogicalFieldNum();
 	}
 	return CountColumns() - 1;
+}
+
+
+void
+TrackListView::_UpdateDropMarker(BPoint point, const BMessage* dragMessage)
+{
+	DropFeedbackFlags flags = fDropMarker.Flags();
+	if ((flags & (kDropFeedbackInsertMarker
+			| kDropFeedbackAppendMarker)) == 0) {
+		ClearDropMarker();
+		return;
+	}
+
+	bool canReorderDrag = false;
+	if (PlaylistWindow* window = dynamic_cast<PlaylistWindow*>(Window())) {
+		std::string sourcePlaylist = dragMessage
+			? dragMessage->GetString("sourcePlaylist", "") : "";
+		canReorderDrag = !sourcePlaylist.empty()
+			&& sourcePlaylist == window->GetUri()
+			&& dragMessage->GetInt32("sourceIndex", -1) >= 0;
+	}
+
+	if (canReorderDrag && (flags & kDropFeedbackInsertMarker) != 0) {
+		fDropMarker.UpdateInsertForPoint(point);
+	} else {
+		fDropMarker.UpdateAppend();
+	}
+	if (fDropMarker.IsActive())
+		_StartDropMarkerCleanupRunner();
+}
+
+
+void
+TrackListView::UpdateDropMarkerFromDrag(BPoint screenWhere,
+	const BMessage* dragMessage)
+{
+	BPoint point = TrackRowPointFromScreen(this, screenWhere);
+	_UpdateDropMarker(point, dragMessage);
+}
+
+
+void
+TrackListView::ClearDropMarker()
+{
+	if (fDropMarker.Clear())
+		_StopDropMarkerCleanupRunner();
+}
+
+
+void
+TrackListView::SetDropFeedbackFlags(DropFeedbackFlags flags)
+{
+	if (fDropMarker.SetFlags(flags))
+		_StopDropMarkerCleanupRunner();
+}
+
+
+void
+TrackListView::_StartDropMarkerCleanupRunner()
+{
+	if (fDropMarkerCleanupRunner || !Window())
+		return;
+	BMessage message(kMsgDropMarkerCleanup);
+	fDropMarkerCleanupRunner = new BMessageRunner(BMessenger(this),
+		&message, 100000LL);
+}
+
+
+void
+TrackListView::_StopDropMarkerCleanupRunner()
+{
+	delete fDropMarkerCleanupRunner;
+	fDropMarkerCleanupRunner = nullptr;
+}
+
+
+void
+TrackListView::_ClearDropMarkerIfDragEnded()
+{
+	BMessage drag;
+	BPoint where;
+	uint32 buttons = 0;
+	GetMouse(&where, &buttons, false);
+	if ((buttons & B_PRIMARY_MOUSE_BUTTON) != 0
+			&& GetHaifyActiveDragMessage(drag)) {
+		return;
+	}
+	ClearHaifyActiveDragMessage();
+	ClearDropMarker();
+	if (be_app)
+		be_app->PostMessage(MSG_HAIFY_DRAG_ENDED);
 }
 
 

@@ -2,6 +2,8 @@
 #include "ArtworkView.h"
 #include "TrackContextMenu.h"
 #include "App.h"
+#include "HaifyDragState.h"
+#include "MediaHeaderStyle.h"
 #include "Messages.h"
 #include "HaifyDebug.h"
 #include "spotify/SpotifyUri.h"
@@ -294,6 +296,8 @@ public:
 		if (title)
 			drag.AddString("title", title->String());
 		BRect dragRect(point.x - 100, point.y - 10, point.x + 100, point.y + 10);
+		DeselectAll();
+		SetHaifyActiveDragMessage(drag);
 		DragMessage(&drag, dragRect, this);
 		return true;
 	}
@@ -417,6 +421,8 @@ public:
 		drag.AddString("albumUri", uri.c_str());
 		drag.AddString("title", row->fAlbumName.c_str());
 		BRect dragRect(point.x - 100, point.y - 10, point.x + 100, point.y + 10);
+		DeselectAll();
+		SetHaifyActiveDragMessage(drag);
 		DragMessage(&drag, dragRect, this);
 		return true;
 	}
@@ -450,9 +456,7 @@ ArtistWindow::ArtistWindow(const std::string& artistId)
 {
 	fArtworkView = new ArtworkView("artistCover");
 	fArtworkView->ShowLoading();
-	fArtworkView->SetExplicitMinSize(BSize(110, 110));
-	fArtworkView->SetExplicitMaxSize(BSize(110, 110));
-	fArtworkView->SetExplicitPreferredSize(BSize(110, 110));
+	MediaHeaderStyle::ApplyArtworkSize(fArtworkView, 110.0f);
 	fArtworkView->SetExplicitAlignment(BAlignment(B_ALIGN_LEFT, B_ALIGN_TOP));
 
 	fNameView = new BStringView("artistName", B_UTF8_ELLIPSIS);

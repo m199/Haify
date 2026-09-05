@@ -44,7 +44,7 @@ CachedTrackRowFromCache(const PlaylistCacheDocument::Track& track,
 	TrackRow* row = new TrackRow(track.uri, track.number - 1);
 	row->fArtistUri = track.artistUri;
 	row->fAlbumUri = track.albumUri;
-	row->SetField(new BIntegerField(track.number), 0);
+	row->SetField(new TrackIntegerField(track.number), 0);
 	row->SetField(new TrackStringField(track.title.c_str()), 1);
 	row->SetField(new TrackStringField(track.artist.c_str()), 2);
 	row->SetField(new TrackStringField(track.bpm.c_str()), 3);

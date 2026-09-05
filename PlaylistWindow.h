@@ -193,6 +193,7 @@ private:
 	void					_RefreshPlaylistSnapshot();
 	void					_UpdatePlaylistTrackInfo();
 	void					_UpdatePlaylistMenuState();
+	void					_UpdateTrackDropMarkerMode();
 	void					_RefreshPodcastHead(int32 offset);
 	void					_FinishPodcastHeadRefresh();
 	bool					_LoadCache();

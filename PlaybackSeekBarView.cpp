@@ -3,6 +3,7 @@
 
 #include "Messages.h"
 #include "SettingsController.h"
+#include "UiScale.h"
 
 #include <Message.h>
 #include <Messenger.h>
@@ -13,8 +14,43 @@
 #include <cmath>
 #include <cstdio>
 
-static const float kBarThick = 18.0f;
-static const float kViewH    = 20.0f;
+static const float kMinimumBarThickness = 18.0f;
+static const float kMinimumViewHeight = 20.0f;
+
+
+static float
+FontLineHeight()
+{
+    return UiScale::LineHeight();
+}
+
+
+static float
+ScaledViewHeight(float scale)
+{
+    return std::max(kMinimumViewHeight * scale, FontLineHeight() + 8.0f);
+}
+
+
+static float
+ScaledBarThickness(float scale)
+{
+    return std::max(kMinimumBarThickness * scale,
+        ScaledViewHeight(scale) - 6.0f);
+}
+
+
+static void
+ApplyScaledLayoutSize(BView* view, float scale)
+{
+    if (!view)
+        return;
+    float fontH = FontLineHeight();
+    float viewH = ScaledViewHeight(scale);
+    view->SetExplicitMinSize(BSize(fontH * 10.0f * scale, viewH));
+    view->SetExplicitMaxSize(BSize(B_SIZE_UNLIMITED, viewH));
+    view->SetExplicitPreferredSize(BSize(fontH * 24.0f * scale, viewH));
+}
 
 static uint8
 BlendChannel(uint8 source, uint8 target, float amount)
@@ -61,13 +97,7 @@ PlaybackSeekBarView::PlaybackSeekBarView(const char* name)
 {
     SetViewColor(ui_color(B_PANEL_BACKGROUND_COLOR));
     _InitColors();
-
-    font_height fh;
-    be_plain_font->GetHeight(&fh);
-    float fontH = fh.ascent + fh.descent + fh.leading;
-    SetExplicitMinSize(BSize(fontH * 10, kViewH));
-    SetExplicitMaxSize(BSize(B_SIZE_UNLIMITED, kViewH));
-    SetExplicitPreferredSize(BSize(fontH * 24, kViewH));
+    ApplyScaledLayoutSize(this, fLayoutScale);
 }
 
 PlaybackSeekBarView::PlaybackSeekBarView(BMessage* archive)
@@ -75,6 +105,7 @@ PlaybackSeekBarView::PlaybackSeekBarView(BMessage* archive)
 {
     SetViewColor(ui_color(B_PANEL_BACKGROUND_COLOR));
     _InitColors();
+    ApplyScaledLayoutSize(this, fLayoutScale);
 
     archive->FindInt64("duration", &fDuration);
     archive->FindInt64("position", &fPosition);
@@ -150,6 +181,17 @@ void PlaybackSeekBarView::SetTransparentBackground(bool transparent) {
     Invalidate();
 }
 
+void PlaybackSeekBarView::SetLayoutScale(float scale) {
+    if (scale < 1.0f)
+        scale = 1.0f;
+    if (fLayoutScale == scale)
+        return;
+    fLayoutScale = scale;
+    ApplyScaledLayoutSize(this, fLayoutScale);
+    InvalidateLayout();
+    Invalidate();
+}
+
 void PlaybackSeekBarView::Draw(BRect) {
     _DrawBar(Bounds());
 }
@@ -204,7 +246,8 @@ BRect PlaybackSeekBarView::_TrackRect() const {
     BRect bounds = Bounds();
     BRect track = bounds;
     float availableHeight = bounds.Height() + 1.0f;
-    float trackHeight = std::min(kBarThick, availableHeight);
+    float trackHeight = std::min(ScaledBarThickness(fLayoutScale),
+        availableHeight);
     track.top = std::floor(bounds.top
         + (availableHeight - trackHeight) / 2.0f);
     track.bottom = track.top + trackHeight - 1.0f;

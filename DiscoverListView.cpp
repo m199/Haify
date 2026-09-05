@@ -1,13 +1,22 @@
 #include "DiscoverListView.h"
+#include "DropMarkerStyle.h"
+#include "HaifyDragState.h"
+#include "Messages.h"
 #include "spotify/SpotifyUri.h"
 
+#include <Application.h>
 #include <Message.h>
 #include <MessageFilter.h>
+#include <MessageRunner.h>
+#include <Messenger.h>
 #include <ScrollBar.h>
 #include <Window.h>
 #include <Font.h>
 #include <InterfaceDefs.h>
+#include <algorithm>
 #include <cstring>
+
+static const uint32 kMsgDropMarkerCleanup = 'dmCl';
 
 static bool
 IsSecondaryMouseClick(BMessage* message)
@@ -50,17 +59,76 @@ FindScreenPoint(BMessage* message, BView* view, BPoint& screenWhere)
 }
 
 
+static bool
+FindMouseMovedScreenPoint(BMessage* message, BView* view, BPoint& screenWhere)
+{
+	if (message->FindPoint("screen_where", &screenWhere) == B_OK)
+		return true;
+
+	BPoint where;
+	if (message->FindPoint("where", &where) != B_OK)
+		return false;
+
+	screenWhere = view->ConvertToScreen(where);
+	return true;
+}
+
+
+static BPoint
+RowPointFromScreen(BColumnListView* list, BPoint screenWhere)
+{
+	if (!list)
+		return screenWhere;
+	BPoint point = screenWhere;
+	if (BView* outline = list->ScrollView())
+		outline->ConvertFromScreen(&point);
+	else
+		list->ConvertFromScreen(&point);
+	return point;
+}
+
+
+static void
+DrawDropMarkerLine(BView* parent, BRect rect, int32 position)
+{
+	if (position == 0)
+		return;
+
+	rgb_color originalColor = parent->HighColor();
+	float originalPenSize = parent->PenSize();
+	parent->SetHighColor(HaifyDropMarkerColor());
+	parent->SetPenSize(2.0f);
+	float y = position < 0 ? rect.top + 1.0f : rect.bottom - 1.0f;
+	parent->StrokeLine(BPoint(rect.left - 2.0f, y),
+		BPoint(rect.right + 2.0f, y));
+	parent->SetPenSize(originalPenSize);
+	parent->SetHighColor(originalColor);
+}
+
+
 void
 BoldStringColumn::DrawField(BField* field, BRect rect, BView* parent)
 {
 	BoldStringField* f = static_cast<BoldStringField*>(field);
+	rgb_color originalColor = parent->HighColor();
+	if (f && f->fDropTargetHighlight) {
+		parent->SetHighColor(tint_color(HaifyDropMarkerColor(),
+			B_LIGHTEN_2_TINT));
+		BRect highlight = rect;
+		highlight.left -= 2.0f;
+		highlight.right = f->fDropTargetFillToRight
+			? parent->Bounds().right : highlight.right + 2.0f;
+		parent->FillRect(highlight);
+		parent->SetHighColor(originalColor);
+	}
 	if (!f || (!f->fIsPlaying && f->fEnabled)) {
 		BStringColumn::DrawField(field, rect, parent);
+		if (f)
+			DrawDropMarkerLine(parent, rect, f->fDropMarkerPosition);
 		return;
 	}
 
 	BFont originalFont;
-	rgb_color originalColor;
 	if (f->fIsPlaying) {
 		parent->GetFont(&originalFont);
 		BFont boldFont(be_bold_font);
@@ -77,6 +145,7 @@ BoldStringColumn::DrawField(BField* field, BRect rect, BView* parent)
 		parent->SetHighColor(originalColor);
 	if (f->fIsPlaying)
 		parent->SetFont(&originalFont);
+	DrawDropMarkerLine(parent, rect, f->fDropMarkerPosition);
 }
 
 class DiscoverRightClickFilter : public BMessageFilter {
@@ -151,16 +220,81 @@ private:
 };
 
 
+class DiscoverMouseMovedFilter : public BMessageFilter {
+public:
+	DiscoverMouseMovedFilter(DiscoverListView* owner)
+		: BMessageFilter(B_ANY_DELIVERY, B_ANY_SOURCE, B_MOUSE_MOVED),
+		  fOwner(owner)
+	{
+	}
+
+	filter_result Filter(BMessage* msg, BHandler** target) override
+	{
+		if (!fOwner || !msg || msg->what != B_MOUSE_MOVED)
+			return B_DISPATCH_MESSAGE;
+		BMessage drag;
+		if (!GetHaifyActiveDragMessage(drag) || drag.what != 'drag')
+			return B_DISPATCH_MESSAGE;
+
+		BView* view = dynamic_cast<BView*>(*target);
+		if (!IsListContentView(view))
+			return B_DISPATCH_MESSAGE;
+		if (!ViewBelongsToDiscoverList(view, fOwner))
+			return B_DISPATCH_MESSAGE;
+
+		int32 buttons = 0;
+		if (msg->FindInt32("buttons", &buttons) == B_OK
+				&& (buttons & B_PRIMARY_MOUSE_BUTTON) == 0) {
+			fOwner->ClearDropMarker();
+			ClearHaifyActiveDragMessage();
+			if (be_app)
+				be_app->PostMessage(MSG_HAIFY_DRAG_ENDED);
+			return B_DISPATCH_MESSAGE;
+		}
+
+		BPoint screenWhere;
+		if (FindMouseMovedScreenPoint(msg, view, screenWhere))
+			fOwner->UpdateDropMarkerFromDrag(screenWhere, &drag);
+		return B_DISPATCH_MESSAGE;
+	}
+
+private:
+	DiscoverListView* fOwner;
+};
+
+
 DiscoverRow::DiscoverRow(const std::vector<std::string>& vals,
                          const std::vector<std::string>& uris,
                          const std::vector<std::string>& titles,
                          bool writable, bool owned)
 	: BRow(), fUris(uris), fTitles(titles), fWritable(writable),
-	  fOwned(owned)
+	  fOwned(owned), fFieldCount((int32)vals.size())
 {
 	for (int32 i = 0; i < (int32)vals.size(); i++) {
 		SetField(new BoldStringField(vals[i].c_str(), writable), i);
 	}
+}
+
+
+bool
+DiscoverRow::SetDropFeedback(int32 markerPosition, bool targetHighlight)
+{
+	markerPosition = markerPosition < 0 ? -1 : markerPosition > 0 ? 1 : 0;
+	if (fDropMarkerPosition == markerPosition
+			&& fDropTargetHighlight == targetHighlight) {
+		return false;
+	}
+	fDropMarkerPosition = markerPosition;
+	fDropTargetHighlight = targetHighlight;
+	for (int32 i = 0; i < fFieldCount; i++) {
+		BoldStringField* field = dynamic_cast<BoldStringField*>(GetField(i));
+		if (field) {
+			field->fDropMarkerPosition = markerPosition;
+			field->fDropTargetHighlight = targetHighlight;
+			field->fDropTargetFillToRight = i == fFieldCount - 1;
+		}
+	}
+	return true;
 }
 
 
@@ -170,7 +304,11 @@ DiscoverListView::DiscoverListView(const char* name,
                                    bool showHorizontalScrollbar)
 	: BColumnListView(name, B_NAVIGABLE, B_NO_BORDER,
 		showHorizontalScrollbar),
-	  fLogicalTab(logicalTab)
+	  fLogicalTab(logicalTab),
+	  fDropMarker(this, [](BRow* row, int32 position, bool target) {
+		DiscoverRow* discoverRow = dynamic_cast<DiscoverRow*>(row);
+		return discoverRow && discoverRow->SetDropFeedback(position, target);
+	  })
 {
 	SetViewUIColor(B_LIST_BACKGROUND_COLOR);
 
@@ -182,6 +320,13 @@ DiscoverListView::DiscoverListView(const char* name,
 	}
 }
 
+
+DiscoverListView::~DiscoverListView()
+{
+	_StopDropMarkerCleanupRunner();
+}
+
+
 void
 DiscoverListView::AttachedToWindow()
 {
@@ -191,9 +336,11 @@ DiscoverListView::AttachedToWindow()
 	if (BView* outline = ScrollView()) {
 		outline->AddFilter(new DiscoverRightClickFilter(this));
 		outline->AddFilter(new DiscoverDropFilter(this));
+		outline->AddFilter(new DiscoverMouseMovedFilter(this));
 	} else {
 		AddFilter(new DiscoverRightClickFilter(this));
 		AddFilter(new DiscoverDropFilter(this));
+		AddFilter(new DiscoverMouseMovedFilter(this));
 	}
 	fFiltersInstalled = true;
 }
@@ -221,6 +368,49 @@ DiscoverListView::MouseDown(BPoint where)
 	ConvertToScreen(&screen);
 	_ShowContextMenuAt(screen);
 }
+
+
+void
+DiscoverListView::MouseMoved(BPoint point, uint32 transit,
+	const BMessage* dragMessage)
+{
+	if (transit == B_EXITED_VIEW) {
+		ClearDropMarker();
+		if (Window())
+			Window()->PostMessage(MSG_DISCOVER_DRAG_EXIT);
+	} else if (dragMessage && dragMessage->what == 'drag') {
+		BPoint mouse;
+		uint32 buttons = 0;
+		GetMouse(&mouse, &buttons, false);
+		if ((buttons & B_PRIMARY_MOUSE_BUTTON) == 0) {
+			ClearDropMarker();
+			ClearHaifyActiveDragMessage();
+			if (be_app)
+				be_app->PostMessage(MSG_HAIFY_DRAG_ENDED);
+			BColumnListView::MouseMoved(point, transit, dragMessage);
+			return;
+		}
+		BPoint screen = point;
+		ConvertToScreen(&screen);
+		BMessage hover(*dragMessage);
+		hover.what = MSG_DISCOVER_DRAG_HOVER;
+		hover.AddInt32("tab", fLogicalTab);
+		hover.AddPoint("screenPt", screen);
+		if (Window())
+			Window()->PostMessage(&hover);
+		return;
+	}
+	BColumnListView::MouseMoved(point, transit, dragMessage);
+}
+
+
+void
+DiscoverListView::Draw(BRect update)
+{
+	BColumnListView::Draw(update);
+	fDropMarker.Draw(this);
+}
+
 
 void
 DiscoverListView::_ShowContextMenuAt(BPoint screenWhere)
@@ -268,6 +458,10 @@ DiscoverListView::SelectionChanged()
 void
 DiscoverListView::MessageReceived(BMessage* message)
 {
+	if (message->what == kMsgDropMarkerCleanup) {
+		_ClearDropMarkerIfDragEnded();
+		return;
+	}
 	if (message->WasDropped() && message->what == 'drag') {
 		ForwardDroppedMessage(message);
 		return;
@@ -288,14 +482,13 @@ DiscoverListView::ForwardDroppedMessage(BMessage* message)
 	if (!message || message->what != 'drag')
 		return;
 
+	ClearDropMarker();
+	ClearHaifyActiveDragMessage();
+	DeselectAll();
 	BMessage drop(*message);
 	drop.what = 'dDrp';
 	drop.AddInt32("tab", fLogicalTab);
-	BPoint point = message->DropPoint();
-	if (BView* outline = ScrollView())
-		outline->ConvertFromScreen(&point);
-	else
-		ConvertFromScreen(&point);
+	BPoint point = RowPointFromScreen(this, message->DropPoint());
 	DiscoverRow* targetRow = dynamic_cast<DiscoverRow*>(RowAt(point));
 	if (targetRow && !targetRow->fUris.empty()
 			&& !targetRow->fUris[0].empty()) {
@@ -303,10 +496,62 @@ DiscoverListView::ForwardDroppedMessage(BMessage* message)
 		drop.AddBool("targetWritable", targetRow->fWritable);
 		if (!targetRow->fTitles.empty())
 			drop.AddString("targetTitle", targetRow->fTitles[0].c_str());
-		AddToSelection(targetRow);
 	}
 	if (Window())
 		Window()->PostMessage(&drop);
+}
+
+
+void
+DiscoverListView::UpdateDropMarker(BPoint screenWhere)
+{
+	BPoint point = RowPointFromScreen(this, screenWhere);
+	fDropMarker.UpdateInsertForPoint(point);
+	if (fDropMarker.IsActive())
+		_StartDropMarkerCleanupRunner();
+}
+
+
+void
+DiscoverListView::UpdateDropTarget(BPoint screenWhere)
+{
+	BPoint point = RowPointFromScreen(this, screenWhere);
+	if (CurrentSelection())
+		DeselectAll();
+	fDropMarker.UpdateTargetForPoint(point);
+	if (fDropMarker.IsActive())
+		_StartDropMarkerCleanupRunner();
+}
+
+
+void
+DiscoverListView::ClearDropMarker()
+{
+	if (fDropMarker.Clear())
+		_StopDropMarkerCleanupRunner();
+}
+
+
+void
+DiscoverListView::UpdateDropMarkerFromDrag(BPoint screenWhere,
+	const BMessage* dragMessage)
+{
+	if (!dragMessage || dragMessage->what != 'drag')
+		return;
+	BMessage hover(*dragMessage);
+	hover.what = MSG_DISCOVER_DRAG_HOVER;
+	hover.AddInt32("tab", fLogicalTab);
+	hover.AddPoint("screenPt", screenWhere);
+	if (Window())
+		Window()->PostMessage(&hover);
+}
+
+
+void
+DiscoverListView::SetDropFeedbackFlags(DropFeedbackFlags flags)
+{
+	if (fDropMarker.SetFlags(flags))
+		_StopDropMarkerCleanupRunner();
 }
 
 
@@ -336,7 +581,7 @@ DiscoverListView::InitiateDrag(BPoint point, bool)
 
 	std::string uri = row->fUris[column];
 	SpotifyItemKind kind = SpotifyItemKindForUri(uri);
-	if (kind == kSpotifyItemUnknown)
+	if (kind == kSpotifyItemUnknown || kind == kSpotifyItemPlaylist)
 		return false;
 	std::string itemType = SpotifyItemTypeName(kind);
 
@@ -355,6 +600,8 @@ DiscoverListView::InitiateDrag(BPoint point, bool)
 		drag.AddString("artist", row->fTitles[1].c_str());
 
 	BRect dragRect(point.x - 100, point.y - 10, point.x + 100, point.y + 10);
+	DeselectAll();
+	SetHaifyActiveDragMessage(drag);
 	DragMessage(&drag, dragRect, this);
 	return true;
 }
@@ -475,15 +722,57 @@ DiscoverListView::_PostRouteClick(DiscoverRow* row, const std::string& uri,
 	Window()->PostMessage(&msg);
 }
 
+
+void
+DiscoverListView::_StartDropMarkerCleanupRunner()
+{
+	if (fDropMarkerCleanupRunner || !Window())
+		return;
+	BMessage message(kMsgDropMarkerCleanup);
+	fDropMarkerCleanupRunner = new BMessageRunner(BMessenger(this),
+		&message, 100000LL);
+}
+
+
+void
+DiscoverListView::_StopDropMarkerCleanupRunner()
+{
+	delete fDropMarkerCleanupRunner;
+	fDropMarkerCleanupRunner = nullptr;
+}
+
+
+void
+DiscoverListView::_ClearDropMarkerIfDragEnded()
+{
+	BMessage drag;
+	BPoint where;
+	uint32 buttons = 0;
+	GetMouse(&where, &buttons, false);
+	if ((buttons & B_PRIMARY_MOUSE_BUTTON) != 0
+			&& GetHaifyActiveDragMessage(drag)) {
+		return;
+	}
+	ClearHaifyActiveDragMessage();
+	ClearDropMarker();
+	if (be_app)
+		be_app->PostMessage(MSG_HAIFY_DRAG_ENDED);
+}
+
+
 int32
 DiscoverListView::_ColumnAt(float x) const
 {
 	float left = 0;
 	for (int32 i = 0; i < CountColumns(); i++) {
 		BColumn* col = ColumnAt(i);
-		if (!col) break;
+		if (!col)
+			break;
+		if (!col->IsVisible())
+			continue;
 		left += col->Width();
-		if (x < left) return i;
+		if (x < left)
+			return col->LogicalFieldNum();
 	}
 	return CountColumns() - 1;
 }

@@ -65,6 +65,7 @@ private:
 	void					_OpenPlaylistWindow(BMessage* message);
 	void					_BroadcastPlaylistsChanged(BMessage* message);
 	void					_BroadcastLibraryChanged(BMessage* message);
+	void					_BroadcastDragEnded();
 	void					_ApplySpotifyCapabilitiesMessage(BMessage* message);
 	void					_ApplySpotifyAccount(BMessage* message);
 	void					_ShowArtistWindow(BMessage* message);

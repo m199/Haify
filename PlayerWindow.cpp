@@ -2235,14 +2235,19 @@ PlayerWindow::_InitLayout()
 void
 PlayerWindow::_ApplySizeLimits()
 {
-	float menuHeight = fMenuBar ? fMenuBar->MinSize().height : 0.0f;
-	float playerHeight = fPlayerBar ? fPlayerBar->MinSize().height : 48.0f;
+	BSize menuSize = fMenuBar ? fMenuBar->MinSize() : BSize(0.0f, 0.0f);
+	BSize playerSize = fPlayerBar ? fPlayerBar->MinSize()
+		: BSize(0.0f, 48.0f);
+	float menuHeight = menuSize.height;
+	float playerHeight = playerSize.height;
 	float minHeight = menuHeight + playerHeight;
-	SetSizeLimits(kMinPlayerWindowWidth, 100000.0f, minHeight, minHeight);
+	float minWidth = std::max(kMinPlayerWindowWidth,
+		std::max(menuSize.width, playerSize.width));
+	SetSizeLimits(minWidth, 100000.0f, minHeight, minHeight);
 
 	float width = Frame().Width();
-	if (width < kMinPlayerWindowWidth)
-		width = kMinPlayerWindowWidth;
+	if (width < minWidth)
+		width = minWidth;
 	if (Frame().Width() != width || Frame().Height() != minHeight)
 		ResizeTo(width, minHeight);
 }

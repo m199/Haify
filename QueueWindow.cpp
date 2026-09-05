@@ -1,6 +1,7 @@
 #include "QueueWindow.h"
 #include "TrackContextMenu.h"
 #include "App.h"
+#include "HaifyDragState.h"
 #include "Messages.h"
 #include "SettingsController.h"
 #include "DiscoverListView.h"
@@ -313,6 +314,8 @@ public:
 		if (duration)
 			drag.AddString("duration", duration->String());
 		BRect dragRect(point.x - 100, point.y - 10, point.x + 100, point.y + 10);
+		DeselectAll();
+		SetHaifyActiveDragMessage(drag);
 		DragMessage(&drag, dragRect, this);
 		return true;
 	}

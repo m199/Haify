@@ -384,10 +384,8 @@ AudiobookWindow::AudiobookWindow(const std::string& audiobookId)
 {
 	fArtwork = new ArtworkView("audiobookArtwork");
 	fArtwork->ShowLoading();
-	const float artworkSize = MediaHeaderStyle::kArtworkSize;
-	fArtwork->SetExplicitMinSize(BSize(artworkSize, artworkSize));
-	fArtwork->SetExplicitMaxSize(BSize(artworkSize, artworkSize));
-	fArtwork->SetExplicitPreferredSize(BSize(artworkSize, artworkSize));
+	const float artworkSize = MediaHeaderStyle::ArtworkSize();
+	MediaHeaderStyle::ApplyArtworkSize(fArtwork);
 	fArtwork->SetExplicitAlignment(BAlignment(B_ALIGN_LEFT,
 		B_ALIGN_TOP));
 
@@ -427,14 +425,14 @@ AudiobookWindow::AudiobookWindow(const std::string& audiobookId)
 	fResume = new BButton("resumeAudiobook", B_TRANSLATE("Play"),
 		new BMessage(kMsgResumeAudiobook));
 	fResume->SetExplicitMinSize(BSize(
-		MediaHeaderStyle::kActionButtonMinWidth, B_SIZE_UNSET));
+		MediaHeaderStyle::ActionButtonMinWidth(), B_SIZE_UNSET));
 	fResume->SetExplicitAlignment(BAlignment(B_ALIGN_LEFT,
 		B_ALIGN_VERTICAL_CENTER));
 	fResume->SetEnabled(false);
 	fSave = new BButton("saveAudiobook", B_TRANSLATE("Add to Audiobooks"),
 		new BMessage('aSav'));
 	fSave->SetExplicitMinSize(BSize(
-		MediaHeaderStyle::kActionButtonMinWidth, B_SIZE_UNSET));
+		MediaHeaderStyle::ActionButtonMinWidth(), B_SIZE_UNSET));
 	fSave->SetExplicitAlignment(BAlignment(B_ALIGN_LEFT,
 		B_ALIGN_VERTICAL_CENTER));
 	fSave->SetEnabled(false);

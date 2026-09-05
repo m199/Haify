@@ -3,6 +3,7 @@
 #include "PlayerWindow.h"
 #include "ArtworkWindow.h"
 #include "DiscoverWindow.h"
+#include "HaifyDragState.h"
 #include "DeskbarReplicantView.h"
 #include "PlaylistWindow.h"
 #include "ArtistWindow.h"
@@ -449,6 +450,19 @@ App::_BroadcastLibraryChanged(BMessage* message)
 					|| dynamic_cast<EpisodeWindow*>(window))) {
 			window->PostMessage(message);
 		}
+	}
+}
+
+
+void
+App::_BroadcastDragEnded()
+{
+	ClearHaifyActiveDragMessage();
+	BMessage ended(MSG_HAIFY_DRAG_ENDED);
+	for (int32 i = 0; i < CountWindows(); i++) {
+		BWindow* window = WindowAt(i);
+		if (window)
+			window->PostMessage(&ended);
 	}
 }
 
@@ -1210,6 +1224,9 @@ App::_HandleStateMessage(BMessage* message)
 			return true;
 		case MSG_SPOTIFY_CAPABILITIES_CHANGED:
 			_ApplySpotifyCapabilitiesMessage(message);
+			return true;
+		case MSG_HAIFY_DRAG_ENDED:
+			_BroadcastDragEnded();
 			return true;
 		case 'spAc':
 			_ApplySpotifyAccount(message);

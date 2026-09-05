@@ -3,6 +3,7 @@
 
 #include <Window.h>
 #include <OS.h>
+#include <Point.h>
 #include <map>
 #include <set>
 #include <string>
@@ -120,6 +121,7 @@ private:
 								const std::string& uri, int32 sourceTab);
 	void					_ShowPlayableContextMenu(BMessage* message);
 	void					_ApplyLibraryStateCached(BMessage* message);
+	void					_HandleDiscoverDragHover(BMessage* message);
 	void					_HandleDiscoverDrop(BMessage* message);
 	void					_ApplyPlaylistDropResult(BMessage* message);
 	void					_ApplyLibraryStatusResult(BMessage* message);
@@ -237,6 +239,17 @@ private:
 	bool					_HandlePlaylistDrop(const std::string& itemUri,
 								const std::string& targetUri, bool writable);
 	void					_HandleLibraryDrop(const std::string& uri);
+	int32					_DropTargetTabForUri(const std::string& uri) const;
+	int32					_VisualTabForLogical(int32 logicalTab) const;
+	bool					_IsPointerOverDropTargetTab(
+								int32 logicalTab) const;
+	void					_SetValidDropTargetTab(int32 logicalTab);
+	void					_ScheduleDropTabSwitch(int32 logicalTab);
+	void					_CancelDropTabSwitch();
+	bool					_SelectDropTargetTab(int32 logicalTab);
+	void					_UpdateDropMarkers(int32 logicalTab,
+								BPoint screenWhere);
+	void					_ClearDropMarkers();
 	void					_SelectLibraryTarget(const std::string& uri);
 	int32					_LogicalTab(int32 visualIdx) const;
 	void					_ShowPlaylistContextMenu(const std::string& playlistId,
@@ -259,6 +272,8 @@ private:
 	std::string				fPageCursor[kDiscoverTabCount];
 	BMessageRunner*			fLazyLoadRunner = nullptr;
 	BMessageRunner*			fCacheSaveRunner = nullptr;
+	BMessageRunner*			fDropTabSwitchRunner = nullptr;
+	int32					fPendingDropTab = -1;
 	int32					fCacheLoadGeneration[kDiscoverTabCount];
 	bool					fCacheLoadPending[kDiscoverTabCount];
 	std::string				fCacheAccountId;

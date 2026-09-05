@@ -3,6 +3,7 @@
 #include "App.h"
 #include "ArtworkView.h"
 #include "ClickableLabelView.h"
+#include "MediaHeaderStyle.h"
 #include "Messages.h"
 #include "NowPlayingFields.h"
 #include "spotify/SpotifyUri.h"
@@ -123,9 +124,7 @@ EpisodeWindow::EpisodeWindow(const std::string& episodeId)
 {
     fArtwork = new ArtworkView("episodeArtwork");
     fArtwork->ShowLoading();
-    fArtwork->SetExplicitMinSize(BSize(140, 140));
-    fArtwork->SetExplicitMaxSize(BSize(140, 140));
-    fArtwork->SetExplicitPreferredSize(BSize(140, 140));
+    MediaHeaderStyle::ApplyArtworkSize(fArtwork, 140.0f);
 
     fName = new BStringView("episodeName", B_TRANSLATE("Loading…"));
     BFont titleFont(be_bold_font);
