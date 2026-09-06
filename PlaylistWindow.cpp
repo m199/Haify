@@ -622,7 +622,7 @@ PlaylistWindow::PlaylistWindow(const char* playlistName, const char* uri, const 
 
 	_InitMenu();
 	_InitLayout(playlistName);
-	if (fUri != "spotify:collection" && !fCoverUrl.empty() && fCoverView)
+	if (!fCoverUrl.empty() && fCoverView)
 		((ArtworkView*)fCoverView)->LoadUrl(fCoverUrl);
 	_LoadData();
 	BMessage lazyMessage(kMsgCheckLazyLoad);
@@ -632,24 +632,54 @@ PlaylistWindow::PlaylistWindow(const char* playlistName, const char* uri, const 
 }
 
 
+void
+PlaylistWindow::SetCoverUrl(const std::string& coverUrl)
+{
+	if (coverUrl.empty())
+		return;
+	fCoverUrl = coverUrl;
+	if (fCoverView)
+		((ArtworkView*)fCoverView)->LoadUrl(fCoverUrl);
+}
+
+
 bool
 PlaylistWindow::_HandleTrackActionMessage(BMessage* message)
+{
+	return _HandleTrackPlaybackActionMessage(message)
+		|| _HandleTrackLibraryActionMessage(message)
+		|| _HandleTrackDragActionMessage(message);
+}
+
+
+bool
+PlaylistWindow::_HandleTrackPlaybackActionMessage(BMessage* message)
 {
 	switch (message->what) {
 		case 'tply':
 			_PlayTrackFromMessage(message);
-			return true;
-		case 'remL':
-			_RemoveTrackFromLibrary(message);
-			return true;
-		case 'iCmR':
-			_ShowPlayableContextMenu(message);
 			return true;
 		case MSG_PLAY_PAUSE:
 			be_app->PostMessage(message);
 			return true;
 		case MSG_TRACK_INVOKED:
 			_PlayCurrentTrack();
+			return true;
+		default:
+			return false;
+	}
+}
+
+
+bool
+PlaylistWindow::_HandleTrackLibraryActionMessage(BMessage* message)
+{
+	switch (message->what) {
+		case 'remL':
+			_RemoveTrackFromLibrary(message);
+			return true;
+		case 'iCmR':
+			_ShowPlayableContextMenu(message);
 			return true;
 		case 'likT':
 			_SavePlayableItemToLibrary(message);
@@ -675,6 +705,16 @@ PlaylistWindow::_HandleTrackActionMessage(BMessage* message)
 		case 'pRmM':
 			_ApplyPlaylistRemoveMarked(message);
 			return true;
+		default:
+			return false;
+	}
+}
+
+
+bool
+PlaylistWindow::_HandleTrackDragActionMessage(BMessage* message)
+{
+	switch (message->what) {
 		case 'drpT':
 			_HandleTrackDrop(message);
 			return true;
@@ -960,9 +1000,7 @@ PlaylistWindow::_ApplyCoverUpdate(BMessage* message)
 	const char* url;
 	if (message->FindString("url", &url) != B_OK)
 		return;
-	fCoverUrl = url;
-	if (fCoverView)
-		((ArtworkView*)fCoverView)->LoadUrl(fCoverUrl);
+	SetCoverUrl(url);
 }
 
 
@@ -2165,7 +2203,7 @@ PlaylistWindow::_InitLayout(const char* playlistName)
 	float artworkSize = MediaHeaderStyle::ArtworkSize();
 
 	ArtworkView* coverView = new ArtworkView("CoverView");
-	if (isLikedSongs)
+	if (isLikedSongs && fCoverUrl.empty())
 		coverView->AdoptBitmap(LoadLikedSongsArtwork(artworkSize));
 	else
 		coverView->ShowLoading();

@@ -104,6 +104,11 @@ private:
 	void				_StopDropMarkerCleanupRunner();
 	void				_ClearDropMarkerIfDragEnded();
 	int32				_ColumnAt(float x) const;
+	DiscoverRow*		_DragRowForPoint(BPoint point);
+	int32				_DragColumnForRow(DiscoverRow* row,
+							BPoint point) const;
+	bool				_BuildDragMessage(DiscoverRow* row, int32 column,
+							BMessage& drag) const;
 	std::vector<ColAction>	fActions;
 	int32				fLogicalTab;
 	DropMarkerController fDropMarker;

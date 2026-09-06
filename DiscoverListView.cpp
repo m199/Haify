@@ -566,17 +566,59 @@ DiscoverListView::ItemInvoked()
 bool
 DiscoverListView::InitiateDrag(BPoint point, bool)
 {
+	DiscoverRow* row = _DragRowForPoint(point);
+	if (!row)
+		return false;
+
+	int32 column = _DragColumnForRow(row, point);
+	if (column < 0)
+		return false;
+
+	BMessage drag('drag');
+	if (!_BuildDragMessage(row, column, drag))
+		return false;
+
+	BRect dragRect(point.x - 100, point.y - 10, point.x + 100, point.y + 10);
+	DeselectAll();
+	SetHaifyActiveDragMessage(drag);
+	DragMessage(&drag, dragRect, this);
+	return true;
+}
+
+
+DiscoverRow*
+DiscoverListView::_DragRowForPoint(BPoint point)
+{
 	DiscoverRow* row = dynamic_cast<DiscoverRow*>(CurrentSelection());
 	if (!row)
 		row = dynamic_cast<DiscoverRow*>(RowAt(point));
 	if (!row || row->fUris.empty())
-		return false;
+		return nullptr;
+	return row;
+}
 
+
+int32
+DiscoverListView::_DragColumnForRow(DiscoverRow* row, BPoint point) const
+{
+	if (!row)
+		return -1;
 	int32 column = _ColumnAt(point.x);
 	if (column < 0 || column >= (int32)row->fUris.size()
-			|| row->fUris[column].empty())
+			|| row->fUris[column].empty()) {
 		column = 0;
+	}
 	if (column >= (int32)row->fUris.size() || row->fUris[column].empty())
+		return -1;
+	return column;
+}
+
+
+bool
+DiscoverListView::_BuildDragMessage(DiscoverRow* row, int32 column,
+	BMessage& drag) const
+{
+	if (!row || column < 0 || column >= (int32)row->fUris.size())
 		return false;
 
 	std::string uri = row->fUris[column];
@@ -585,7 +627,6 @@ DiscoverListView::InitiateDrag(BPoint point, bool)
 		return false;
 	std::string itemType = SpotifyItemTypeName(kind);
 
-	BMessage drag('drag');
 	drag.AddString("uri", uri.c_str());
 	drag.AddString("itemType", itemType.c_str());
 	if (SpotifyItemCanAddToPlaylist(kind))
@@ -598,11 +639,6 @@ DiscoverListView::InitiateDrag(BPoint point, bool)
 		drag.AddString("title", "");
 	if (row->fTitles.size() > 1)
 		drag.AddString("artist", row->fTitles[1].c_str());
-
-	BRect dragRect(point.x - 100, point.y - 10, point.x + 100, point.y + 10);
-	DeselectAll();
-	SetHaifyActiveDragMessage(drag);
-	DragMessage(&drag, dragRect, this);
 	return true;
 }
 

@@ -1170,6 +1170,14 @@ DiscoverWindow::_HandlePlaybackOpenMessage(BMessage* message)
 bool
 DiscoverWindow::_HandleLibraryActionMessage(BMessage* message)
 {
+	return _HandleDiscoverDropActionMessage(message)
+		|| _HandleLibraryMutationMessage(message);
+}
+
+
+bool
+DiscoverWindow::_HandleDiscoverDropActionMessage(BMessage* message)
+{
 	switch (message->what) {
 		case MSG_DISCOVER_DRAG_HOVER:
 			_HandleDiscoverDragHover(message);
@@ -1203,6 +1211,16 @@ DiscoverWindow::_HandleLibraryActionMessage(BMessage* message)
 			_ApplyPlaylistDropResult(message);
 			return true;
 
+		default:
+			return false;
+	}
+}
+
+
+bool
+DiscoverWindow::_HandleLibraryMutationMessage(BMessage* message)
+{
+	switch (message->what) {
 		case 'dSts':
 			_ApplyLibraryStatusResult(message);
 			return true;
@@ -1758,6 +1776,11 @@ DiscoverWindow::_ForwardOpenRequest(BMessage* message)
 	BMessage forward('open');
 	forward.AddString("uri", uri);
 	forward.AddString("title", title ? title : "");
+	const char* coverUrl = message->GetString("coverUrl", "");
+	if (!coverUrl || !coverUrl[0])
+		coverUrl = message->GetString("cover_url", "");
+	if (coverUrl && coverUrl[0])
+		forward.AddString("coverUrl", coverUrl);
 	be_app->PostMessage(&forward);
 }
 

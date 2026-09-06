@@ -703,6 +703,9 @@ App::_OpenSpotifyUri(BMessage* message)
 		return;
 	std::string uriString = uri;
 	std::string titleString = title ? title : "";
+	std::string coverUrl = message->GetString("coverUrl", "");
+	if (coverUrl.empty())
+		coverUrl = message->GetString("cover_url", "");
 	SpotifyItemKind kind = SpotifyItemKindForUri(uriString);
 	if (kind == kSpotifyItemArtist)
 		_OpenArtistUri(SpotifyItemIdForUri(uriString));
@@ -717,7 +720,7 @@ App::_OpenSpotifyUri(BMessage* message)
 	} else if (_ShouldResolveShowAsAudiobook(message, kind)) {
 		_ResolveShowOrAudiobook(uriString, titleString);
 	} else if (_CanOpenPlaylistStyleUri(uriString, kind)) {
-		_OpenCollectionWindow(uriString, titleString);
+		_OpenCollectionWindow(uriString, titleString, coverUrl);
 	} else {
 		_ShowUnsupportedSpotifyItemAlert();
 	}
@@ -838,16 +841,20 @@ App::_ResolveShowOrAudiobook(const std::string& uri, const std::string& title)
 
 
 void
-App::_OpenCollectionWindow(const std::string& uri, const std::string& title)
+App::_OpenCollectionWindow(const std::string& uri, const std::string& title,
+	const std::string& coverUrl)
 {
 	PlaylistWindow* window = FindOpenWindow<PlaylistWindow>(this,
 		[&](PlaylistWindow* candidate) {
 			return candidate->GetUri() == uri;
 		});
-	if (window)
+	if (window) {
+		if (!coverUrl.empty())
+			window->SetCoverUrl(coverUrl);
 		window->Activate();
-	else {
-		window = new PlaylistWindow(title.c_str(), uri.c_str(), "");
+	} else {
+		window = new PlaylistWindow(title.c_str(), uri.c_str(),
+			coverUrl.c_str());
 		window->Show();
 	}
 	_SendCurrentTrackTo(window);
@@ -1323,7 +1330,7 @@ bool
 App::_HandleLibrespotMessage(BMessage* message)
 {
 	switch (message->what) {
-		case 'stLb':
+		case MSG_START_LIBRESPOT:
 		case 'lbSt':
 			_StartLibrespotFromMessage(message);
 			return true;

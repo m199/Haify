@@ -38,6 +38,7 @@ public:
 
 	const std::string&      GetUri() const { return fUri; }
 	void                    SetPlayingTrack(const char* trackUri);
+	void					SetCoverUrl(const std::string& coverUrl);
 	void					ShowContextMenu(BView* target, BPoint where, BPoint screenWhere);
 
 private:
@@ -106,6 +107,11 @@ private:
 	void					_ShowAlbumMenuFromMessage(BMessage* message);
 	void					_ShowPlaylistMenuFromMessage(BMessage* message);
 	void					_ApplyPlaylistDeleteFailed();
+	bool					_HandleTrackPlaybackActionMessage(
+								BMessage* message);
+	bool					_HandleTrackLibraryActionMessage(
+								BMessage* message);
+	bool					_HandleTrackDragActionMessage(BMessage* message);
 	bool					_CollectPendingTrackRemovals(
 								std::vector<std::pair<std::string, int>>&
 									items);

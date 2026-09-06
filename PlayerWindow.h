@@ -88,6 +88,7 @@ private:
 								const PlaybackMessageData& update);
 	void					_PublishPlaybackReplicantState(int32 progressMs);
 	bool					_HandlePlaybackMessage(BMessage* message);
+	bool					_HandlePlaybackDeviceMessage(BMessage* message);
 	bool					_HandleTransportMessage(BMessage* message);
 	bool					_HandleInterfaceMessage(BMessage* message);
 	bool					_ForwardAppMessage(BMessage* message);
@@ -95,6 +96,18 @@ private:
 	void					_ApplyPlaybackPollResult(BMessage* message);
 	void					_ApplyAudiobookContextResult(BMessage* message);
 	void					_PlayUri(BMessage* message);
+	bool					_EnsurePlaybackDeviceThen(BMessage* message);
+	void					_FetchPlaybackDevicesForPrompt();
+	void					_ApplyPlaybackDeviceChoices(BMessage* message);
+	void					_ShowPlaybackDevicePrompt(BMessage* message);
+	void					_ApplyPlaybackDeviceSelection(BMessage* message);
+	void					_StartLocalPlaybackDevice();
+	void					_RetryLocalPlaybackDevice();
+	void					_ExecutePendingPlaybackCommand(
+								const std::string& deviceId);
+	void					_ExecutePlaybackCommand(BMessage* message);
+	void					_PlayUriNow(BMessage* message);
+	void					_ResumePlayback(const std::string& deviceId);
 	void					_ApplyQueuePrediction(BMessage* message);
 	void					_ApplyVerifyPoll();
 	void					_TogglePlayPause();
@@ -159,11 +172,15 @@ private:
 	BMessageRunner*			fPollTimer     = nullptr;
 	BMessageRunner*			fPlaybackTimer = nullptr;
 	BMessageRunner*			fVerifyTimer   = nullptr;
+	BMessageRunner*			fLocalPlaybackDeviceTimer = nullptr;
 
 	bool					fIsPlaying     = false;
 	bool					fHasPredictedNext = false;
 	bool					fQueueRequestPending = false;
 	bool					fPlaybackRequestPending = false;
+	bool					fHasPendingPlaybackCommand = false;
+	bool					fPlaybackDevicePromptOpen = false;
+	int32					fLocalPlaybackDeviceAttempts = 0;
 	bool					fHasPlaybackState = false;
 	bigtime_t				fStartupEmptyPlaybackRetryUntilUs = 0;
 	int32					fPlaybackPollFailures = 0;
@@ -208,6 +225,7 @@ private:
 	bool					fHasPendingLibrespotTrack = false;
 	BMessage				fPendingLibrespotTrack;
 	BMessage				fPredictedNext;
+	BMessage				fPendingPlaybackCommand;
 };
 
 #endif

@@ -19,15 +19,19 @@ public:
 
     void            GetPlaybackState(JsonCallback callback);
     void            GetCurrentlyPlaying(JsonCallback callback);
-    void            Play(JsonCallback callback);
+    void            Play(JsonCallback callback,
+                              const std::string& deviceId = "");
     void            PlayTrack(const std::string& trackUri,
                               const std::string& contextUri,
                               JsonCallback callback,
-                              int positionMs = 0);
+                              int positionMs = 0,
+                              const std::string& deviceId = "");
     void            PlayUris(const std::vector<std::string>& uris,
-                              JsonCallback callback);
+                              JsonCallback callback,
+                              const std::string& deviceId = "");
     void            PlayContext(const std::string& contextUri,
-                                JsonCallback callback);
+                                JsonCallback callback,
+                                const std::string& deviceId = "");
     void            Pause(JsonCallback callback);
     void            Next(JsonCallback callback);
     void            Previous(JsonCallback callback);
@@ -38,7 +42,8 @@ public:
     void            GetDevices(JsonCallback callback);
     void            TransferPlayback(const std::string& deviceId,
                                      JsonCallback callback);
-    void            SetShuffle(bool on, JsonCallback callback);
+    void            SetShuffle(bool on, JsonCallback callback,
+                              const std::string& deviceId = "");
     void            SetRepeat(const std::string& mode, JsonCallback callback);
     void            GetQueue(JsonCallback callback);
     void            AddToQueue(const std::string& uri, JsonCallback callback);

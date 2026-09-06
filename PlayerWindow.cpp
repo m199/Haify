@@ -6,6 +6,8 @@
 #include "TrackContextMenu.h"
 #include "Messages.h"
 #include "NowPlayingItem.h"
+#include "PlaybackDevicePromptWindow.h"
+#include "PlaybackDeviceResolver.h"
 #include "App.h"
 #include "HaifyDebug.h"
 #include "Config.h"
@@ -26,7 +28,6 @@
 #include <OS.h>
 #include <Size.h>
 #include <algorithm>
-#include <cctype>
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
@@ -56,39 +57,10 @@ static const uint32 kMsgPlaybackTick = 'ptik';
 static const uint32 kMsgPlaybackPollResult = 'pbrs';
 static const uint32 kMsgAudiobookContextResult = 'abcr';
 static const uint32 kMsgApplyMuteToggle = 'amte';
+static const uint32 kMsgPlaybackDeviceChoices = 'pbDc';
+static const uint32 kMsgRetryLocalPlaybackDevice = 'pbDr';
+static const int32 kLocalPlaybackDeviceMaxAttempts = 10;
 
-
-static bool
-_IsLikelyHexIdentifier(const std::string& value)
-{
-	if (value.size() < 16)
-		return false;
-
-	for (unsigned char character : value) {
-		if (!std::isxdigit(character))
-			return false;
-	}
-	return true;
-}
-
-
-static std::string
-_SpotifyDeviceDisplayName(const std::string& id, const std::string& name,
-	const std::string& type)
-{
-	if (!name.empty() && name != id && !_IsLikelyHexIdentifier(name))
-		return name;
-
-	std::string display = type.empty() ? B_TRANSLATE("Device") : type;
-	std::string shortId = id.empty() ? name : id;
-	if (!shortId.empty()) {
-		const size_t idLength = std::min<size_t>(8, shortId.size());
-		display += " (";
-		display += shortId.substr(0, idLength);
-		display += ")";
-	}
-	return display;
-}
 
 static void
 _AddDeviceToMessage(BMessage& message, const std::string& id,
@@ -222,15 +194,58 @@ _PlaybackUriBatch(const std::string& firstUri,
 
 
 static void
-_StartPlayableUri(SpotifyApi* api, const std::string& uri,
+_PlayPlayableUri(SpotifyApi* api, const std::string& uri,
 	const std::string& contextUri, const std::vector<std::string>& queueUris,
-	bool audiobookQueue, int32 startPositionMs)
+	bool audiobookQueue, int32 startPositionMs, const std::string& deviceId,
+	JsonCallback callback)
 {
 	if (!audiobookQueue && !queueUris.empty()) {
-		api->Playback().PlayUris(_PlaybackUriBatch(uri, queueUris), nullptr);
+		api->Playback().PlayUris(_PlaybackUriBatch(uri, queueUris), callback,
+			deviceId);
 		return;
 	}
-	api->Playback().PlayTrack(uri, contextUri, nullptr, startPositionMs);
+	api->Playback().PlayTrack(uri, contextUri, callback, startPositionMs,
+		deviceId);
+}
+
+
+static bool
+_ShouldRestoreShuffleForStart(const std::string& uri,
+	const std::string& contextUri, bool audiobookQueue, bool shuffleOn)
+{
+	if (!shuffleOn || audiobookQueue)
+		return false;
+	return SpotifyItemKindForUri(uri) == kSpotifyItemTrack
+		&& SpotifyItemKindForUri(contextUri) == kSpotifyItemPlaylist;
+}
+
+
+static void
+_StartPlayableUri(SpotifyApi* api, const std::string& uri,
+	const std::string& contextUri, const std::vector<std::string>& queueUris,
+	bool audiobookQueue, int32 startPositionMs, const std::string& deviceId,
+	bool shuffleOn)
+{
+	if (!_ShouldRestoreShuffleForStart(uri, contextUri, audiobookQueue,
+			shuffleOn)) {
+		_PlayPlayableUri(api, uri, contextUri, queueUris, audiobookQueue,
+			startPositionMs, deviceId, nullptr);
+		return;
+	}
+
+	api->Playback().SetShuffle(false,
+		[api, uri, contextUri, queueUris, audiobookQueue, startPositionMs,
+				deviceId](bool ok, const nlohmann::json&) {
+			if (!ok) {
+				api->Playback().PlayUris({uri}, nullptr, deviceId);
+				return;
+			}
+			_PlayPlayableUri(api, uri, contextUri, queueUris, audiobookQueue,
+				startPositionMs, deviceId,
+				[api, deviceId](bool, const nlohmann::json&) {
+					api->Playback().SetShuffle(true, nullptr, deviceId);
+				});
+		}, deviceId);
 }
 
 
@@ -723,10 +738,16 @@ PlayerWindow::_StorePlaybackState(const PlaybackMessageData& update)
 	fShuffleOn = update.shuffleState;
 	if (!update.deviceId.empty())
 		fCurrentDeviceId = update.deviceId;
+	else if (update.knownItemState && !update.hasItem)
+		fCurrentDeviceId.clear();
 	if (!update.deviceName.empty())
 		fCurrentDeviceName = update.deviceName;
+	else if (update.knownItemState && !update.hasItem)
+		fCurrentDeviceName.clear();
 	if (!update.deviceType.empty())
 		fCurrentDeviceType = update.deviceType;
+	else if (update.knownItemState && !update.hasItem)
+		fCurrentDeviceType.clear();
 }
 
 
@@ -958,8 +979,29 @@ PlayerWindow::_PlayUri(BMessage* message)
 	if (!uri || !uri[0])
 		return;
 
+	if (!_EnsurePlaybackDeviceThen(message))
+		return;
+	_PlayUriNow(message);
+}
+
+
+void
+PlayerWindow::_PlayUriNow(BMessage* message)
+{
+	App* app = (App*)be_app;
+	SpotifyApi* api = app->GetApi();
+	if (!api)
+		return;
+
+	const char* uri = message->GetString("uri", "");
+	if (!uri || !uri[0])
+		uri = message->GetString("trackUri", "");
+	if (!uri || !uri[0])
+		return;
+
 	std::string uriStr = uri;
 	std::string contextUri = message->GetString("context_uri", "");
+	std::string deviceId = message->GetString("device_id", "");
 	std::vector<std::string> queueUris = _QueueUrisFromMessage(message);
 	bool audiobookQueue = _MessageTargetsAudiobookQueue(message);
 
@@ -979,14 +1021,181 @@ PlayerWindow::_PlayUri(BMessage* message)
 
 		int32 startPositionMs = message->GetInt32("start_position_ms", 0);
 		_StartPlayableUri(api, uriStr, contextUri, queueUris,
-			audiobookQueue, startPositionMs);
+			audiobookQueue, startPositionMs, deviceId, fShuffleOn);
 		_ScheduleVerifyPoll(kVerifyPollDelay);
 		return;
 	}
 
 	fAudiobookNextUris.clear();
-	api->Playback().PlayContext(uriStr, nullptr);
+	api->Playback().PlayContext(uriStr, nullptr, deviceId);
 	_ScheduleVerifyPoll(kVerifyPollDelay);
+}
+
+
+bool
+PlayerWindow::_EnsurePlaybackDeviceThen(BMessage* message)
+{
+	if (!message)
+		return false;
+	const char* explicitDevice = message->GetString("device_id", "");
+	if (explicitDevice && explicitDevice[0])
+		return true;
+	if (!fCurrentDeviceId.empty()) {
+		message->AddString("device_id", fCurrentDeviceId.c_str());
+		return true;
+	}
+
+	fPendingPlaybackCommand = *message;
+	fHasPendingPlaybackCommand = true;
+	_FetchPlaybackDevicesForPrompt();
+	return false;
+}
+
+
+void
+PlayerWindow::_FetchPlaybackDevicesForPrompt()
+{
+	App* app = (App*)be_app;
+	SpotifyApi* api = app->GetApi();
+	if (!api || fPlaybackDevicePromptOpen)
+		return;
+
+	BMessenger self(this);
+	api->Playback().GetDevices([self](bool ok, const nlohmann::json& data) {
+		BMessage result(kMsgPlaybackDeviceChoices);
+		result.AddBool("ok", ok);
+		if (ok)
+			AddPlaybackDeviceChoicesFromJson(result, data);
+		self.SendMessage(&result);
+	});
+}
+
+
+void
+PlayerWindow::_ApplyPlaybackDeviceChoices(BMessage* message)
+{
+	if (!fHasPendingPlaybackCommand)
+		return;
+
+	std::string deviceId;
+	if (FindActivePlaybackDeviceId(message, deviceId)) {
+		_ExecutePendingPlaybackCommand(deviceId);
+		return;
+	}
+
+	if (message->GetBool("local_retry", false)
+			&& fLocalPlaybackDeviceAttempts < kLocalPlaybackDeviceMaxAttempts) {
+		return;
+	}
+
+	_ShowPlaybackDevicePrompt(message);
+}
+
+
+void
+PlayerWindow::_ShowPlaybackDevicePrompt(BMessage* message)
+{
+	if (fPlaybackDevicePromptOpen)
+		return;
+
+	App* app = dynamic_cast<App*>(be_app);
+	ShowPlaybackDevicePrompt(BMessenger(this),
+		PlaybackDeviceChoicesFromMessage(message),
+		app && app->IsLibrespotRunning(), Frame());
+	fPlaybackDevicePromptOpen = true;
+}
+
+
+void
+PlayerWindow::_ApplyPlaybackDeviceSelection(BMessage* message)
+{
+	const char* deviceId = message->GetString("device_id", "");
+	if (!deviceId || !deviceId[0])
+		return;
+	_ExecutePendingPlaybackCommand(deviceId);
+}
+
+
+void
+PlayerWindow::_StartLocalPlaybackDevice()
+{
+	fPlaybackDevicePromptOpen = false;
+	App* app = dynamic_cast<App*>(be_app);
+	if (app && !app->IsLibrespotRunning())
+		be_app->PostMessage(MSG_START_LIBRESPOT);
+	fLocalPlaybackDeviceAttempts = 0;
+	_RetryLocalPlaybackDevice();
+}
+
+
+void
+PlayerWindow::_RetryLocalPlaybackDevice()
+{
+	delete fLocalPlaybackDeviceTimer;
+	fLocalPlaybackDeviceTimer = nullptr;
+	if (!fHasPendingPlaybackCommand)
+		return;
+
+	App* app = dynamic_cast<App*>(be_app);
+	SpotifyApi* api = app ? app->GetApi() : nullptr;
+	if (!api)
+		return;
+
+	HaifySettings settings = SettingsController::Load();
+	std::string deviceName = settings.librespotDeviceName.empty()
+		? LIBRESPOT_DEVICE_NAME : settings.librespotDeviceName;
+	BMessenger self(this);
+	api->Playback().GetDevices([self, deviceName](bool ok,
+			const nlohmann::json& data) {
+		BMessage result(kMsgPlaybackDeviceChoices);
+		result.AddBool("ok", ok);
+		result.AddBool("local_retry", true);
+		if (ok)
+			AddPlaybackDeviceChoicesFromJson(result, data, deviceName);
+		self.SendMessage(&result);
+	});
+
+	if (++fLocalPlaybackDeviceAttempts < kLocalPlaybackDeviceMaxAttempts) {
+		BMessage retry(kMsgRetryLocalPlaybackDevice);
+		fLocalPlaybackDeviceTimer = new BMessageRunner(BMessenger(this),
+			&retry, 1000000LL, 1);
+	}
+}
+
+
+void
+PlayerWindow::_ExecutePendingPlaybackCommand(const std::string& deviceId)
+{
+	if (!fHasPendingPlaybackCommand)
+		return;
+	BMessage command(fPendingPlaybackCommand);
+	fPendingPlaybackCommand.MakeEmpty();
+	fHasPendingPlaybackCommand = false;
+	fPlaybackDevicePromptOpen = false;
+	delete fLocalPlaybackDeviceTimer;
+	fLocalPlaybackDeviceTimer = nullptr;
+	command.RemoveName("device_id");
+	command.AddString("device_id", deviceId.c_str());
+	fCurrentDeviceId = deviceId;
+	_ExecutePlaybackCommand(&command);
+}
+
+
+void
+PlayerWindow::_ExecutePlaybackCommand(BMessage* message)
+{
+	if (!message)
+		return;
+	switch (message->what) {
+		case 'play':
+			_PlayUriNow(message);
+			return;
+		case MSG_PLAY_PAUSE:
+			_ResumePlayback(message->GetString("device_id", ""));
+			return;
+		default:
+			return;
+	}
 }
 
 
@@ -1435,14 +1644,33 @@ PlayerWindow::_TogglePlayPause()
 	if (!api)
 		return;
 	bool wasPlaying = fIsPlaying;
+	if (!wasPlaying) {
+		BMessage play(MSG_PLAY_PAUSE);
+		if (!_EnsurePlaybackDeviceThen(&play))
+			return;
+		_ResumePlayback(play.GetString("device_id", ""));
+		return;
+	}
 	if (fPlayerBar)
-		fPlayerBar->SetPlaying(!wasPlaying);
-	fIsPlaying = !wasPlaying;
+		fPlayerBar->SetPlaying(false);
+	fIsPlaying = false;
 	fLastPlaybackSyncUs = system_time();
-	if (wasPlaying)
-		api->Playback().Pause(nullptr);
-	else
-		api->Playback().Play(nullptr);
+	api->Playback().Pause(nullptr);
+}
+
+
+void
+PlayerWindow::_ResumePlayback(const std::string& deviceId)
+{
+	App* app = (App*)be_app;
+	SpotifyApi* api = app->GetApi();
+	if (!api)
+		return;
+	if (fPlayerBar)
+		fPlayerBar->SetPlaying(true);
+	fIsPlaying = true;
+	fLastPlaybackSyncUs = system_time();
+	api->Playback().Play(nullptr, deviceId);
 }
 
 
@@ -1491,7 +1719,7 @@ PlayerWindow::_PlayNextAudiobookChapter()
 	play.AddString(kNowPlayingAudiobookIdField, fCurrentAudiobookId.c_str());
 	_ApplyOptimisticPlay(&play);
 
-	api->Playback().PlayTrack(nextUri, "", nullptr);
+	api->Playback().PlayTrack(nextUri, "", nullptr, 0, "");
 	_ScheduleVerifyPoll(kVerifyPollDelay);
 	return true;
 }
@@ -1816,7 +2044,7 @@ PlayerWindow::_ApplyDeviceList(BMessage* message)
 
 		BMessage* deviceMessage = new BMessage('toDv');
 		deviceMessage->AddString("id", id);
-		std::string displayName = _SpotifyDeviceDisplayName(
+		std::string displayName = PlaybackDeviceDisplayName(
 			id ? id : "", name ? name : "", type ? type : "");
 		BMenuItem* item = new BMenuItem(displayName.c_str(), deviceMessage);
 		item->SetMarked(active);
@@ -1881,6 +2109,40 @@ PlayerWindow::_HandlePlaybackMessage(BMessage* message)
 
 		case kMsgVerifyPoll:
 			_ApplyVerifyPoll();
+			return true;
+
+		default:
+			return false;
+	}
+}
+
+
+bool
+PlayerWindow::_HandlePlaybackDeviceMessage(BMessage* message)
+{
+	switch (message->what) {
+		case kMsgPlaybackDeviceChoices:
+			_ApplyPlaybackDeviceChoices(message);
+			return true;
+
+		case kMsgPlaybackDeviceSelected:
+			_ApplyPlaybackDeviceSelection(message);
+			return true;
+
+		case kMsgPlaybackDeviceStartLocal:
+			_StartLocalPlaybackDevice();
+			return true;
+
+		case kMsgPlaybackDevicePromptClosed:
+			fPlaybackDevicePromptOpen = false;
+			if (message->GetBool("cancelled", false)) {
+				fPendingPlaybackCommand.MakeEmpty();
+				fHasPendingPlaybackCommand = false;
+			}
+			return true;
+
+		case kMsgRetryLocalPlaybackDevice:
+			_RetryLocalPlaybackDevice();
 			return true;
 
 		default:
@@ -2048,7 +2310,8 @@ PlayerWindow::_HandleAccountDeviceMessage(BMessage* message)
 void
 PlayerWindow::MessageReceived(BMessage* message)
 {
-	if (_HandlePlaybackMessage(message) || _HandleTransportMessage(message)
+	if (_HandlePlaybackMessage(message) || _HandlePlaybackDeviceMessage(message)
+			|| _HandleTransportMessage(message)
 			|| _HandleInterfaceMessage(message)
 			|| _ForwardAppMessage(message)
 			|| _HandleAccountDeviceMessage(message)) {
@@ -2257,6 +2520,7 @@ PlayerWindow::~PlayerWindow()
 	delete fPollTimer;
 	delete fPlaybackTimer;
 	delete fVerifyTimer;
+	delete fLocalPlaybackDeviceTimer;
 
 	BRect frame = Frame();
 	SettingsController::Update([&](HaifySettings& s) {

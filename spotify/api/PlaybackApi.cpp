@@ -5,6 +5,24 @@
 #include <nlohmann/json.hpp>
 #include <utility>
 
+static std::string
+_PlaybackPath(const std::string& deviceId)
+{
+    std::string path = "/me/player/play";
+    if (!deviceId.empty())
+        path += "?device_id=" + SpotifyUrlEncode(deviceId);
+    return path;
+}
+
+static std::string
+_DeviceQuery(const std::string& deviceId, const char* separator)
+{
+    if (deviceId.empty())
+        return "";
+    return std::string(separator) + "device_id=" + SpotifyUrlEncode(deviceId);
+}
+
+
 PlaybackApi::PlaybackApi(GetHandler get, BodyRequestHandler put,
     BodyRequestHandler post, CacheHandler eraseCache)
     : fGet(std::move(get)),
@@ -29,14 +47,15 @@ PlaybackApi::GetCurrentlyPlaying(JsonCallback callback)
 }
 
 void
-PlaybackApi::Play(JsonCallback callback)
+PlaybackApi::Play(JsonCallback callback, const std::string& deviceId)
 {
-    fPut("/me/player/play", "", callback);
+    fPut(_PlaybackPath(deviceId), "", callback);
 }
 
 void
 PlaybackApi::PlayTrack(const std::string& trackUri,
-    const std::string& contextUri, JsonCallback callback, int positionMs)
+    const std::string& contextUri, JsonCallback callback, int positionMs,
+    const std::string& deviceId)
 {
     bool supportsOffset = SpotifyPlaybackContextSupportsOffset(trackUri,
         contextUri);
@@ -51,12 +70,12 @@ PlaybackApi::PlayTrack(const std::string& trackUri,
     }
     if (positionMs > 0)
         request["position_ms"] = positionMs;
-    fPut("/me/player/play", request.dump(), callback);
+    fPut(_PlaybackPath(deviceId), request.dump(), callback);
 }
 
 void
 PlaybackApi::PlayUris(const std::vector<std::string>& uris,
-    JsonCallback callback)
+    JsonCallback callback, const std::string& deviceId)
 {
     nlohmann::json request;
     request["uris"] = nlohmann::json::array();
@@ -64,14 +83,15 @@ PlaybackApi::PlayUris(const std::vector<std::string>& uris,
         if (!uri.empty())
             request["uris"].push_back(uri);
     }
-    fPut("/me/player/play", request.dump(), callback);
+    fPut(_PlaybackPath(deviceId), request.dump(), callback);
 }
 
 void
-PlaybackApi::PlayContext(const std::string& contextUri, JsonCallback callback)
+PlaybackApi::PlayContext(const std::string& contextUri, JsonCallback callback,
+    const std::string& deviceId)
 {
     std::string body = nlohmann::json({{"context_uri", contextUri}}).dump();
-    fPut("/me/player/play", body, callback);
+    fPut(_PlaybackPath(deviceId), body, callback);
 }
 
 void
@@ -133,10 +153,11 @@ PlaybackApi::TransferPlayback(const std::string& deviceId,
 }
 
 void
-PlaybackApi::SetShuffle(bool on, JsonCallback callback)
+PlaybackApi::SetShuffle(bool on, JsonCallback callback,
+    const std::string& deviceId)
 {
-    fPut(std::string("/me/player/shuffle?state=") + (on ? "true" : "false"),
-        "", callback);
+    fPut(std::string("/me/player/shuffle?state=") + (on ? "true" : "false")
+        + _DeviceQuery(deviceId, "&"), "", callback);
 }
 
 void

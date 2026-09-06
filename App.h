@@ -89,7 +89,8 @@ private:
 	void					_ResolveShowOrAudiobook(const std::string& uri,
 								const std::string& title);
 	void					_OpenCollectionWindow(const std::string& uri,
-								const std::string& title);
+								const std::string& title,
+								const std::string& coverUrl = "");
 	void					_ShowUnsupportedSpotifyItemAlert();
 	void					_ShowAlbumWindow(BMessage* message);
 	void					_ApplyAuthComplete(BMessage* message);

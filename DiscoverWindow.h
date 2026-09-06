@@ -65,6 +65,10 @@ private:
 	bool					_HandleDataMessage(BMessage* message);
 	bool					_HandlePlaybackOpenMessage(BMessage* message);
 	bool					_HandleLibraryActionMessage(BMessage* message);
+	bool					_HandleDiscoverDropActionMessage(
+								BMessage* message);
+	bool					_HandleLibraryMutationMessage(
+								BMessage* message);
 	bool					_HandlePlaylistActionMessage(BMessage* message);
 	bool					_HandleAppForwardMessage(BMessage* message);
 	void					_SaveCacheNowFromMessage();

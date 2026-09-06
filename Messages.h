@@ -39,6 +39,7 @@ enum {
 
 	MSG_TOGGLE_SHUFFLE			= 'tshf',
 	MSG_TOGGLE_REPEAT			= 'trep',
+	MSG_START_LIBRESPOT			= 'stLb',
 	MSG_TOGGLE_LIBRESPOT_RUNNING = 'tlbr',
 	MSG_TOGGLE_LIBRESPOT_AUTOSTART = 'tlba',
 	MSG_TOGGLE_MUTE			= 'tmte',
