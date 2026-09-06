@@ -176,7 +176,8 @@ bool OAuthCallbackServer::Start() {
     addr.sin_port        = htons((uint16_t)fPort);
     addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
 
-    if (bind(fSocket, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
+    if (bind(fSocket, reinterpret_cast<struct sockaddr*>(&addr),
+            sizeof(addr)) < 0) {
         close(fSocket);
         fSocket = -1;
         return false;

@@ -143,8 +143,7 @@ private:
 								std::vector<std::string>& args);
 	void					_AddLibrespotPlaybackArgs(
 								std::vector<std::string>& args,
-								const HaifySettings& settings,
-								bool& hasEnableOAuthArgument);
+								const HaifySettings& settings);
 	void					_AddLibrespotAdditionalArgs(
 								std::vector<std::string>& args,
 								const std::string& additionalArgs,

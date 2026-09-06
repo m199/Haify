@@ -269,7 +269,7 @@ void ArtworkView::ArtworkStateChanged() {
 
 
 
-void ArtworkView::Draw(BRect updateRect) {
+void ArtworkView::Draw(BRect) {
   rgb_color panelBg = ui_color(B_PANEL_BACKGROUND_COLOR);
   SetHighColor(panelBg);
   FillRect(Bounds());

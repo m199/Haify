@@ -280,7 +280,7 @@ TrackListView::KeyDown(const char* bytes, int32 numBytes)
 		BRow* baseRow = CurrentSelection();
 		DEBUG_PRINT("TrackListView: DEL pressed. baseRow=%p\n", baseRow);
 		if (baseRow) {
-			TrackRow* row = (TrackRow*)baseRow;
+			TrackRow* row = static_cast<TrackRow*>(baseRow);
 			DEBUG_PRINT("TrackListView: deleting track %s\n",
 				row->fTrackUri.c_str());
 			if (!row->fTrackUri.empty()) {
@@ -296,7 +296,7 @@ TrackListView::KeyDown(const char* bytes, int32 numBytes)
 
 
 bool
-TrackListView::InitiateDrag(BPoint point, bool wasSelected)
+TrackListView::InitiateDrag(BPoint point, bool)
 {
 	BRow* baseRow = CurrentSelection();
 	if (!baseRow) {
@@ -305,7 +305,7 @@ TrackListView::InitiateDrag(BPoint point, bool wasSelected)
 	}
 
 	if (baseRow) {
-		TrackRow* row = (TrackRow*)baseRow;
+		TrackRow* row = static_cast<TrackRow*>(baseRow);
 		DEBUG_PRINT("InitiateDrag: Initiating drag for track %s\n",
 			row->fTrackUri.c_str());
 		if (!row->fTrackUri.empty()) {

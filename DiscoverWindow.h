@@ -294,9 +294,9 @@ private:
 							fLibraryStateGenerations;
 
 	struct PendingPlaylistRemoval {
-		DiscoverRow*	row;
-		int32			index;
-		bool			selected;
+		DiscoverRow*	row = nullptr;
+		int32			index = -1;
+		bool			selected = false;
 	};
 	std::map<std::string, PendingPlaylistRemoval>
 							fPendingPlaylistRemovals;

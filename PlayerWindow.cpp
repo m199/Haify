@@ -18,7 +18,9 @@
 #include <nlohmann/json.hpp>
 
 #include <AboutWindow.h>
+#include <AppFileInfo.h>
 #include <Application.h>
+#include <File.h>
 #include <LayoutBuilder.h>
 #include <MenuBar.h>
 #include <Menu.h>
@@ -26,7 +28,9 @@
 #include <MessageRunner.h>
 #include <Catalog.h>
 #include <OS.h>
+#include <Roster.h>
 #include <Size.h>
+#include <String.h>
 #include <algorithm>
 #include <cstdlib>
 #include <cstring>
@@ -70,6 +74,70 @@ _AddDeviceToMessage(BMessage& message, const std::string& id,
 	message.AddString("name", name.c_str());
 	message.AddString("type", type.c_str());
 	message.AddBool("active", active);
+}
+
+
+static BString
+_FallbackAppVersionString()
+{
+	BString version(B_TRANSLATE("Version"));
+	version << " " << HAIFY_APP_VERSION;
+	return version;
+}
+
+
+static const char*
+_VersionVarietySuffix(uint32 variety)
+{
+	switch (variety) {
+		case B_DEVELOPMENT_VERSION:
+			return B_TRANSLATE("development");
+		case B_ALPHA_VERSION:
+			return B_TRANSLATE("alpha");
+		case B_BETA_VERSION:
+			return B_TRANSLATE("beta");
+		case B_GAMMA_VERSION:
+			return B_TRANSLATE("gamma");
+		case B_GOLDEN_MASTER_VERSION:
+			return B_TRANSLATE("gold master");
+		default:
+			return nullptr;
+	}
+}
+
+
+static BString
+_CurrentAppVersionString()
+{
+	app_info info;
+	if (!be_app || be_app->GetAppInfo(&info) != B_OK)
+		return _FallbackAppVersionString();
+
+	BFile file(&info.ref, B_READ_ONLY);
+	if (file.InitCheck() != B_OK)
+		return _FallbackAppVersionString();
+
+	BAppFileInfo appFileInfo(&file);
+	if (appFileInfo.InitCheck() != B_OK)
+		return _FallbackAppVersionString();
+	appFileInfo.SetInfoLocation(B_USE_RESOURCES);
+
+	version_info versionInfo;
+	if (appFileInfo.GetVersionInfo(&versionInfo, B_APP_VERSION_KIND) != B_OK)
+		return _FallbackAppVersionString();
+	if (versionInfo.major == 0 && versionInfo.middle == 0
+			&& versionInfo.minor == 0) {
+		return _FallbackAppVersionString();
+	}
+
+	BString version(B_TRANSLATE("Version"));
+	version << " " << versionInfo.major << "." << versionInfo.middle;
+	if (versionInfo.minor > 0)
+		version << "." << versionInfo.minor;
+
+	if (const char* suffix = _VersionVarietySuffix(versionInfo.variety))
+		version << "-" << suffix;
+	return version;
 }
 
 
@@ -2001,10 +2069,9 @@ PlayerWindow::_PrepareAddTrackMenu(BMessage* message)
 void
 PlayerWindow::_ShowAddTrackMenuFromMessage(BMessage* message)
 {
-	const char* trackUri = message->GetString("trackUri", "");
+	std::string trackUri = message->GetString("trackUri", "");
 	BPoint screenWhere;
-	if (SpotifyItemKindForUri(trackUri ? trackUri : "")
-			!= kSpotifyItemTrack)
+	if (SpotifyItemKindForUri(trackUri) != kSpotifyItemTrack)
 		return;
 	if (message->FindPoint("screen_where", &screenWhere) != B_OK)
 		screenWhere = Frame().LeftTop();
@@ -2326,6 +2393,7 @@ void
 PlayerWindow::_ShowAboutWindow()
 {
 	BAboutWindow* about = new BAboutWindow(HAIFY_APP_NAME, HAIFY_MIME_SIG);
+	about->SetVersion(_CurrentAppVersionString().String());
 	about->AddCopyright(2026, "Daniel Weber");
 	about->AddDescription(
 		"A Spotify WebAPI client for Haiku.\n\n"

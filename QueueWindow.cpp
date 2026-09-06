@@ -167,7 +167,7 @@ public:
 		: BStringColumn(title, w, min, max, B_TRUNCATE_END) {}
 
 	void DrawField(BField* field, BRect rect, BView* parent) override {
-		QueueTitleField* f = (QueueTitleField*)field;
+		QueueTitleField* f = static_cast<QueueTitleField*>(field);
 		BFont font;
 		parent->GetFont(&font);
 		if (f->fIsPlaying) {
@@ -642,7 +642,8 @@ QueueWindow::_ApplyRecentRows(BMessage* message)
 		));
 	}
 	if (!fCurrentUri.empty())
-		((DiscoverListView*)fRecentList)->SetPlayingUri(fCurrentUri);
+		static_cast<DiscoverListView*>(fRecentList)->SetPlayingUri(
+			fCurrentUri);
 }
 
 
@@ -674,12 +675,13 @@ QueueWindow::SetPlayingTrack(const char* uri)
 	fCurrentUri = uri ? uri : "";
 	bool anyChanged = false;
 	for (int32 i = 0; i < fList->CountRows(); i++) {
-		QueueRow* row = (QueueRow*)fList->RowAt(i);
+		QueueRow* row = static_cast<QueueRow*>(fList->RowAt(i));
 		if (!row) continue;
 		bool playing = (row->fUri == fCurrentUri);
 		if (row->fIsPlaying != playing) {
 			row->fIsPlaying = playing;
-			QueueTitleField* f = (QueueTitleField*)row->GetField(0);
+			QueueTitleField* f = static_cast<QueueTitleField*>(
+				row->GetField(0));
 			if (f) f->fIsPlaying = playing;
 			fList->InvalidateRow(row);
 			anyChanged = true;
@@ -687,7 +689,8 @@ QueueWindow::SetPlayingTrack(const char* uri)
 	}
 
 	if (fRecentList)
-		((DiscoverListView*)fRecentList)->SetPlayingUri(fCurrentUri);
+		static_cast<DiscoverListView*>(fRecentList)->SetPlayingUri(
+			fCurrentUri);
 	if (anyChanged) {
 		UpdateIfNeeded();
 		Flush();

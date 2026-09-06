@@ -7,8 +7,8 @@
 class BTextView;
 
 struct MediaDescriptionLink {
-	int32_t start;
-	int32_t end;
+	int32_t start = 0;
+	int32_t end = 0;
 	std::string url;
 };
 

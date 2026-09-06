@@ -750,8 +750,11 @@ DiscoverWindow::QuitRequested()
 int32
 DiscoverWindow::_LogicalTab(int32 visual) const
 {
-	if (visual >= 0 && fTabView && visual < fTabView->CountTabs())
-		return fTabMap[visual];
+	if (visual >= 0 && fTabView && visual < fTabView->CountTabs()) {
+		int32 logical = fTabMap[visual];
+		if (logical >= 0 && logical < TAB_COUNT)
+			return logical;
+	}
 	return -1;
 }
 
@@ -1409,7 +1412,8 @@ DiscoverWindow::_SelectTab(BMessage* message)
 		return;
 	_LoadPersistentCache(logical);
 	if (fLists[logical])
-		((DiscoverListView*)fLists[logical])->SetPlayingUri(fCurrentTrackUri);
+		static_cast<DiscoverListView*>(fLists[logical])->SetPlayingUri(
+			fCurrentTrackUri);
 	bool expired = fLoaded[logical]
 		&& (fCacheBacked[logical]
 			|| (system_time() - fLoadTime[logical]) > kCacheExpiry);
@@ -1725,7 +1729,7 @@ DiscoverWindow::_FinishRowUpdate(BMessage*, const RowUpdateData& update)
 
 	int32 selectedTab = _LogicalTab(fTabView ? fTabView->Selection() : -1);
 	if (update.tab == selectedTab)
-		((DiscoverListView*)fLists[update.tab])->SetPlayingUri(
+		static_cast<DiscoverListView*>(fLists[update.tab])->SetPlayingUri(
 			fCurrentTrackUri);
 	if (update.tab == TAB_AUDIOBOOKS)
 		_RemoveAudiobookDuplicatesFromPodcasts();
@@ -1755,7 +1759,7 @@ DiscoverWindow::_ForwardPlayback(BMessage* message)
 			fCurrentTrackUri = uri;
 			int32 tab = _LogicalTab(fTabView ? fTabView->Selection() : -1);
 			if (tab >= 0 && fLists[tab])
-				((DiscoverListView*)fLists[tab])->SetPlayingUri(
+				static_cast<DiscoverListView*>(fLists[tab])->SetPlayingUri(
 					fCurrentTrackUri);
 		}
 	}
@@ -1798,7 +1802,7 @@ DiscoverWindow::_ApplyPlayingTrackUpdate(BMessage* message)
 	fCurrentTrackUri = uri;
 	int32 tab = _LogicalTab(fTabView ? fTabView->Selection() : -1);
 	if (tab >= 0 && fLists[tab])
-		((DiscoverListView*)fLists[tab])->SetPlayingUri(uri);
+		static_cast<DiscoverListView*>(fLists[tab])->SetPlayingUri(uri);
 }
 
 

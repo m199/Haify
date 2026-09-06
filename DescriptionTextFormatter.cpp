@@ -98,7 +98,7 @@ TagName(const std::string& tag, bool& closing)
 		lower = TrimAscii(lower.substr(1));
 	size_t space = lower.find(' ');
 	if (space != std::string::npos)
-		lower = lower.substr(0, space);
+		lower.resize(space);
 	if (!lower.empty() && lower.back() == '/')
 		lower.resize(lower.size() - 1);
 	return lower;

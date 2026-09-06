@@ -259,10 +259,10 @@ private:
 	bool					fAlbumSavePending = false;
 	bool					fPlaylistDeletePending = false;
 	struct PendingTrackRemoval {
-		BRow*	row;
-		int32	listIndex;
-		int32	playlistPosition;
-		bool	selected;
+		BRow*	row = nullptr;
+		int32	listIndex = -1;
+		int32	playlistPosition = -1;
+		bool	selected = false;
 	};
 	std::vector<PendingTrackRemoval> fPendingTrackRemovals;
 	bool					fTrackRemovalPending = false;

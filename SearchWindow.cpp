@@ -623,7 +623,8 @@ SearchWindow::_ApplyResults(BMessage* message)
 		index++;
 	}
 	if (!fCurrentTrackUri.empty())
-		((DiscoverListView*)fList)->SetPlayingUri(fCurrentTrackUri);
+		static_cast<DiscoverListView*>(fList)->SetPlayingUri(
+			fCurrentTrackUri);
 
 	char buf[64];
 	snprintf(buf, sizeof(buf), B_TRANSLATE("%d result(s)"), count);
@@ -637,7 +638,7 @@ SearchWindow::_ApplyPlayingTrack(BMessage* message)
 	const char* uri = nullptr;
 	if (message->FindString("trackUri", &uri) == B_OK && uri) {
 		fCurrentTrackUri = uri;
-		((DiscoverListView*)fList)->SetPlayingUri(uri);
+		static_cast<DiscoverListView*>(fList)->SetPlayingUri(uri);
 	}
 }
 

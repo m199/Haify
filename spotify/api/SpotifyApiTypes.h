@@ -12,5 +12,5 @@ using TokenRefreshHandler
 
 struct ApiCacheEntry {
     nlohmann::json data;
-    time_t timestamp;
+    time_t timestamp = 0;
 };

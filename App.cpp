@@ -1679,7 +1679,7 @@ App::_StartLibrespot(LibrespotTransferMode mode, bool registerOAuth)
 		args.push_back("--enable-oauth");
 
 	_AddLibrespotEventArgs(args);
-	_AddLibrespotPlaybackArgs(args, s, hasEnableOAuthArgument);
+	_AddLibrespotPlaybackArgs(args, s);
 	_AddLibrespotAdditionalArgs(args, s.librespotAdditionalArgs,
 		hasEnableOAuthArgument);
 	_SpawnLibrespot(args);
@@ -1735,7 +1735,7 @@ App::_AddLibrespotEventArgs(std::vector<std::string>& args)
 
 void
 App::_AddLibrespotPlaybackArgs(std::vector<std::string>& args,
-	const HaifySettings& settings, bool& hasEnableOAuthArgument)
+	const HaifySettings& settings)
 {
 	args.push_back("--backend");
 	args.push_back(settings.librespotBackend.empty()

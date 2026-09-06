@@ -608,7 +608,11 @@ AudiobookWindow::_ApplyTitleText()
 	const float maxHeight = 34.0f;
 
 	BFont titleFont(be_bold_font);
-	for (float size = maxSize; size >= minSize; size -= 1.0f) {
+	const int32 titleSizeSteps = static_cast<int32>(maxSize - minSize);
+	for (int32 step = 0; step <= titleSizeSteps; step++) {
+		float size = maxSize - step;
+		if (size < minSize)
+			size = minSize;
 		titleFont.SetSize(size);
 		int32 lines = WrappedTitleLineCount(titleFont, fAudiobookName,
 			titleWidth);

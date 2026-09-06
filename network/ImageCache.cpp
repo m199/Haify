@@ -29,8 +29,8 @@ static const int32 kMaxDownloadAttempts = 3;
 
 struct CacheFileInfo {
     std::string path;
-    off_t size;
-    time_t modified;
+    off_t size = 0;
+    time_t modified = 0;
 };
 
 static std::string GetCacheDirectoryPath(bool create) {

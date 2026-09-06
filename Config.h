@@ -2,7 +2,7 @@
 
 #define HAIFY_APP_NAME      "Haify"
 #define HAIFY_MIME_SIG      "application/x-vnd.Haify"
-#define HAIFY_APP_VERSION   "1.0.0"
+#define HAIFY_APP_VERSION   "1.3.1"
 #define HAIFY_SETTINGS_FILE "Haify_settings"
 
 #define HAIFY_CLIENT_ID     "006877f3073c4796a6e7dedc31aadd46"

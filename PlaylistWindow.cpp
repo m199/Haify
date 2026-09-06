@@ -584,26 +584,6 @@ PlaylistWindowTitlePrefix(const std::string& uri)
 }
 
 
-static const char*
-PlaylistWindowContentType(const std::string& uri)
-{
-	if (uri == "spotify:collection")
-		return B_TRANSLATE("Liked Songs");
-	return SpotifyItemKindForUri(uri) == kSpotifyItemAlbum
-		? "Album" : SpotifyItemKindForUri(uri) == kSpotifyItemShow
-		? "Podcast" : "Playlist";
-}
-
-
-static const char*
-PlaylistWindowCountLabel(const std::string& uri)
-{
-	return SpotifyItemKindForUri(uri) == kSpotifyItemShow
-		? "Episodes" : "Songs";
-}
-
-
-
 PlaylistWindow::PlaylistWindow(const char* playlistName, const char* uri, const char* coverUrl)
 	: BWindow(BRect(200, 200,
 		200 + kDefaultPlaylistWindowWidth,
@@ -623,7 +603,7 @@ PlaylistWindow::PlaylistWindow(const char* playlistName, const char* uri, const 
 	_InitMenu();
 	_InitLayout(playlistName);
 	if (!fCoverUrl.empty() && fCoverView)
-		((ArtworkView*)fCoverView)->LoadUrl(fCoverUrl);
+		static_cast<ArtworkView*>(fCoverView)->LoadUrl(fCoverUrl);
 	_LoadData();
 	BMessage lazyMessage(kMsgCheckLazyLoad);
 	fLazyLoadRunner = new BMessageRunner(BMessenger(this), &lazyMessage,
@@ -639,7 +619,7 @@ PlaylistWindow::SetCoverUrl(const std::string& coverUrl)
 		return;
 	fCoverUrl = coverUrl;
 	if (fCoverView)
-		((ArtworkView*)fCoverView)->LoadUrl(fCoverUrl);
+		static_cast<ArtworkView*>(fCoverView)->LoadUrl(fCoverUrl);
 }
 
 
@@ -1514,7 +1494,8 @@ PlaylistWindow::_ApplyPlaylistMetadata(BMessage* message)
 	}
 
 	PlaylistMetadataPageState pageState = ResolvePlaylistMetadataPageState(
-		total, fPageTotal, fTrackList->CountRows(), fPageOffset);
+		total, fPageTotal, fTrackList ? fTrackList->CountRows() : 0,
+		fPageOffset);
 	fPageTotal = pageState.total;
 	fPageHasMore = pageState.hasMore;
 	if (fTrackList && fTrackList->CountRows() > 0)
@@ -2582,7 +2563,7 @@ PlaylistWindow::_ReloadArtwork()
 {
 	if (fCoverUrl.empty() || !fCoverView)
 		return;
-	((ArtworkView*)fCoverView)->ReloadUrl();
+	static_cast<ArtworkView*>(fCoverView)->ReloadUrl();
 }
 
 void
