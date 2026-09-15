@@ -1,8 +1,14 @@
 #include "DiscoverWindow.h"
 #include "DiscoverListView.h"
+#include "discover/DiscoverRowFactory.h"
+#include "discover/DiscoverCacheRepository.h"
+#include "discover/DiscoverMessages.h"
+#include "discover/DiscoverLibraryRequests.h"
+#include "discover/DiscoverPlaylistRequests.h"
 #include "HaifyDragState.h"
 #include "TextInputDialog.h"
 #include "Messages.h"
+#include "MessageContracts.h"
 #include "SettingsController.h"
 #include "App.h"
 #include "spotify/SpotifyUri.h"
@@ -14,11 +20,8 @@
 
 #include <Alert.h>
 #include <Application.h>
-#include <Autolock.h>
-#include <File.h>
 #include <InterfaceDefs.h>
 #include <LayoutBuilder.h>
-#include <Locker.h>
 #include <MenuBar.h>
 #include <Menu.h>
 #include <MenuItem.h>
@@ -29,57 +32,28 @@
 #include <TabView.h>
 #include <Catalog.h>
 #include <algorithm>
-#include <cctype>
 #include <cmath>
 #include <cstring>
 #include <cstdio>
-#include <memory>
 #include <set>
-#include <thread>
 #include <time.h>
 #include <utility>
-#include <unistd.h>
 
 #undef B_TRANSLATION_CONTEXT
 #define B_TRANSLATION_CONTEXT "DiscoverWindow"
 
-enum {
-	TAB_PLAYLISTS = 0,
-	TAB_TOP_TRACKS,
-	TAB_TOP_ARTISTS,
-	TAB_NEW_RELEASES,
-	TAB_SAVED_ALBUMS,
-	TAB_PODCASTS,
-	TAB_FOLLOWED_ARTISTS,
-	TAB_SAVED_EPISODES,
-	TAB_AUDIOBOOKS,
-	TAB_COUNT
-};
-
-static_assert(TAB_COUNT == kDiscoverTabCount, "Tab count mismatch");
-static const uint32 kMsgCheckLazyLoad = 'dLzy';
-static const uint32 kMsgPageDone = 'dPgD';
-static const uint32 kMsgCacheLoaded = 'dCch';
-static const uint32 kMsgSaveCache = 'dCsv';
-static const uint32 kMsgLibraryStateCached = 'dLSt';
-static const uint32 kMsgAudiobookIdsUpdated = 'dAId';
-static const uint32 kMsgDropTabSwitch = 'dTsW';
 static const bigtime_t kDropTabSwitchDelay = 350000LL;
-static const int32 kDiscoverCacheVersion = 5;
-static const int32 kMaxDiscoverCachedRowsPerTab = 500;
-static const int32 kDiscoverCacheBatchRows = 50;
 
-struct TabDef { const char* id; const char* label; };
-static const TabDef kTabDefs[TAB_COUNT] = {
-	{ "playlists",        B_TRANSLATE_MARK("Playlists")        },
-	{ "top_tracks",       B_TRANSLATE_MARK("Top Tracks")       },
-	{ "top_artists",      B_TRANSLATE_MARK("Top Artists")      },
-	{ "new_releases",     B_TRANSLATE_MARK("New Releases")     },
-	{ "saved_albums",     B_TRANSLATE_MARK("Saved Albums")     },
-	{ "podcasts",         B_TRANSLATE_MARK("Podcasts")         },
-	{ "followed_artists", B_TRANSLATE_MARK("Followed Artists") },
-	{ "saved_episodes",   B_TRANSLATE_MARK("Saved Episodes")   },
-	{ "audiobooks",       B_TRANSLATE_MARK("Audiobooks")       },
+static const char* const kTabLabels[TAB_COUNT] = {
+	B_TRANSLATE_MARK("Playlists"),
+	B_TRANSLATE_MARK("Top Tracks"),
+	B_TRANSLATE_MARK("Top Artists"),
+	B_TRANSLATE_MARK("New Releases"),
+	B_TRANSLATE_MARK("Saved Albums"),
+	B_TRANSLATE_MARK("Podcasts"),
+	B_TRANSLATE_MARK("Followed Artists"),
+	B_TRANSLATE_MARK("Saved Episodes"),
+	B_TRANSLATE_MARK("Audiobooks"),
 };
 
 static const std::vector<ColDef> kTabCols[TAB_COUNT] = {
@@ -107,37 +81,6 @@ static const std::vector<ColDef> kTabCols[TAB_COUNT] = {
 };
 
 static bool
-PrimaryUriMatchesTab(int32 tab, const std::string& uri)
-{
-	SpotifyItemKind kind = SpotifyItemKindForUri(uri);
-	if (tab == TAB_PLAYLISTS && uri == "spotify:collection")
-		return true;
-	if (SpotifyItemIdForUri(uri).empty())
-		return false;
-	if (tab == TAB_TOP_TRACKS) return kind == kSpotifyItemTrack;
-	if (tab == TAB_TOP_ARTISTS || tab == TAB_FOLLOWED_ARTISTS)
-		return kind == kSpotifyItemArtist;
-	if (tab == TAB_NEW_RELEASES || tab == TAB_SAVED_ALBUMS)
-		return kind == kSpotifyItemAlbum;
-	if (tab == TAB_PODCASTS) return kind == kSpotifyItemShow;
-	if (tab == TAB_SAVED_EPISODES) return kind == kSpotifyItemEpisode;
-	if (tab == TAB_AUDIOBOOKS) return kind == kSpotifyItemAudiobook;
-	return tab == TAB_PLAYLISTS && kind == kSpotifyItemPlaylist;
-}
-
-static std::string
-DraggedSpotifyUri(BMessage* message)
-{
-	const char* uri = message ? message->GetString("uri", "") : "";
-	if (!uri || !uri[0])
-		uri = message ? message->GetString("trackUri", "") : "";
-	if (!uri || !uri[0])
-		uri = message ? message->GetString("albumUri", "") : "";
-	return uri ? uri : "";
-}
-
-
-static bool
 HaifyDragButtonStillDown(BView* view, BPoint* currentWhere = nullptr)
 {
 	BMessage drag;
@@ -152,239 +95,6 @@ HaifyDragButtonStillDown(BView* view, BPoint* currentWhere = nullptr)
 	return (buttons & B_PRIMARY_MOUSE_BUTTON) != 0;
 }
 
-struct RowData {
-	std::vector<std::string> vals;
-	std::vector<std::string> uris;
-	std::vector<std::string> ttls;
-	bool writable = true;
-	bool owned = false;
-};
-
-static BLocker sDiscoverCacheWriterLock("Haify discover cache writer");
-static std::map<std::string, uint64> sDiscoverCacheWriteGenerations;
-static uint64 sNextDiscoverCacheWriteGeneration = 0;
-
-static std::string
-SafeCacheName(const std::string& accountId)
-{
-	std::string name;
-	for (unsigned char character : accountId) {
-		if (isalnum(character) || character == '-' || character == '_')
-			name += (char)character;
-		else
-			name += '_';
-		if (name.size() >= 96)
-			break;
-	}
-	return name;
-}
-
-static std::string
-DiscoverCachePath(const std::string& accountId, bool createDirectory)
-{
-	std::string name = SafeCacheName(accountId);
-	if (name.empty())
-		return "";
-	return SettingsController::CacheFilePath("discover",
-		name + ".json", createDirectory);
-}
-
-static uint64
-BeginDiscoverCacheWrite(const std::string& path)
-{
-	BAutolock lock(&sDiscoverCacheWriterLock);
-	uint64 generation = ++sNextDiscoverCacheWriteGeneration;
-	sDiscoverCacheWriteGenerations[path] = generation;
-	return generation;
-}
-
-static bool
-ReadDiscoverCacheFile(const std::string& path, nlohmann::json& existing)
-{
-	BFile file(path.c_str(), B_READ_ONLY);
-	if (file.InitCheck() != B_OK)
-		return false;
-	off_t size = 0;
-	if (file.GetSize(&size) != B_OK || size <= 0
-			|| size > 50LL * 1024LL * 1024LL) {
-		return false;
-	}
-	std::string content((size_t)size, '\0');
-	if (file.Read(&content[0], (size_t)size) != size)
-		return false;
-	try {
-		existing = nlohmann::json::parse(content);
-		return true;
-	} catch (...) {
-		return false;
-	}
-}
-
-static bool
-IsCompatibleDiscoverCache(const nlohmann::json& existing,
-	const nlohmann::json& data)
-{
-	return existing.value("version", 0) == kDiscoverCacheVersion
-		&& existing.value("account_id", "") == data.value("account_id", "")
-		&& existing.contains("tabs") && existing["tabs"].is_object();
-}
-
-static void
-MergeDiscoverCacheTabs(nlohmann::json& data, const nlohmann::json& existing)
-{
-	for (auto tab = existing["tabs"].begin(); tab != existing["tabs"].end();
-			++tab) {
-		if (!data["tabs"].contains(tab.key()))
-			data["tabs"][tab.key()] = tab.value();
-	}
-	if (!data.contains("audiobook_ids") && existing.contains("audiobook_ids")
-			&& existing["audiobook_ids"].is_array()) {
-		data["audiobook_ids"] = existing["audiobook_ids"];
-	}
-}
-
-static void
-MergeExistingDiscoverCache(const std::string& path, nlohmann::json& data)
-{
-	nlohmann::json existing;
-	if (ReadDiscoverCacheFile(path, existing)
-			&& IsCompatibleDiscoverCache(existing, data)) {
-		MergeDiscoverCacheTabs(data, existing);
-	}
-}
-
-static bool
-WriteDiscoverCacheFile(const std::string& path, uint64 generation,
-	const nlohmann::json& data)
-{
-	std::string serialized = data.dump();
-	std::string temporary = path + ".part-" + std::to_string(generation);
-	BFile file(temporary.c_str(), B_WRITE_ONLY | B_CREATE_FILE | B_ERASE_FILE);
-	bool written = file.InitCheck() == B_OK
-		&& file.Write(serialized.data(), serialized.size())
-			== (ssize_t)serialized.size();
-	file.Unset();
-	return written;
-}
-
-static bool
-TakeCurrentDiscoverCacheWrite(const std::string& path, uint64 generation)
-{
-	BAutolock lock(&sDiscoverCacheWriterLock);
-	auto latest = sDiscoverCacheWriteGenerations.find(path);
-	bool current = latest != sDiscoverCacheWriteGenerations.end()
-		&& latest->second == generation;
-	if (current)
-		sDiscoverCacheWriteGenerations.erase(latest);
-	return current;
-}
-
-static void
-CommitDiscoverCacheWrite(const std::string& path, uint64 generation,
-	bool written)
-{
-	std::string temporary = path + ".part-" + std::to_string(generation);
-	bool current = TakeCurrentDiscoverCacheWrite(path, generation);
-	if (written && current) {
-		unlink(path.c_str());
-		rename(temporary.c_str(), path.c_str());
-		return;
-	}
-	unlink(temporary.c_str());
-}
-
-static void
-WriteDiscoverCacheAsync(const std::string& path, nlohmann::json data)
-{
-	if (path.empty())
-		return;
-	uint64 generation = BeginDiscoverCacheWrite(path);
-	std::thread([path, generation, data = std::move(data)]() mutable {
-		MergeExistingDiscoverCache(path, data);
-		bool written = WriteDiscoverCacheFile(path, generation, data);
-		CommitDiscoverCacheWrite(path, generation, written);
-	}).detach();
-}
-
-static void
-AddAudiobookIdsToDiscoverCache(nlohmann::json& cache,
-	const std::set<std::string>& audiobookIds)
-{
-	cache["audiobook_ids"] = nlohmann::json::array();
-	for (const std::string& id : audiobookIds)
-		cache["audiobook_ids"].push_back(id);
-}
-
-static bool
-BuildCachedDiscoverRow(int32 tab, DiscoverRow* row, nlohmann::json& rowJson)
-{
-	if (!row || row->fUris.empty()
-			|| !PrimaryUriMatchesTab(tab, row->fUris[0]))
-		return false;
-	size_t columns = kTabCols[tab].size();
-	if (row->fUris.size() < columns)
-		return false;
-
-	nlohmann::json values = nlohmann::json::array();
-	nlohmann::json uris = nlohmann::json::array();
-	nlohmann::json titles = nlohmann::json::array();
-	for (size_t column = 0; column < columns; column++) {
-		BStringField* field = dynamic_cast<BStringField*>(
-			row->GetField((int32)column));
-		values.push_back(field ? field->String() : "");
-		uris.push_back(row->fUris[column]);
-		titles.push_back(column < row->fTitles.size()
-			? row->fTitles[column] : "");
-	}
-	rowJson = {{"values", std::move(values)}, {"uris", std::move(uris)},
-		{"titles", std::move(titles)}, {"writable", row->fWritable},
-		{"owned", row->fOwned}};
-	return true;
-}
-
-static nlohmann::json
-BuildCachedDiscoverRows(int32 tab, BColumnListView* list)
-{
-	nlohmann::json rows = nlohmann::json::array();
-	for (int32 index = 0; index < list->CountRows()
-			&& (int32)rows.size() < kMaxDiscoverCachedRowsPerTab; index++) {
-		DiscoverRow* row = dynamic_cast<DiscoverRow*>(list->RowAt(index));
-		nlohmann::json rowJson;
-		if (BuildCachedDiscoverRow(tab, row, rowJson))
-			rows.push_back(std::move(rowJson));
-	}
-	return rows;
-}
-
-static void
-AddDiscoverTabCache(nlohmann::json& tabs, int32 tab, BColumnListView* list,
-	bool freshSnapshot, bool cacheBacked)
-{
-	if (!list || (!freshSnapshot && !cacheBacked))
-		return;
-	tabs[kTabDefs[tab].id] = BuildCachedDiscoverRows(tab, list);
-}
-
-static nlohmann::json
-BuildDiscoverCachePayload(const std::string& accountId,
-	const std::set<std::string>& audiobookIds, bool audiobookIdsKnown,
-	BColumnListView* const lists[], const bool cacheBacked[],
-	const bool freshSnapshot[])
-{
-	nlohmann::json cache = {
-		{"version", kDiscoverCacheVersion},
-		{"account_id", accountId},
-		{"saved_at", (int64)time(nullptr)},
-		{"tabs", nlohmann::json::object()}
-	};
-	if (audiobookIdsKnown)
-		AddAudiobookIdsToDiscoverCache(cache, audiobookIds);
-	for (int32 tab = 0; tab < TAB_COUNT; tab++) {
-		AddDiscoverTabCache(cache["tabs"], tab, lists[tab],
-			freshSnapshot[tab], cacheBacked[tab]);
-	}
-	return cache;
-}
 
 static std::string
 PlaylistUri(const std::string& id)
@@ -393,34 +103,6 @@ PlaylistUri(const std::string& id)
 		? id : SpotifyUriForItemKind(kSpotifyItemPlaylist, id);
 }
 
-
-static void
-PostPlaylistChange(const char* operation, const std::string& id,
-	const std::string& name = "", const std::string& owner = "",
-	bool writable = true, bool owned = false)
-{
-	BMessage changed(MSG_PLAYLISTS_CHANGED);
-	changed.AddString("operation", operation);
-	changed.AddString("id", id.c_str());
-	changed.AddString("uri", PlaylistUri(id).c_str());
-	if (!name.empty())
-		changed.AddString("name", name.c_str());
-	if (!owner.empty())
-		changed.AddString("owner", owner.c_str());
-	changed.AddBool("writable", writable);
-	changed.AddBool("owned", owned);
-	be_app->PostMessage(&changed);
-}
-
-
-static void
-PostLibraryChange(const char* operation, const std::string& uri)
-{
-	BMessage changed(MSG_LIBRARY_CHANGED);
-	changed.AddString("operation", operation);
-	changed.AddString("uri", uri.c_str());
-	be_app->PostMessage(&changed);
-}
 
 static std::string
 JsonString(const nlohmann::json& object, const char* key,
@@ -441,40 +123,7 @@ JsonInt32(const nlohmann::json& object, const char* key, int32 fallback = 0)
 	return object[key].get<int32>();
 }
 
-static bool
-JsonBool(const nlohmann::json& object, const char* key, bool fallback = false)
-{
-	if (!object.is_object() || !object.contains(key)
-			|| !object[key].is_boolean())
-		return fallback;
-	return object[key].get<bool>();
-}
 
-
-static nlohmann::json
-MutationResponseBody(const nlohmann::json& response)
-{
-	if (!response.is_object() || !response.contains("body")
-			|| !response["body"].is_string())
-		return response;
-	try {
-		const std::string body = response["body"].get<std::string>();
-		return body.empty() ? nlohmann::json::object()
-			: nlohmann::json::parse(body);
-	} catch (...) {
-		return nlohmann::json::object();
-	}
-}
-
-static std::string
-DurationText(int32 milliseconds)
-{
-	int32 seconds = std::max((int32)0, milliseconds) / 1000;
-	char text[32];
-	snprintf(text, sizeof(text), "%ld:%02ld", (long)(seconds / 60),
-		(long)(seconds % 60));
-	return text;
-}
 
 class DiscoverTabView : public BTabView {
 public:
@@ -520,8 +169,8 @@ public:
 	virtual void Select(int32 tab) {
 		BTabView::Select(tab);
 		if (Window()) {
-			BMessage msg('tabS');
-			msg.AddInt32("tab", tab);
+			BMessage msg(MSG_DISCOVER_TAB_SELECTED);
+			msg.AddInt32(MessageFields::Tab, tab);
 			Window()->PostMessage(&msg);
 		}
 	}
@@ -538,7 +187,7 @@ public:
 
 	virtual void MouseMoved(BPoint where, uint32 transit,
 		const BMessage* dragMessage) {
-		if (dragMessage && dragMessage->what == 'drag') {
+		if (dragMessage && dragMessage->what == MSG_DRAG_ITEM) {
 			BPoint currentWhere;
 			if (!HaifyDragButtonStillDown(this, &currentWhere)) {
 				ClearHaifyActiveDragMessage();
@@ -551,10 +200,10 @@ public:
 			ConvertToScreen(&screen);
 			BMessage hover(*dragMessage);
 			hover.what = MSG_DISCOVER_DRAG_HOVER;
-			hover.AddPoint("screenPt", screen);
+			hover.AddPoint(MessageFields::ScreenPoint, screen);
 			int32 visualTab = DropTargetTabAt(currentWhere);
 			if (visualTab >= 0)
-				hover.AddInt32("visualTab", visualTab);
+				hover.AddInt32(MessageFields::VisualTab, visualTab);
 			if (Window())
 				Window()->PostMessage(&hover);
 			BTabView::MouseMoved(where, transit, dragMessage);
@@ -584,9 +233,9 @@ public:
 		}
 		if (fDragging && fSource >= 0 && fTarget >= 0
 				&& fSource != fTarget && Window()) {
-			BMessage reorder('tRdr');
-			reorder.AddInt32("source", fSource);
-			reorder.AddInt32("target", fTarget);
+			BMessage reorder(MSG_DISCOVER_TAB_MOVED);
+			reorder.AddInt32(MessageFields::SourceVisualTab, fSource);
+			reorder.AddInt32(MessageFields::TargetVisualTab, fTarget);
 			Window()->PostMessage(&reorder);
 		}
 		fSource = fTarget = -1;
@@ -646,14 +295,14 @@ public:
 		: BMessageFilter(B_ANY_DELIVERY, B_ANY_SOURCE), fWindow(window) {}
 
 	filter_result Filter(BMessage* message, BHandler** target) override {
-		if (!fWindow || !message || message->what != 'drag'
+		if (!fWindow || !message || message->what != MSG_DRAG_ITEM
 				|| !message->WasDropped())
 			return B_DISPATCH_MESSAGE;
 		if (target && fWindow->ForwardDroppedMessage(message, *target))
 			return B_SKIP_MESSAGE;
 		ClearHaifyActiveDragMessage();
 		BMessage drop(*message);
-		drop.what = 'dDrp';
+		drop.what = MSG_DISCOVER_DROP;
 		fWindow->PostMessage(&drop);
 		return B_SKIP_MESSAGE;
 	}
@@ -668,25 +317,14 @@ DiscoverWindow::DiscoverWindow()
 		250 + kDefaultDiscoverWindowWidth,
 		200 + kDefaultDiscoverWindowHeight), "Discover",
 		B_DOCUMENT_WINDOW,
-		B_ASYNCHRONOUS_CONTROLS | B_AUTO_UPDATE_SIZE_LIMITS),
-	  fPlaylistSyncGeneration(0)
+		B_ASYNCHRONOUS_CONTROLS | B_AUTO_UPDATE_SIZE_LIMITS)
 {
 	memset(fTabs,         0, sizeof(fTabs));
 	memset(fLists,        0, sizeof(fLists));
 	memset(fTabMenuItems, 0, sizeof(fTabMenuItems));
-	memset(fTabMap,       0, sizeof(fTabMap));
-	memset(fLoaded,       0, sizeof(fLoaded));
-	memset(fLoadTime,     0, sizeof(fLoadTime));
-	memset(fPageLoading,  0, sizeof(fPageLoading));
-	memset(fPageHasMore,  0, sizeof(fPageHasMore));
-	memset(fPageOffset,   0, sizeof(fPageOffset));
-	memset(fTabLoadGeneration, 0, sizeof(fTabLoadGeneration));
-	memset(fCacheLoadGeneration, 0, sizeof(fCacheLoadGeneration));
-	memset(fCacheLoadPending, 0, sizeof(fCacheLoadPending));
-	memset(fCacheBacked,  0, sizeof(fCacheBacked));
-	memset(fFreshSnapshot, 0, sizeof(fFreshSnapshot));
 	HaifySettings s = SettingsController::Load();
-	fCacheAccountId = s.spotifyAccountId;
+	fCache.SetAccountIfEmpty(s.spotifyAccountId);
+	fAsync.Reset(s.spotifyAccountId, _AudiobooksEnabled());
 	_LoadTabVisibility(s);
 	_LoadTabOrder(s);
 	if (s.browserWindowW > 0) {
@@ -703,7 +341,7 @@ DiscoverWindow::DiscoverWindow()
 		_LoadPersistentCache(initialTab);
 		_LoadTab(initialTab);
 	}
-	BMessage lazy(kMsgCheckLazyLoad);
+	BMessage lazy(MSG_DISCOVER_CHECK_LAZY_LOAD);
 	fLazyLoadRunner = new BMessageRunner(BMessenger(this), &lazy, 500000LL);
 }
 
@@ -750,19 +388,14 @@ DiscoverWindow::QuitRequested()
 int32
 DiscoverWindow::_LogicalTab(int32 visual) const
 {
-	if (visual >= 0 && fTabView && visual < fTabView->CountTabs()) {
-		int32 logical = fTabMap[visual];
-		if (logical >= 0 && logical < TAB_COUNT)
-			return logical;
-	}
-	return -1;
+	return fTabView ? fTabLayout.LogicalTab(visual) : TAB_NONE;
 }
 
 
 BColumnListView*
 DiscoverWindow::_MakeList(int32 i)
 {
-	DiscoverListView* list = new DiscoverListView(kTabDefs[i].label,
+	DiscoverListView* list = new DiscoverListView(kTabLabels[i],
 		kTabCols[i], i, true);
 	list->SetDropFeedbackFlags(i == TAB_PLAYLISTS ? kDropFeedbackTargetRow
 		: kDropFeedbackNone);
@@ -809,22 +442,19 @@ DiscoverWindow::_RebuildTabs()
 		}
 	}
 
-	int32 visual = 0, restoreVisual = 0;
-	for (int32 orderIndex : fTabOrder) {
-		int i = (int)orderIndex;
-		if (!_IsTabEffectivelyVisible(i)) continue;
+	fTabLayout = MakeDiscoverTabLayout(fTabOrder, fTabVisible, _AudiobooksEnabled());
+	int32 visual = 0;
+	for (DiscoverTab i : fTabLayout.tabs) {
 		if (!fLists[i])
 			fLists[i] = _MakeList(i);
 		fTabView->AddTab(fLists[i], fTabs[i]);
 		fTabs[i] = fTabView->TabAt(visual);
-		fTabView->TabAt(visual)->SetLabel(B_TRANSLATE(kTabDefs[i].label));
-		fTabMap[visual] = i;
-		if (i == prevLogical) restoreVisual = visual;
+		fTabView->TabAt(visual)->SetLabel(B_TRANSLATE(kTabLabels[i]));
 		visual++;
 	}
 
 	if (fTabView->CountTabs() > 0)
-		fTabView->Select(restoreVisual);
+		fTabView->Select(fTabLayout.RestoreSelection(prevLogical));
 }
 
 
@@ -841,11 +471,7 @@ DiscoverWindow::_LoadTabVisibility(const HaifySettings& settings)
 	fTabVisible[TAB_SAVED_EPISODES] = settings.discoverTabSavedEpisodes;
 	fTabVisible[TAB_AUDIOBOOKS] = settings.discoverTabAudiobooks;
 
-	bool anyVisible = false;
-	for (int i = 0; i < TAB_COUNT; i++)
-		anyVisible = anyVisible || _IsTabEffectivelyVisible(i);
-	if (!anyVisible)
-		fTabVisible[TAB_PLAYLISTS] = true;
+	EnsureVisibleDiscoverTab(fTabVisible, _AudiobooksEnabled());
 }
 
 
@@ -867,32 +493,14 @@ DiscoverWindow::_SaveTabVisibility(HaifySettings& settings) const
 void
 DiscoverWindow::_LoadTabOrder(const HaifySettings& settings)
 {
-	fTabOrder.clear();
-	std::vector<std::string> known;
-	for (int32 i = 0; i < TAB_COUNT; i++) known.push_back(kTabDefs[i].id);
-	std::vector<std::string> normalized = NormalizeStableOrder(
-		settings.discoverTabOrder, known);
-	for (const std::string& id : normalized) {
-		for (int32 i = 0; i < TAB_COUNT; i++) {
-			if (id == kTabDefs[i].id
-					&& std::find(fTabOrder.begin(), fTabOrder.end(), i)
-						== fTabOrder.end()) {
-				fTabOrder.push_back(i);
-				break;
-			}
-		}
-	}
+	fTabOrder = NormalizeDiscoverTabOrder(settings.discoverTabOrder);
 }
 
 
 void
 DiscoverWindow::_SaveTabOrder(HaifySettings& settings) const
 {
-	settings.discoverTabOrder.clear();
-	for (int32 logical : fTabOrder) {
-		if (logical >= 0 && logical < TAB_COUNT)
-			settings.discoverTabOrder.push_back(kTabDefs[logical].id);
-	}
+	settings.discoverTabOrder = DiscoverTabOrderIds(fTabOrder);
 }
 
 
@@ -908,32 +516,16 @@ DiscoverWindow::_AudiobooksEnabled() const
 bool
 DiscoverWindow::_IsTabEffectivelyVisible(int32 logical) const
 {
-	if (logical < 0 || logical >= TAB_COUNT || !fTabVisible[logical])
-		return false;
-	return logical != TAB_AUDIOBOOKS || _AudiobooksEnabled();
+	return IsDiscoverTabVisible(logical, fTabVisible, _AudiobooksEnabled());
 }
 
 
 void
 DiscoverWindow::_MoveTab(int32 sourceVisual, int32 targetVisual)
 {
-	if (!fTabView || sourceVisual < 0 || targetVisual < 0
-			|| sourceVisual >= fTabView->CountTabs()
-			|| targetVisual >= fTabView->CountTabs()
-			|| sourceVisual == targetVisual)
+	if (!fTabView || !MoveDiscoverTab(fTabOrder,
+			fTabLayout.LogicalTab(sourceVisual), fTabLayout.LogicalTab(targetVisual)))
 		return;
-	int32 sourceLogical = fTabMap[sourceVisual];
-	int32 targetLogical = fTabMap[targetVisual];
-	auto source = std::find(fTabOrder.begin(), fTabOrder.end(), sourceLogical);
-	auto target = std::find(fTabOrder.begin(), fTabOrder.end(), targetLogical);
-	if (source == fTabOrder.end() || target == fTabOrder.end())
-		return;
-	bool movingRight = source < target;
-	fTabOrder.erase(source);
-	target = std::find(fTabOrder.begin(), fTabOrder.end(), targetLogical);
-	if (movingRight && target != fTabOrder.end())
-		++target;
-	fTabOrder.insert(target, sourceLogical);
 	SettingsController::Update([&](HaifySettings& settings) {
 		_SaveTabOrder(settings);
 	});
@@ -954,19 +546,7 @@ DiscoverWindow::_HandleLibraryDrop(const std::string& uri)
 		alert->Go();
 		return;
 	}
-	App* app = dynamic_cast<App*>(be_app);
-	SpotifyApi* api = app ? app->GetApi() : nullptr;
-	if (!api) return;
-	BMessenger self(this);
-	api->Library().CheckLibraryItems({uri}, [self, uri](bool ok,
-			const nlohmann::json& data) {
-		BMessage result('dSts');
-		result.AddString("uri", uri.c_str());
-		result.AddBool("ok", ok);
-		result.AddBool("saved", ok && data.is_array() && !data.empty()
-			&& data[0].is_boolean() && data[0].get<bool>());
-		self.SendMessage(&result);
-	});
+	_QueueLibraryWrite({uri, DiscoverLibraryWriteKind::EnsureSaved, 0, true});
 }
 
 
@@ -1003,15 +583,8 @@ DiscoverWindow::_HandlePlaylistDrop(const std::string& itemUri,
 	if (!api)
 		return true;
 
-	BMessenger self(this);
-	std::string playlistId = targetUri.substr(17);
-	api->Playlists().AddTrackToPlaylist(playlistId, itemUri,
-		[self](bool ok, const nlohmann::json& data) {
-			BMessage result('dPlA');
-			result.AddBool("ok", ok);
-			result.AddInt32("status", SpotifyResponseStatus(data));
-			self.SendMessage(&result);
-		});
+	DiscoverPlaylistRequests::AddItem(*api, SpotifyItemIdForUri(targetUri), itemUri,
+		fAsync.Begin(TAB_PLAYLISTS), BMessenger(this));
 	return true;
 }
 
@@ -1019,15 +592,9 @@ DiscoverWindow::_HandlePlaylistDrop(const std::string& itemUri,
 void
 DiscoverWindow::_SelectLibraryTarget(const std::string& uri)
 {
-	const char* targetId = SpotifyLibraryTargetId(SpotifyItemKindForUri(uri));
-	int32 logical = -1;
-	for (int32 i = 0; i < TAB_COUNT; i++) {
-		if (strcmp(kTabDefs[i].id, targetId) == 0) {
-			logical = i;
-			break;
-		}
-	}
-	if (logical < 0 || (logical == TAB_AUDIOBOOKS && !_AudiobooksEnabled()))
+	DiscoverTab logical = DiscoverLibraryTargetTab(SpotifyItemKindForUri(uri),
+		_AudiobooksEnabled());
+	if (logical == TAB_NONE)
 		return;
 	if (!fTabVisible[logical]) {
 		fTabVisible[logical] = true;
@@ -1038,15 +605,12 @@ DiscoverWindow::_SelectLibraryTarget(const std::string& uri)
 		});
 	}
 	_RebuildTabs();
-	for (int32 visual = 0; visual < fTabView->CountTabs(); visual++) {
-		if (fTabMap[visual] == logical) {
-			fTabView->Select(visual);
-			break;
-		}
-	}
+	int32 visual = _VisualTabForLogical(logical);
+	if (visual >= 0)
+		fTabView->Select(visual);
 	// Selecting an untouched tab still needs its initial load. A tab that is
 	// already populated must remain intact; the library delta adds its new row.
-	if (!fLoaded[logical])
+	if (!fCache.State(logical).loaded)
 		_LoadTab(logical);
 }
 
@@ -1054,6 +618,10 @@ DiscoverWindow::_SelectLibraryTarget(const std::string& uri)
 void
 DiscoverWindow::MessageReceived(BMessage* message)
 {
+	_EnsureAsyncContext();
+	auto context = DiscoverMessages::ReadContext(*message);
+	if (context && !DiscoverMessages::ReadAsyncToken(*message) && !fAsync.Accepts(*context))
+		return;
 	if (_HandleTabMessage(message) || _HandleDataMessage(message)
 			|| _HandlePlaybackOpenMessage(message)
 			|| _HandleLibraryActionMessage(message)
@@ -1070,16 +638,16 @@ bool
 DiscoverWindow::_HandleTabMessage(BMessage* message)
 {
 	switch (message->what) {
-		case 'togT':
+		case MSG_DISCOVER_TAB_TOGGLED:
 			_ToggleTabVisibility(message);
 			return true;
 
-		case 'tRdr':
-			_MoveTab(message->GetInt32("source", -1),
-				message->GetInt32("target", -1));
+		case MSG_DISCOVER_TAB_MOVED:
+			_MoveTab(message->GetInt32(MessageFields::SourceVisualTab, -1),
+				message->GetInt32(MessageFields::TargetVisualTab, -1));
 			return true;
 
-		case 'tRst':
+		case MSG_DISCOVER_TAB_ORDER_RESET:
 			_ResetTabOrder();
 			return true;
 
@@ -1087,11 +655,11 @@ DiscoverWindow::_HandleTabMessage(BMessage* message)
 			_ApplySpotifyCapabilities();
 			return true;
 
-		case 'tabS':
+		case MSG_DISCOVER_TAB_SELECTED:
 			_SelectTab(message);
 			return true;
 
-		case kMsgAudiobookIdsUpdated:
+		case MSG_DISCOVER_AUDIOBOOK_IDS:
 			_ApplyAudiobookIdSnapshot(message);
 			return true;
 
@@ -1105,20 +673,20 @@ bool
 DiscoverWindow::_HandleDataMessage(BMessage* message)
 {
 	switch (message->what) {
-		case kMsgCacheLoaded:
-		case 'uRow':
+		case MSG_DISCOVER_CACHE_LOADED:
+		case MSG_DISCOVER_ROWS:
 			_ApplyDiscoverRows(message);
 			return true;
 
-		case kMsgCheckLazyLoad:
+		case MSG_DISCOVER_CHECK_LAZY_LOAD:
 			_CheckLazyLoad();
 			return true;
 
-		case kMsgPageDone:
+		case MSG_DISCOVER_PAGE_DONE:
 			_ApplyPageDone(message);
 			return true;
 
-		case kMsgSaveCache:
+		case MSG_DISCOVER_CACHE_SAVE:
 			_SaveCacheNowFromMessage();
 			return true;
 
@@ -1136,7 +704,10 @@ bool
 DiscoverWindow::_HandlePlaybackOpenMessage(BMessage* message)
 {
 	switch (message->what) {
-		case 'play':
+		case MSG_QUEUE_ITEM:
+			be_app->PostMessage(message);
+			return true;
+		case MSG_PLAY_URI:
 			_ForwardPlayback(message);
 			return true;
 
@@ -1144,7 +715,7 @@ DiscoverWindow::_HandlePlaybackOpenMessage(BMessage* message)
 			_ForwardOpenRequest(message);
 			return true;
 
-		case 'pStU':
+		case MSG_CURRENT_TRACK_UPDATE:
 			_ApplyPlayingTrackUpdate(message);
 			return true;
 
@@ -1156,7 +727,7 @@ DiscoverWindow::_HandlePlaybackOpenMessage(BMessage* message)
 			_ShowPlayableContextMenu(message);
 			return true;
 
-		case kMsgLibraryStateCached:
+		case MSG_DISCOVER_MEMBERSHIP_CACHED:
 			_ApplyLibraryStateCached(message);
 			return true;
 
@@ -1194,10 +765,10 @@ DiscoverWindow::_HandleDiscoverDropActionMessage(BMessage* message)
 			_ClearDropMarkers();
 			return true;
 
-		case kMsgDropTabSwitch:
-			if (message->GetInt32("tab", -1) == fPendingDropTab
+		case MSG_DISCOVER_DROP_TAB_SWITCH:
+			if (message->GetInt32(MessageFields::Tab, -1) == fPendingDropTab
 					&& HaifyActiveDragGenerationMatches(
-						message->GetInt32("dragGeneration", -1))
+						message->GetInt32(MessageFields::DragGeneration, -1))
 					&& _IsPointerOverDropTargetTab(fPendingDropTab)) {
 				_SelectDropTargetTab(fPendingDropTab);
 				_CancelDropTabSwitch();
@@ -1206,11 +777,11 @@ DiscoverWindow::_HandleDiscoverDropActionMessage(BMessage* message)
 			}
 			return true;
 
-		case 'dDrp':
+		case MSG_DISCOVER_DROP:
 			_HandleDiscoverDrop(message);
 			return true;
 
-		case 'dPlA':
+		case MSG_DISCOVER_PLAYLIST_DROP_RESULT:
 			_ApplyPlaylistDropResult(message);
 			return true;
 
@@ -1224,32 +795,18 @@ bool
 DiscoverWindow::_HandleLibraryMutationMessage(BMessage* message)
 {
 	switch (message->what) {
-		case 'dSts':
-			_ApplyLibraryStatusResult(message);
+		case MSG_DISCOVER_LIBRARY_WRITE_RESULT:
+			_ApplyLibraryWriteResult(message);
 			return true;
 
-		case 'dAdd':
-			_ApplyLibraryAddResult(message);
+		case 'savA': case 'remA': case 'remI': case 'remL': case 'likT':
+			_ApplyLibraryCommand(message);
 			return true;
 
-		case 'savA':
-			_SaveAlbumFromMessage(message);
-			return true;
-
-		case 'remA':
-			_RemoveAlbumFromMessage(message);
-			return true;
-
-		case 'remI':
-			_RemoveFollowedItem(message);
-			return true;
-
-		case 'rmIR':
-			_ApplyRemoveFollowedItemResult(message);
-			return true;
-
-		case 'remL':
-			_RemovePlayableFromLibrary(message);
+		case 'addP':
+			if (_AcceptDialogContext(*message))
+				_HandlePlaylistDrop(message->GetString(MessageFields::TrackUri, ""),
+					"spotify:playlist:" + std::string(message->GetString(MessageFields::PlaylistId, "")), true);
 			return true;
 
 		default:
@@ -1270,7 +827,7 @@ DiscoverWindow::_HandlePlaylistActionMessage(BMessage* message)
 			_CreatePlaylist(message);
 			return true;
 
-		case 'plCr':
+		case MSG_DISCOVER_PLAYLIST_CREATE_RESULT:
 			_ApplyPlaylistCreateResult(message);
 			return true;
 
@@ -1282,17 +839,14 @@ DiscoverWindow::_HandlePlaylistActionMessage(BMessage* message)
 			_RenamePlaylist(message);
 			return true;
 
-		case 'plRr':
-			_ApplyPlaylistRenameResult(message);
+		case MSG_DISCOVER_PLAYLIST_MUTATION_RESULT:
+			_ApplyPlaylistMutationResult(message);
 			return true;
 
 		case 'plDl':
 			_DeletePlaylist(message);
 			return true;
 
-		case 'plDr':
-			_ApplyPlaylistDeleteResult(message);
-			return true;
 
 		case MSG_PLAYLISTS_CHANGED:
 			_ApplyPlaylistsChanged(message);
@@ -1302,11 +856,11 @@ DiscoverWindow::_HandlePlaylistActionMessage(BMessage* message)
 			_ApplyLibraryChanged(message);
 			return true;
 
-		case 'lAdd':
+		case MSG_DISCOVER_LIBRARY_RESOLVED:
 			_ApplyResolvedLibraryAddition(message);
 			return true;
 
-		case 'pSyn':
+		case MSG_DISCOVER_PLAYLIST_SNAPSHOT:
 			_ApplyPlaylistSnapshot(message);
 			return true;
 
@@ -1353,22 +907,9 @@ void
 DiscoverWindow::_ToggleTabVisibility(BMessage* message)
 {
 	int32 tab;
-	if (message->FindInt32("tab", &tab) != B_OK)
+	if (message->FindInt32(MessageFields::Tab, &tab) != B_OK
+			|| !ToggleDiscoverTabVisibility(fTabVisible, tab, _AudiobooksEnabled()))
 		return;
-	if (tab < 0 || tab >= TAB_COUNT)
-		return;
-	if (tab == TAB_AUDIOBOOKS && !_AudiobooksEnabled())
-		return;
-	if (fTabVisible[tab]) {
-		int32 visibleCount = 0;
-		for (int i = 0; i < TAB_COUNT; i++) {
-			if (_IsTabEffectivelyVisible(i))
-				visibleCount++;
-		}
-		if (visibleCount <= 1)
-			return;
-	}
-	fTabVisible[tab] = !fTabVisible[tab];
 	fTabMenuItems[tab]->SetMarked(fTabVisible[tab]);
 	SettingsController::Update([&](HaifySettings& settings) {
 		_SaveTabVisibility(settings);
@@ -1380,9 +921,7 @@ DiscoverWindow::_ToggleTabVisibility(BMessage* message)
 void
 DiscoverWindow::_ResetTabOrder()
 {
-	fTabOrder.clear();
-	for (int32 i = 0; i < TAB_COUNT; i++)
-		fTabOrder.push_back(i);
+	fTabOrder = NormalizeDiscoverTabOrder({});
 	SettingsController::Update([&](HaifySettings& settings) {
 		_SaveTabOrder(settings);
 	});
@@ -1393,6 +932,9 @@ DiscoverWindow::_ResetTabOrder()
 void
 DiscoverWindow::_ApplySpotifyCapabilities()
 {
+	EnsureVisibleDiscoverTab(fTabVisible, _AudiobooksEnabled());
+	if (fTabMenuItems[TAB_PLAYLISTS])
+		fTabMenuItems[TAB_PLAYLISTS]->SetMarked(fTabVisible[TAB_PLAYLISTS]);
 	if (fTabMenuItems[TAB_AUDIOBOOKS]) {
 		fTabMenuItems[TAB_AUDIOBOOKS]->SetEnabled(_AudiobooksEnabled());
 		fTabMenuItems[TAB_AUDIOBOOKS]->SetMarked(
@@ -1406,7 +948,7 @@ void
 DiscoverWindow::_SelectTab(BMessage* message)
 {
 	int32 visual = 0;
-	message->FindInt32("tab", &visual);
+	message->FindInt32(MessageFields::Tab, &visual);
 	int32 logical = _LogicalTab(visual);
 	if (logical < 0)
 		return;
@@ -1414,15 +956,13 @@ DiscoverWindow::_SelectTab(BMessage* message)
 	if (fLists[logical])
 		static_cast<DiscoverListView*>(fLists[logical])->SetPlayingUri(
 			fCurrentTrackUri);
-	bool expired = fLoaded[logical]
-		&& (fCacheBacked[logical]
-			|| (system_time() - fLoadTime[logical]) > kCacheExpiry);
+	bool expired = fCache.Expired(logical, system_time());
 	if (expired && logical == TAB_PLAYLISTS) {
 		ReloadPlaylists();
-	} else if (!fLoaded[logical] || expired) {
+	} else if (!fCache.State(logical).loaded || expired) {
 		if (expired)
 			_InvalidateTabCache(logical);
-		fLoaded[logical] = false;
+		fCache.MarkUnloaded(logical);
 		_LoadTab(logical);
 	}
 }
@@ -1431,17 +971,13 @@ DiscoverWindow::_SelectTab(BMessage* message)
 void
 DiscoverWindow::_ApplyPageDone(BMessage* message)
 {
-	int32 tab = message->GetInt32("tab", -1);
-	if (tab < 0 || tab >= TAB_COUNT)
+	auto result = DiscoverMessages::ReadPageDone(*message);
+	if (!result)
 		return;
-	if (message->GetInt32("load_generation", -1)
-			!= fTabLoadGeneration[tab])
-		return;
-	fPageLoading[tab] = false;
-	fPageHasMore[tab] = message->GetBool("has_more", false);
-	fPageOffset[tab] = message->GetInt32("next_offset", fPageOffset[tab]);
-	fPageCursor[tab] = message->GetString("next_cursor", "");
-	_CheckLazyLoad();
+	if (fCache.FinishPage(result->tab, result->loadGeneration, result->hasMore,
+			result->nextOffset.value_or(fCache.State(result->tab).pageOffset),
+			result->nextCursor))
+		_CheckLazyLoad();
 }
 
 
@@ -1451,12 +987,11 @@ DiscoverWindow::_ApplyDiscoverRows(BMessage* message)
 	RowUpdateData update;
 	if (!_ReadRowUpdate(message, update))
 		return;
-	if (message->GetBool("audiobook_ids_snapshot", false))
+	if (message->GetBool(MessageFields::AudiobookIdsSnapshot, false))
 		_ApplyAudiobookIdSnapshot(message);
 
 	if (update.tab == TAB_AUDIOBOOKS && update.snapshotMessage) {
-		fAudiobookIds.clear();
-		fAudiobookIdsKnown = true;
+		fLibrary.SetAudiobookSnapshot({});
 	}
 	_ApplyRowUpdateRows(message, update);
 	_PruneSnapshotRows(update);
@@ -1468,15 +1003,22 @@ DiscoverWindow::_ApplyDiscoverRows(BMessage* message)
 bool
 DiscoverWindow::_ReadRowUpdate(BMessage* message, RowUpdateData& update)
 {
-	if (message->FindInt32("tab", &update.tab) != B_OK)
+	if (message->FindInt32(MessageFields::Tab, &update.tab) != B_OK)
 		return false;
-	if (message->FindInt32("cols", &update.cols) != B_OK || update.cols <= 0)
+	if (message->FindInt32(MessageFields::Columns, &update.cols) != B_OK || update.cols <= 0)
 		return false;
 	if (update.tab < 0 || update.tab >= TAB_COUNT || !fLists[update.tab])
 		return false;
+	DiscoverRowData columns;
+	if (!DiscoverMessages::ReadRowColumns(*message, update.tab, columns))
+		return false;
+	update.allV = std::move(columns.vals);
+	update.allU = std::move(columns.uris);
+	update.allT = std::move(columns.ttls);
+	update.nRows = (int32)update.allV.size() / update.cols;
 
-	update.fromCache = message->GetBool("from_cache", false);
-	update.snapshotMessage = message->GetBool("snapshot", false);
+	update.fromCache = message->GetBool(MessageFields::FromCache, false);
+	update.snapshotMessage = message->GetBool(MessageFields::Snapshot, false);
 	if (update.fromCache) {
 		update.snapshotMessage = false;
 		if (!_ApplyCacheRowUpdateStart(message, update))
@@ -1484,54 +1026,34 @@ DiscoverWindow::_ReadRowUpdate(BMessage* message, RowUpdateData& update)
 	} else if (!_ApplyFreshRowUpdateStart(message, update)) {
 		return false;
 	}
-	_CollectRowUpdateStrings(message, update);
-	update.nRows = (int32)update.allV.size() / update.cols;
 	return true;
 }
 
 
 bool
-DiscoverWindow::_ApplyCacheRowUpdateStart(BMessage* message,
-	RowUpdateData& update)
+DiscoverWindow::_ApplyCacheRowUpdateStart(BMessage* message, RowUpdateData& update)
 {
-	int32 cacheGeneration = message->GetInt32("cache_generation", -1);
-	if (cacheGeneration != fCacheLoadGeneration[update.tab]
-			|| message->GetString("account_id", "") != fCacheAccountId)
+	DiscoverCacheReadRequest request{message->GetString(MessageFields::AccountId, ""),
+		update.tab, message->GetInt32(MessageFields::CacheGeneration, -1)};
+	update.cacheLast = message->GetBool(MessageFields::CacheLast, true);
+	int32 selected = _LogicalTab(fTabView ? fTabView->Selection() : -1);
+	if (!fCache.AcceptCacheBatch(request, message->GetBool(MessageFields::CacheAvailable, true),
+			update.cacheLast, selected))
 		return false;
-	update.cacheLast = message->GetBool("cache_last", true);
-	if (update.cacheLast)
-		fCacheLoadPending[update.tab] = false;
-	int32 selectedTab = _LogicalTab(fTabView ? fTabView->Selection() : -1);
-	if (!message->GetBool("cache_available", true)
-			|| fFreshSnapshot[update.tab] || update.tab != selectedTab)
-		return false;
-	if (message->GetBool("cache_first", false))
+	if (message->GetBool(MessageFields::CacheFirst, false))
 		fLists[update.tab]->Clear();
 	return true;
 }
 
 
 bool
-DiscoverWindow::_ApplyFreshRowUpdateStart(BMessage* message,
-	const RowUpdateData& update)
+DiscoverWindow::_ApplyFreshRowUpdateStart(BMessage* message, const RowUpdateData& update)
 {
-	int32 loadGeneration = -1;
-	return message->FindInt32("load_generation", &loadGeneration) != B_OK
-		|| loadGeneration == fTabLoadGeneration[update.tab];
-}
-
-
-void
-DiscoverWindow::_CollectRowUpdateStrings(BMessage* message,
-	RowUpdateData& update)
-{
-	const char* value;
-	for (int32 i = 0; message->FindString("v", i, &value) == B_OK; i++)
-		update.allV.push_back(value);
-	for (int32 i = 0; message->FindString("u", i, &value) == B_OK; i++)
-		update.allU.push_back(value);
-	for (int32 i = 0; message->FindString("t", i, &value) == B_OK; i++)
-		update.allT.push_back(value);
+	int32 generation;
+	std::optional<int32_t> supplied;
+	if (message->FindInt32(MessageFields::LoadGeneration, &generation) == B_OK)
+		supplied = generation;
+	return fCache.AcceptFreshRows(update.tab, supplied);
 }
 
 
@@ -1550,9 +1072,9 @@ DiscoverWindow::_ApplyRowUpdateRow(BMessage* message, RowUpdateData& update,
 	if (!_RowUpdateColumnsAvailable(update, rowIndex))
 		return;
 	bool writable = true;
-	message->FindBool("writable", rowIndex, &writable);
+	message->FindBool(MessageFields::Writable, rowIndex, &writable);
 	bool owned = false;
-	message->FindBool("owned", rowIndex, &owned);
+	message->FindBool(MessageFields::Owned, rowIndex, &owned);
 	auto uris = update.allU.begin() + rowIndex * update.cols;
 	if (!_AcceptRowUpdatePrimaryUri(update, *uris))
 		return;
@@ -1574,21 +1096,10 @@ DiscoverWindow::_RowUpdateColumnsAvailable(const RowUpdateData& update,
 
 
 bool
-DiscoverWindow::_AcceptRowUpdatePrimaryUri(RowUpdateData& update,
-	const std::string& uri)
+DiscoverWindow::_AcceptRowUpdatePrimaryUri(RowUpdateData& update, const std::string& uri)
 {
-	if (!uri.empty() && !PrimaryUriMatchesTab(update.tab, uri))
+	if (!fLibrary.AcceptPrimaryRow(update.tab, uri))
 		return false;
-	std::string primaryId = SpotifyItemIdForUri(uri);
-	if (update.tab == TAB_PODCASTS
-			&& SpotifyEffectiveItemKind(kSpotifyItemShow, primaryId,
-				fAudiobookIds) == kSpotifyItemAudiobook) {
-		return false;
-	}
-	if (update.tab == TAB_AUDIOBOOKS && !primaryId.empty()) {
-		fAudiobookIds.insert(primaryId);
-		fAudiobookIdsKnown = true;
-	}
 	if (!uri.empty()) {
 		update.snapshotUris.insert(uri);
 		update.snapshotOrder.push_back(uri);
@@ -1733,19 +1244,9 @@ DiscoverWindow::_FinishRowUpdate(BMessage*, const RowUpdateData& update)
 			fCurrentTrackUri);
 	if (update.tab == TAB_AUDIOBOOKS)
 		_RemoveAudiobookDuplicatesFromPodcasts();
-	if (update.fromCache) {
-		fLoaded[update.tab] = true;
-		fCacheBacked[update.tab] = true;
-		fPageLoading[update.tab] = false;
-		fPageHasMore[update.tab] = false;
-		fLoadTime[update.tab] = 0;
-	} else {
-		if (update.snapshotMessage) {
-			fFreshSnapshot[update.tab] = true;
-			fCacheBacked[update.tab] = false;
-		}
+	fCache.CompleteRows(update.tab, update.fromCache, update.snapshotMessage);
+	if (!update.fromCache)
 		_ScheduleCacheSave();
-	}
 	_CheckLazyLoad();
 }
 
@@ -1753,8 +1254,11 @@ DiscoverWindow::_FinishRowUpdate(BMessage*, const RowUpdateData& update)
 void
 DiscoverWindow::_ForwardPlayback(BMessage* message)
 {
-	const char* uri = message->GetString("uri", "");
-	if (uri && SpotifyItemIsPlayable(SpotifyItemKindForUri(uri))) {
+	MessageContracts::PlayCommand command;
+	if (!MessageContracts::ReadPlayCommand(*message, command))
+		return;
+	const char* uri = command.uri.c_str();
+	if (SpotifyItemIsPlayable(SpotifyItemKindForUri(uri))) {
 		if (fCurrentTrackUri != uri) {
 			fCurrentTrackUri = uri;
 			int32 tab = _LogicalTab(fTabView ? fTabView->Selection() : -1);
@@ -1772,14 +1276,14 @@ DiscoverWindow::_ForwardOpenRequest(BMessage* message)
 {
 	const char* uri = nullptr;
 	const char* title = nullptr;
-	message->FindString("uri", &uri);
-	message->FindString("title", &title);
+	message->FindString(MessageFields::Uri, &uri);
+	message->FindString(MessageFields::Title, &title);
 	if (!uri || !uri[0])
 		return;
 
 	BMessage forward('open');
-	forward.AddString("uri", uri);
-	forward.AddString("title", title ? title : "");
+	forward.AddString(MessageFields::Uri, uri);
+	forward.AddString(MessageFields::Title, title ? title : "");
 	const char* coverUrl = message->GetString("coverUrl", "");
 	if (!coverUrl || !coverUrl[0])
 		coverUrl = message->GetString("cover_url", "");
@@ -1792,11 +1296,10 @@ DiscoverWindow::_ForwardOpenRequest(BMessage* message)
 void
 DiscoverWindow::_ApplyPlayingTrackUpdate(BMessage* message)
 {
-	const char* newUri = nullptr;
-	message->FindString("trackUri", &newUri);
-	if (!newUri)
+	MessageContracts::CurrentTrackUpdate update;
+	if (!MessageContracts::ReadCurrentTrackUpdate(*message, update))
 		return;
-	std::string uri = newUri;
+	const std::string& uri = update.uri;
 	if (fCurrentTrackUri == uri)
 		return;
 	fCurrentTrackUri = uri;
@@ -1812,13 +1315,13 @@ DiscoverWindow::_ShowDiscoverContextMenu(BMessage* message)
 	const char* uri = nullptr;
 	const char* title = nullptr;
 	BPoint screen;
-	if (message->FindString("uri", &uri) != B_OK)
+	if (message->FindString(MessageFields::Uri, &uri) != B_OK)
 		return;
-	message->FindString("title", &title);
-	if (message->FindPoint("screenPt", &screen) != B_OK)
+	message->FindString(MessageFields::Title, &title);
+	if (message->FindPoint(MessageFields::ScreenPoint, &screen) != B_OK)
 		return;
 	int32 sourceTab = -1;
-	message->FindInt32("tab", &sourceTab);
+	message->FindInt32(MessageFields::Tab, &sourceTab);
 	std::string uriString = uri;
 
 	App* app = (App*)be_app;
@@ -1829,16 +1332,18 @@ DiscoverWindow::_ShowDiscoverContextMenu(BMessage* message)
 		std::string context = sourceTab == TAB_SAVED_EPISODES
 			? "spotify:saved-episodes" : "";
 		bool saved = sourceTab == TAB_SAVED_EPISODES;
-		auto state = fKnownLibraryStates.find(uriString);
-		if (state != fKnownLibraryStates.end())
-			saved = state->second;
+		auto state = fLibrary.KnownMembership(uriString);
+		if (state)
+			saved = *state;
 		else
 			_RequestPlayableLibraryState(uriString);
+		BMessage commandContext;
+		DiscoverMessages::AddContext(commandContext, fAsync.Context());
 		::ShowPlayableItemContextMenu(uriString, context, screen,
-			BMessenger(this), api, false, true, saved);
+			BMessenger(this), api, false, true, saved, &commandContext);
 	} else if (kind == kSpotifyItemPlaylist) {
 		_ShowPlaylistContextMenu(SpotifyItemIdForUri(uriString),
-			message->GetBool("owned", false), screen);
+			message->GetBool(MessageFields::Owned, false), screen);
 	} else if (kind != kSpotifyItemUnknown) {
 		_ShowBrowsableItemContextMenu(uriString, title ? title : "",
 			sourceTab, screen);
@@ -1851,21 +1356,8 @@ DiscoverWindow::_RequestPlayableLibraryState(const std::string& uri)
 {
 	App* app = dynamic_cast<App*>(be_app);
 	SpotifyApi* api = app ? app->GetApi() : nullptr;
-	if (!api)
-		return;
-	int32 generation = ++fLibraryStateGenerations[uri];
-	BMessenger self(this);
-	api->Library().CheckLibraryItems({uri}, [self, uri, generation](bool ok,
-			const nlohmann::json& data) {
-		BMessage result(kMsgLibraryStateCached);
-		result.AddString("uri", uri.c_str());
-		result.AddInt32("generation", generation);
-		result.AddBool("ok", ok && data.is_array() && !data.empty()
-			&& data[0].is_boolean());
-		result.AddBool("saved", ok && data.is_array() && !data.empty()
-			&& data[0].is_boolean() && data[0].get<bool>());
-		self.SendMessage(&result);
-	});
+	if (api)
+		DiscoverLibraryRequests::CheckMembership(*api, fLibrary.BeginMembership(uri), BMessenger(this));
 }
 
 
@@ -1873,22 +1365,24 @@ void
 DiscoverWindow::_ShowBrowsableItemContextMenu(const std::string& uri,
 	const std::string& title, int32 sourceTab, BPoint screen)
 {
+	auto context = fAsync.Context();
 	BPopUpMenu* menu = new BPopUpMenu("item", false, false);
 	BMessage* openMsg = new BMessage('open');
-	openMsg->AddString("uri", uri.c_str());
-	openMsg->AddString("title", title.c_str());
+	openMsg->AddString(MessageFields::Uri, uri.c_str());
+	openMsg->AddString(MessageFields::Title, title.c_str());
 	menu->AddItem(new BMenuItem(B_TRANSLATE("Open"), openMsg));
 
-	BMessage* playMsg = new BMessage('play');
-	playMsg->AddString("uri", uri.c_str());
+	BMessage* playMsg = new BMessage(MessageContracts::MakePlayCommand({uri.c_str()}));
 	menu->AddItem(new BMenuItem(B_TRANSLATE("Play"), playMsg));
 
 	_AddAlbumContextActions(menu, uri, sourceTab);
 	_AddLibraryRemovalContextAction(menu, uri, sourceTab);
 
 	BMenuItem* selected = menu->Go(screen, false, true);
-	if (selected && selected->Message())
+	if (selected && selected->Message()) {
+		DiscoverMessages::AddContext(*selected->Message(), context);
 		PostMessage(selected->Message());
+	}
 	delete menu;
 }
 
@@ -1902,12 +1396,12 @@ DiscoverWindow::_AddAlbumContextActions(BPopUpMenu* menu,
 	menu->AddSeparatorItem();
 	if (sourceTab == TAB_SAVED_ALBUMS) {
 		BMessage* removeMsg = new BMessage('remA');
-		removeMsg->AddString("uri", uri.c_str());
+		removeMsg->AddString(MessageFields::Uri, uri.c_str());
 		menu->AddItem(new BMenuItem(
 			B_TRANSLATE("Remove from Saved Albums"), removeMsg));
 	} else {
 		BMessage* saveMsg = new BMessage('savA');
-		saveMsg->AddString("uri", uri.c_str());
+		saveMsg->AddString(MessageFields::Uri, uri.c_str());
 		menu->AddItem(new BMenuItem(B_TRANSLATE("Save Album"), saveMsg));
 	}
 }
@@ -1925,7 +1419,7 @@ DiscoverWindow::_AddLibraryRemovalContextAction(BPopUpMenu* menu,
 		return;
 	menu->AddSeparatorItem();
 	BMessage* removeMsg = new BMessage('remI');
-	removeMsg->AddString("uri", uri.c_str());
+	removeMsg->AddString(MessageFields::Uri, uri.c_str());
 	const char* label = kind == kSpotifyItemShow
 		? B_TRANSLATE("Unsubscribe") : kind == kSpotifyItemArtist
 		? B_TRANSLATE("Unfollow Artist") : B_TRANSLATE("Remove from Audiobooks");
@@ -1936,54 +1430,54 @@ DiscoverWindow::_AddLibraryRemovalContextAction(BPopUpMenu* menu,
 void
 DiscoverWindow::_ShowPlayableContextMenu(BMessage* message)
 {
+	if (!_AcceptDialogContext(*message))
+		return;
+	BMessage commandContext;
+	DiscoverMessages::AddContext(commandContext, fAsync.Context());
 	App* app = dynamic_cast<App*>(be_app);
-	ShowPlayableItemContextMenu(message->GetString("uri", ""),
-		message->GetString("context_uri", ""),
+	ShowPlayableItemContextMenu(message->GetString(MessageFields::Uri, ""),
+		message->GetString(MessageFields::ContextUri, ""),
 		message->GetPoint("screen_point", BPoint()), BMessenger(this),
 		app ? app->GetApi() : nullptr,
 		message->GetBool("library_only", false), true,
-		message->GetBool("saved", false));
+		message->GetBool(MessageFields::Saved, false), &commandContext);
 }
 
 
 void
 DiscoverWindow::_ApplyLibraryStateCached(BMessage* message)
 {
-	std::string uri = message->GetString("uri", "");
-	if (!message->GetBool("ok", false) || uri.empty()
-			|| message->GetInt32("generation", -1)
-				!= fLibraryStateGenerations[uri])
-		return;
-	fKnownLibraryStates[uri] = message->GetBool("saved", false);
+	DiscoverLibraryRequest request{message->GetInt32(MessageFields::Tab, -1),
+		message->GetString(MessageFields::Uri, ""), message->GetInt32(MessageFields::Generation, -1)};
+	fLibrary.AcceptMembership(request, message->GetBool(MessageFields::Ok, false),
+		message->GetBool(MessageFields::Saved, false));
 }
 
 
 void
 DiscoverWindow::_HandleDiscoverDragHover(BMessage* message)
 {
-	std::string uri = DraggedSpotifyUri(message);
-	int32 logical = _DropTargetTabForUri(uri);
-	if (logical < 0) {
+	MessageContracts::DragItem item;
+	if (!MessageContracts::ReadDragItem(*message, item)) {
 		_ClearDropMarkers();
 		return;
 	}
-	if (!_IsTabEffectivelyVisible(logical)) {
+	int32 visualUnderMouse = message->GetInt32(MessageFields::VisualTab, -1);
+	DiscoverDragHover hover = ResolveDiscoverDragHover(item, fTabVisible,
+		_AudiobooksEnabled(), _LogicalTab(fTabView ? fTabView->Selection() : -1),
+		_LogicalTab(visualUnderMouse));
+	if (hover.target == TAB_NONE) {
 		_ClearDropMarkers();
 		return;
 	}
-	_SetValidDropTargetTab(logical);
+	_SetValidDropTargetTab(hover.target);
 
-	BPoint screenWhere = message->GetPoint("screenPt", BPoint(-1.0f, -1.0f));
-	int32 visualUnderMouse = -1;
-	bool isTabHover = message->FindInt32("visualTab", &visualUnderMouse)
-		== B_OK;
-	int32 logicalUnderMouse = isTabHover ? _LogicalTab(visualUnderMouse) : -1;
-	if (isTabHover && logicalUnderMouse == logical)
-		_ScheduleDropTabSwitch(logical);
+	if (hover.scheduleTabSwitch)
+		_ScheduleDropTabSwitch(hover.target);
 	else
 		_CancelDropTabSwitch();
 
-	if (_LogicalTab(fTabView ? fTabView->Selection() : -1) != logical) {
+	if (!hover.showRowMarker) {
 		for (int32 i = 0; i < TAB_COUNT; i++) {
 			if (DiscoverListView* list =
 					dynamic_cast<DiscoverListView*>(fLists[i])) {
@@ -1993,7 +1487,8 @@ DiscoverWindow::_HandleDiscoverDragHover(BMessage* message)
 		return;
 	}
 
-	_UpdateDropMarkers(logical, screenWhere);
+	BPoint screenWhere = message->GetPoint(MessageFields::ScreenPoint, BPoint(-1.0f, -1.0f));
+	_UpdateDropMarkers(hover.target, screenWhere);
 }
 
 
@@ -2002,40 +1497,24 @@ DiscoverWindow::_HandleDiscoverDrop(BMessage* message)
 {
 	_ClearDropMarkers();
 	ClearHaifyActiveDragMessage();
-	std::string uri = DraggedSpotifyUri(message);
-	if (uri.empty())
+	MessageContracts::DragItem item;
+	if (!MessageContracts::ReadDragItem(*message, item))
 		return;
-	int32 targetTab = message->GetInt32("tab", -1);
-	int32 expectedTab = _DropTargetTabForUri(uri);
+	MessageContracts::DiscoverDropTarget target;
+	if (!MessageContracts::ReadDiscoverDropTarget(*message, target))
+		return;
+	int32 targetTab = target.tab;
+	DiscoverTab expectedTab = DiscoverDropTargetTab(item, _AudiobooksEnabled());
 	if (expectedTab < 0 || targetTab != expectedTab)
 		return;
 
-	std::string targetUri = message->GetString("targetUri", "");
 	if (targetTab == TAB_PLAYLISTS) {
-		if (!targetUri.empty())
-			_HandlePlaylistDrop(uri, targetUri,
-				message->GetBool("targetWritable", false));
+		if (!target.uri.empty())
+			_HandlePlaylistDrop(item.uri, target.uri, target.writable);
 		return;
 	}
 
-	_HandleLibraryDrop(uri);
-}
-
-
-int32
-DiscoverWindow::_DropTargetTabForUri(const std::string& uri) const
-{
-	const char* targetId = SpotifyLibraryTargetId(SpotifyItemKindForUri(uri));
-	if (!targetId || !targetId[0])
-		return -1;
-	for (int32 i = 0; i < TAB_COUNT; i++) {
-		if (strcmp(kTabDefs[i].id, targetId) == 0) {
-			if (i == TAB_AUDIOBOOKS && !_AudiobooksEnabled())
-				return -1;
-			return i;
-		}
-	}
-	return -1;
+	_HandleLibraryDrop(item.uri);
 }
 
 
@@ -2050,11 +1529,10 @@ DiscoverWindow::_SelectDropTargetTab(int32 logicalTab)
 	int32 selected = _LogicalTab(fTabView->Selection());
 	if (selected == logicalTab)
 		return true;
-	for (int32 visual = 0; visual < fTabView->CountTabs(); visual++) {
-		if (fTabMap[visual] == logicalTab) {
-			fTabView->Select(visual);
-			return true;
-		}
+	int32 visual = _VisualTabForLogical(logicalTab);
+	if (visual >= 0) {
+		fTabView->Select(visual);
+		return true;
 	}
 	return false;
 }
@@ -2063,13 +1541,7 @@ DiscoverWindow::_SelectDropTargetTab(int32 logicalTab)
 int32
 DiscoverWindow::_VisualTabForLogical(int32 logicalTab) const
 {
-	if (!fTabView)
-		return -1;
-	for (int32 visual = 0; visual < fTabView->CountTabs(); visual++) {
-		if (fTabMap[visual] == logicalTab)
-			return visual;
-	}
-	return -1;
+	return fTabView ? fTabLayout.VisualTab(logicalTab) : -1;
 }
 
 
@@ -2119,9 +1591,9 @@ DiscoverWindow::_ScheduleDropTabSwitch(int32 logicalTab)
 	fPendingDropTab = logicalTab;
 	if (DiscoverTabView* tabs = dynamic_cast<DiscoverTabView*>(fTabView))
 		tabs->SetPendingDropTarget(_VisualTabForLogical(logicalTab));
-	BMessage message(kMsgDropTabSwitch);
-	message.AddInt32("tab", logicalTab);
-	message.AddInt32("dragGeneration", dragGeneration);
+	BMessage message(MSG_DISCOVER_DROP_TAB_SWITCH);
+	message.AddInt32(MessageFields::Tab, logicalTab);
+	message.AddInt32(MessageFields::DragGeneration, dragGeneration);
 	fDropTabSwitchRunner = new BMessageRunner(BMessenger(this), &message,
 		kDropTabSwitchDelay, 1);
 }
@@ -2171,9 +1643,11 @@ DiscoverWindow::_ClearDropMarkers()
 void
 DiscoverWindow::_ApplyPlaylistDropResult(BMessage* message)
 {
-	if (message->GetBool("ok", false))
+	if (!_AcceptAsyncResult(*message))
+			return;
+	if (message->GetBool(MessageFields::Ok, false))
 		return;
-	const char* text = message->GetInt32("status", -1) == 403
+	const char* text = message->GetInt32(MessageFields::Status, -1) == 403
 		? B_TRANSLATE("This playlist cannot be modified.")
 		: B_TRANSLATE("Spotify could not add this item to the playlist.");
 	BAlert* alert = new BAlert("", text, B_TRANSLATE("OK"), nullptr, nullptr,
@@ -2183,166 +1657,85 @@ DiscoverWindow::_ApplyPlaylistDropResult(BMessage* message)
 
 
 void
-DiscoverWindow::_ApplyLibraryStatusResult(BMessage* message)
+DiscoverWindow::_ApplyLibraryCommand(BMessage* message)
 {
-	std::string uri = message->GetString("uri", "");
-	if (!message->GetBool("ok", false)) {
-		BAlert* alert = new BAlert("", B_TRANSLATE(
-			"Spotify could not check this item's library status."),
-			B_TRANSLATE("OK"), nullptr, nullptr, B_WIDTH_AS_USUAL,
-			B_WARNING_ALERT);
-		alert->Go();
+	if (!_AcceptDialogContext(*message))
 		return;
-	}
-	if (message->GetBool("saved", false)) {
-		_SelectLibraryTarget(uri);
-		PostLibraryChange("add", uri);
-		return;
-	}
-	App* app = dynamic_cast<App*>(be_app);
-	SpotifyApi* api = app ? app->GetApi() : nullptr;
-	if (!api)
-		return;
-	BMessenger self(this);
-	api->Library().SaveLibraryItems({uri}, [self, uri](bool ok,
-			const nlohmann::json&) {
-		BMessage result('dAdd');
-		result.AddString("uri", uri.c_str());
-		result.AddBool("ok", ok);
-		self.SendMessage(&result);
-	});
+	auto command = DiscoverMessages::ReadLibraryCommand(*message);
+	if (command)
+		_QueueLibraryWrite(*command);
 }
 
 
 void
-DiscoverWindow::_ApplyLibraryAddResult(BMessage* message)
+DiscoverWindow::_QueueLibraryWrite(const DiscoverLibraryWriteRequest& command)
 {
-	if (message->GetBool("ok", false)) {
-		std::string uri = message->GetString("uri", "");
-		_SelectLibraryTarget(uri);
-		PostLibraryChange("add", uri);
+	App* app = dynamic_cast<App*>(be_app);
+	if (!app || !app->GetApi())
+		return;
+	auto plan = fLibraryWrites.Queue(command.uri, command.kind,
+		command.selectTarget, _AudiobooksEnabled());
+	if (plan.dispatch)
+		_DispatchLibraryWrite(*plan.dispatch);
+}
+
+
+void
+DiscoverWindow::_DispatchLibraryWrite(const DiscoverLibraryWriteRequest& request)
+{
+	App* app = dynamic_cast<App*>(be_app);
+	SpotifyApi* api = app ? app->GetApi() : nullptr;
+	int32 tab = DiscoverLibraryChangeController::TargetTab(request.uri);
+	if (tab == TAB_NONE)
+		tab = TAB_PLAYLISTS;
+	auto token = fAsync.Begin(tab);
+	if (api) {
+		DiscoverLibraryRequests::Write(*api, request, token, BMessenger(this));
 	} else {
-		BAlert* alert = new BAlert("", B_TRANSLATE(
-			"Spotify could not add this item to your library."),
-			B_TRANSLATE("OK"), nullptr, nullptr, B_WIDTH_AS_USUAL,
-			B_WARNING_ALERT);
-		alert->Go();
+		BMessage failure = DiscoverMessages::OperationResult(
+			MSG_DISCOVER_LIBRARY_WRITE_RESULT, token, false, -1);
+		DiscoverMessages::AddLibraryWrite(failure, request);
+		PostMessage(&failure);
 	}
 }
 
 
 void
-DiscoverWindow::_SaveAlbumFromMessage(BMessage* message)
+DiscoverWindow::_ApplyLibraryWriteResult(BMessage* message)
 {
-	const char* uri = message->GetString("uri", "");
-	std::string savedUri = uri ? uri : "";
-	std::string albumId = SpotifyItemIdForUri(savedUri);
-	if (SpotifyItemKindForUri(savedUri) != kSpotifyItemAlbum
-			|| albumId.empty())
+	auto request = DiscoverMessages::ReadLibraryWrite(*message);
+	if (!request || !_AcceptAsyncResult(*message))
 		return;
-	App* app = (App*)be_app;
-	SpotifyApi* api = app->GetApi();
-	if (!api)
+	auto plan = fLibraryWrites.Complete(*request, message->GetBool(MessageFields::Ok, false),
+		message->GetBool(MessageFields::Saved, false));
+	if (!plan.accepted)
 		return;
-	api->Library().SaveAlbum(albumId, [savedUri](bool ok,
-			const nlohmann::json&) {
-		if (ok)
-			PostLibraryChange("add", savedUri);
-	});
-}
-
-
-void
-DiscoverWindow::_RemoveAlbumFromMessage(BMessage* message)
-{
-	const char* uri = message->GetString("uri", "");
-	std::string removedUri = uri ? uri : "";
-	std::string albumId = SpotifyItemIdForUri(removedUri);
-	if (SpotifyItemKindForUri(removedUri) != kSpotifyItemAlbum
-			|| albumId.empty())
-		return;
-	App* app = (App*)be_app;
-	SpotifyApi* api = app->GetApi();
-	if (!api)
-		return;
-	api->Library().RemoveSavedAlbum(albumId, [removedUri](bool ok,
-			const nlohmann::json&) {
-		if (ok)
-			PostLibraryChange("remove", removedUri);
-	});
-}
-
-
-void
-DiscoverWindow::_RemoveFollowedItem(BMessage* message)
-{
-	std::string uri = message->GetString("uri", "");
-	SpotifyItemKind kind = SpotifyItemKindForUri(uri);
-	App* app = dynamic_cast<App*>(be_app);
-	SpotifyApi* api = app ? app->GetApi() : nullptr;
-	if (!api || uri.empty())
-		return;
-	BMessenger self(this);
-	auto done = [self, uri](bool ok, const nlohmann::json&) {
-		BMessage result('rmIR');
-		result.AddBool("ok", ok);
-		result.AddString("uri", uri.c_str());
-		self.SendMessage(&result);
-	};
-	std::string id = SpotifyItemIdForUri(uri);
-	if (kind == kSpotifyItemShow)
-		api->Library().UnfollowShow(id, done);
-	else if (kind == kSpotifyItemArtist)
-		api->Library().UnfollowArtist(id, done);
-	else if (kind == kSpotifyItemAudiobook)
-		api->Library().RemoveSavedAudiobook(id, done);
-}
-
-
-void
-DiscoverWindow::_ApplyRemoveFollowedItemResult(BMessage* message)
-{
-	if (message->GetBool("ok", false)) {
-		PostLibraryChange("remove", message->GetString("uri", ""));
-	} else {
-		BAlert* alert = new BAlert("", B_TRANSLATE(
-			"Spotify could not remove this item from your library."),
-			B_TRANSLATE("OK"), nullptr, nullptr, B_WIDTH_AS_USUAL,
-			B_WARNING_ALERT);
-		alert->Go();
+	if (plan.confirmed) {
+		BMessage changed = DiscoverMessages::LibraryChanged(*plan.confirmed, fAsync.Context().accountId);
+		be_app->PostMessage(&changed);
+	}
+	if (plan.selectTarget)
+		_SelectLibraryTarget(request->uri);
+	if (plan.dispatch)
+		_DispatchLibraryWrite(*plan.dispatch);
+	if (plan.failed) {
+		const char* text = request->kind == DiscoverLibraryWriteKind::EnsureSaved
+			? B_TRANSLATE("Spotify could not check this item's library status.")
+			: request->kind == DiscoverLibraryWriteKind::Remove
+			? B_TRANSLATE("Spotify could not remove this item from your library.")
+			: B_TRANSLATE("Spotify could not add this item to your library.");
+		(new BAlert("", text, B_TRANSLATE("OK"), nullptr, nullptr,
+			B_WIDTH_AS_USUAL, B_WARNING_ALERT))->Go();
 	}
 }
-
-
-void
-DiscoverWindow::_RemovePlayableFromLibrary(BMessage* message)
-{
-	const char* uri = message->GetString("trackUri", "");
-	std::string removedUri = uri ? uri : "";
-	SpotifyItemKind kind = SpotifyItemKindForUri(removedUri);
-	if (!SpotifyItemIsPlayable(kind))
-		return;
-	App* app = dynamic_cast<App*>(be_app);
-	SpotifyApi* api = app ? app->GetApi() : nullptr;
-	if (!api)
-		return;
-	api->Library().RemoveLibraryItems({removedUri}, [removedUri](bool ok,
-			const nlohmann::json&) {
-		if (!ok)
-			return;
-		PostLibraryChange("remove", removedUri);
-	});
-}
-
 
 void
 DiscoverWindow::_PlayTrackFromMessage(BMessage* message)
 {
-	const char* trackUri = message->GetString("trackUri", "");
+	const char* trackUri = message->GetString(MessageFields::TrackUri, "");
 	if (!*trackUri)
 		return;
-	BMessage play('play');
-	play.AddString("uri", trackUri);
+	BMessage play = MessageContracts::MakePlayCommand({trackUri});
 	be_app->PostMessage(&play);
 }
 
@@ -2351,6 +1744,7 @@ void
 DiscoverWindow::_ShowNewPlaylistDialog()
 {
 	BMessage confirm('plNc');
+	DiscoverMessages::AddContext(confirm, fAsync.Context());
 	TextInputDialog* dialog = new TextInputDialog(
 		B_TRANSLATE("New Playlist"), B_TRANSLATE("Name:"), "",
 		BMessenger(this), confirm);
@@ -2361,42 +1755,23 @@ DiscoverWindow::_ShowNewPlaylistDialog()
 void
 DiscoverWindow::_CreatePlaylist(BMessage* message)
 {
-	const char* name = message->GetString("name", "");
-	if (!*name)
+	if (!_AcceptDialogContext(*message))
 		return;
-	App* app = (App*)be_app;
-	SpotifyApi* api = app->GetApi();
-	if (!api)
+	std::string name = message->GetString(MessageFields::Name, "");
+	App* app = dynamic_cast<App*>(be_app);
+	SpotifyApi* api = app ? app->GetApi() : nullptr;
+	if (name.empty() || !api)
 		return;
-	BMessenger self(this);
-	std::string requestedName = name;
-	api->Playlists().CreatePlaylist(requestedName,
-		[self, requestedName](bool ok, const nlohmann::json& data) {
-		BMessage result('plCr');
-		result.AddBool("ok", ok);
-		nlohmann::json created = MutationResponseBody(data);
-		if (ok && created.is_object()) {
-			std::string id = JsonString(created, "id");
-			std::string uri = JsonString(created, "uri");
-			std::string createdName = JsonString(created, "name",
-				requestedName.c_str());
-			std::string owner = "Spotify";
-			if (created.contains("owner") && created["owner"].is_object())
-				owner = JsonString(created["owner"], "display_name", "Spotify");
-			result.AddString("id", id.c_str());
-			result.AddString("uri", uri.c_str());
-			result.AddString("name", createdName.c_str());
-			result.AddString("owner", owner.c_str());
-		}
-		self.SendMessage(&result);
-	});
+	DiscoverPlaylistRequests::Create(*api, name, fAsync.Begin(TAB_PLAYLISTS), BMessenger(this));
 }
 
 
 void
 DiscoverWindow::_ApplyPlaylistCreateResult(BMessage* message)
 {
-	if (!message->GetBool("ok", false)) {
+	if (!_AcceptAsyncResult(*message))
+		return;
+	if (!message->GetBool(MessageFields::Ok, false)) {
 		BAlert* alert = new BAlert("", B_TRANSLATE(
 			"Spotify could not create the playlist."),
 			B_TRANSLATE("OK"), nullptr, nullptr, B_WIDTH_AS_USUAL,
@@ -2404,20 +1779,24 @@ DiscoverWindow::_ApplyPlaylistCreateResult(BMessage* message)
 		alert->Go();
 		return;
 	}
-	std::string id = message->GetString("id", "");
-	if (id.empty()) {
-		be_app->PostMessage(MSG_PLAYLISTS_CHANGED);
-		return;
+	std::string id = message->GetString(MessageFields::Id, "");
+	DiscoverPlaylistChange change;
+	if (!id.empty()) {
+		change = {DiscoverChangeOperation::Add, PlaylistUri(id),
+			message->GetString(MessageFields::Name, "Unknown"),
+			message->GetString(MessageFields::Owner, "Spotify"), true, true};
 	}
-	PostPlaylistChange("add", id, message->GetString("name", "Unknown"),
-		message->GetString("owner", "Spotify"), true, true);
+	BMessage changed = DiscoverMessages::PlaylistChanged(change, fAsync.Context().accountId);
+	be_app->PostMessage(&changed);
 }
 
 
 void
 DiscoverWindow::_ShowRenamePlaylistDialog(BMessage* message)
 {
-	const char* id = message->GetString("id", "");
+	if (!_AcceptDialogContext(*message))
+		return;
+	const char* id = message->GetString(MessageFields::Id, "");
 	if (!*id)
 		return;
 	std::string currentName;
@@ -2432,7 +1811,8 @@ DiscoverWindow::_ShowRenamePlaylistDialog(BMessage* message)
 		}
 	}
 	BMessage confirm('plRc');
-	confirm.AddString("id", id);
+	DiscoverMessages::AddContext(confirm, fAsync.Context());
+	confirm.AddString(MessageFields::Id, id);
 	TextInputDialog* dialog = new TextInputDialog(
 		B_TRANSLATE("Rename Playlist"), B_TRANSLATE("Name:"),
 		currentName.c_str(), BMessenger(this), confirm);
@@ -2443,55 +1823,39 @@ DiscoverWindow::_ShowRenamePlaylistDialog(BMessage* message)
 void
 DiscoverWindow::_RenamePlaylist(BMessage* message)
 {
-	const char* name = message->GetString("name", "");
-	const char* id = message->GetString("id", "");
-	if (!*name || !*id)
+	if (!_AcceptDialogContext(*message))
 		return;
-	App* app = (App*)be_app;
-	SpotifyApi* api = app->GetApi();
-	if (!api)
-		return;
-	BMessenger self(this);
-	std::string sid = id;
-	std::string newName = name;
-	std::string oldName;
-	DiscoverRow* row = _FindPlaylistRow(PlaylistUri(sid));
-	if (row && !row->fTitles.empty()) {
-		oldName = row->fTitles[0];
-		_UpdatePlaylistRow(row, newName, "", row->fWritable, row->fOwned);
-	}
-	api->Playlists().RenamePlaylist(sid, newName,
-		[self, sid, oldName, newName](bool ok, const nlohmann::json&) {
-		BMessage result('plRr');
-		result.AddBool("ok", ok);
-		result.AddString("id", sid.c_str());
-		result.AddString("oldName", oldName.c_str());
-		result.AddString("newName", newName.c_str());
-		self.SendMessage(&result);
-	});
+	_QueuePlaylistMutation(DiscoverChangeOperation::Rename,
+		message->GetString(MessageFields::Id, ""), message->GetString(MessageFields::Name, ""));
 }
 
 
 void
-DiscoverWindow::_ApplyPlaylistRenameResult(BMessage* message)
+DiscoverWindow::_ApplyPlaylistMutationResult(BMessage* message)
 {
-	std::string id = message->GetString("id", "");
-	std::string oldName = message->GetString("oldName", "");
-	std::string newName = message->GetString("newName", "");
-	if (message->GetBool("ok", false)) {
-		PostPlaylistChange("rename", id, newName);
-	} else {
-		DiscoverRow* row = _FindPlaylistRow(PlaylistUri(id));
-		if (row && !row->fTitles.empty()
-				&& row->fTitles[0] == newName && !oldName.empty()) {
-			_UpdatePlaylistRow(row, oldName, "", row->fWritable,
-				row->fOwned);
-		}
-		BAlert* alert = new BAlert("", B_TRANSLATE(
-			"Spotify could not rename the playlist."),
-			B_TRANSLATE("OK"), nullptr, nullptr, B_WIDTH_AS_USUAL,
-			B_WARNING_ALERT);
-		alert->Go();
+	if (!_AcceptAsyncResult(*message))
+		return;
+	std::string id = message->GetString(MessageFields::Id, "");
+	auto plan = fPlaylistMutations.CompleteMutation(id,
+		message->GetInt32(MessageFields::Generation, -1), message->GetBool(MessageFields::Ok, false));
+	if (!plan.accepted)
+		return;
+	_RenderPlaylistMutation(id, plan);
+	if (plan.confirmed) {
+		BMessage changed = DiscoverMessages::PlaylistChanged(*plan.confirmed, fAsync.Context().accountId);
+		be_app->PostMessage(&changed);
+	}
+	if (plan.dispatch)
+		_DispatchPlaylistMutation(*plan.dispatch);
+	else
+		ReloadPlaylists();
+	_ScheduleCacheSave();
+	if (plan.failed) {
+		const char* text = DiscoverOperation(message->GetString(MessageFields::Operation, ""))
+			== DiscoverChangeOperation::Rename ? B_TRANSLATE("Spotify could not rename the playlist.")
+			: B_TRANSLATE("Spotify could not remove the playlist.");
+		(new BAlert("", text, B_TRANSLATE("OK"), nullptr, nullptr,
+			B_WIDTH_AS_USUAL, B_WARNING_ALERT))->Go();
 	}
 }
 
@@ -2499,8 +1863,10 @@ DiscoverWindow::_ApplyPlaylistRenameResult(BMessage* message)
 void
 DiscoverWindow::_DeletePlaylist(BMessage* message)
 {
-	const char* id = message->GetString("id", "");
-	bool owned = message->GetBool("owned", false);
+	if (!_AcceptDialogContext(*message))
+		return;
+	const char* id = message->GetString(MessageFields::Id, "");
+	bool owned = message->GetBool(MessageFields::Owned, false);
 	if (!*id)
 		return;
 	const char* label = owned
@@ -2512,82 +1878,35 @@ DiscoverWindow::_DeletePlaylist(BMessage* message)
 		nullptr, B_WIDTH_AS_USUAL, B_WARNING_ALERT);
 	if (alert->Go() != 1)
 		return;
-	App* app = (App*)be_app;
-	SpotifyApi* api = app->GetApi();
-	if (!api)
+	_EnsureAsyncContext();
+	if (!_AcceptDialogContext(*message))
 		return;
-	BMessenger self(this);
-	std::string sid = id;
-	std::string uri = PlaylistUri(sid);
-	if (fPendingPlaylistRemovals.find(sid) != fPendingPlaylistRemovals.end())
-		return;
-	DiscoverRow* row = _FindPlaylistRow(uri);
-	if (row) {
-		PendingPlaylistRemoval pending = {
-			row, fLists[TAB_PLAYLISTS]->IndexOf(row),
-			fLists[TAB_PLAYLISTS]->CurrentSelection() == row
-		};
-		fLists[TAB_PLAYLISTS]->RemoveRow(row);
-		fPendingPlaylistRemovals[sid] = pending;
-	}
-	api->Playlists().UnfollowPlaylist(sid, [self, sid](bool ok,
-			const nlohmann::json&) {
-		BMessage result('plDr');
-		result.AddBool("ok", ok);
-		result.AddString("id", sid.c_str());
-		self.SendMessage(&result);
-	});
+	_QueuePlaylistMutation(DiscoverChangeOperation::Remove, id);
 }
-
-
-void
-DiscoverWindow::_ApplyPlaylistDeleteResult(BMessage* message)
-{
-	std::string id = message->GetString("id", "");
-	auto pending = fPendingPlaylistRemovals.find(id);
-	if (message->GetBool("ok", false)) {
-		if (pending != fPendingPlaylistRemovals.end()) {
-			delete pending->second.row;
-			fPendingPlaylistRemovals.erase(pending);
-		}
-		PostPlaylistChange("remove", id);
-	} else {
-		if (pending != fPendingPlaylistRemovals.end()) {
-			PendingPlaylistRemoval restore = pending->second;
-			fPendingPlaylistRemovals.erase(pending);
-			fLists[TAB_PLAYLISTS]->AddRow(restore.row, restore.index);
-			if (restore.selected)
-				fLists[TAB_PLAYLISTS]->AddToSelection(restore.row);
-		}
-		BAlert* alert = new BAlert("", B_TRANSLATE(
-			"Spotify could not remove the playlist."),
-			B_TRANSLATE("OK"), nullptr, nullptr, B_WIDTH_AS_USUAL,
-			B_WARNING_ALERT);
-		alert->Go();
-	}
-}
-
 
 void
 DiscoverWindow::_ApplyPlaylistsChanged(BMessage* message)
 {
+	if (!MessageContracts::MatchesAccount(*message, fAsync.Context().accountId))
+		return;
 	const char* operation = nullptr;
-	if (message->FindString("operation", &operation) == B_OK)
+	if (message->FindString(MessageFields::Operation, &operation) == B_OK)
 		_ApplyPlaylistChange(message);
 	else
-		ReloadPlaylists();
+		_ReloadTab(TAB_PLAYLISTS);
 }
 
 
 void
 DiscoverWindow::_ApplyLibraryChanged(BMessage* message)
 {
+	if (!MessageContracts::MatchesAccount(*message, fAsync.Context().accountId))
+		return;
 	const char* operation = nullptr;
 	const char* uri = nullptr;
-	if (message->FindString("operation", &operation) == B_OK
-			&& message->FindString("uri", &uri) == B_OK) {
-		fKnownLibraryStates[uri] = strcmp(operation, "add") == 0;
-		fLibraryStateGenerations[uri]++;
+	if (message->FindString(MessageFields::Operation, &operation) == B_OK
+			&& message->FindString(MessageFields::Uri, &uri) == B_OK) {
+		fLibrary.ObserveMembership({DiscoverOperation(operation), uri});
 		_ApplyLibraryChange(message);
 	} else {
 		int32 tab = _LogicalTab(fTabView ? fTabView->Selection() : -1);
@@ -2595,7 +1914,7 @@ DiscoverWindow::_ApplyLibraryChanged(BMessage* message)
 			ReloadPlaylists();
 		else if (tab >= 0) {
 			_InvalidateTabCache(tab);
-			fLoaded[tab] = false;
+			fCache.MarkUnloaded(tab);
 			_LoadTab(tab);
 		}
 	}
@@ -2606,7 +1925,7 @@ void
 DiscoverWindow::_ReloadTabFromMessage(BMessage* message)
 {
 	int32 tab = -1;
-	if (message->FindInt32("tab", &tab) == B_OK)
+	if (message->FindInt32(MessageFields::Tab, &tab) == B_OK)
 		_ReloadTab(tab);
 }
 
@@ -2626,9 +1945,9 @@ DiscoverWindow::_InitMenu()
 
 	BMenu* viewMenu = new BMenu(B_TRANSLATE("View"));
 	for (int i = 0; i < TAB_COUNT; i++) {
-		BMessage* msg = new BMessage('togT');
-		msg->AddInt32("tab", i);
-		fTabMenuItems[i] = new BMenuItem(B_TRANSLATE(kTabDefs[i].label), msg);
+		BMessage* msg = new BMessage(MSG_DISCOVER_TAB_TOGGLED);
+		msg->AddInt32(MessageFields::Tab, i);
+		fTabMenuItems[i] = new BMenuItem(B_TRANSLATE(kTabLabels[i]), msg);
 		fTabMenuItems[i]->SetMarked(fTabVisible[i]);
 		if (i == TAB_AUDIOBOOKS)
 			fTabMenuItems[i]->SetEnabled(_AudiobooksEnabled());
@@ -2636,7 +1955,7 @@ DiscoverWindow::_InitMenu()
 	}
 	viewMenu->AddSeparatorItem();
 	viewMenu->AddItem(new BMenuItem(B_TRANSLATE("Reset Tab Order"),
-		new BMessage('tRst')));
+		new BMessage(MSG_DISCOVER_TAB_ORDER_RESET)));
 	fMenuBar->AddItem(viewMenu);
 }
 
@@ -2659,279 +1978,111 @@ DiscoverWindow::_InitLayout()
 	SetSizeLimits(300, 100000, 200, 100000);
 }
 
-static void
-AddDiscoverCacheMessageFields(BMessage& message, int32 tab, int32 generation,
-	const std::string& accountId, bool available, bool first, bool last)
-{
-	message.AddInt32("tab", tab);
-	message.AddInt32("cols", (int32)kTabCols[tab].size());
-	message.AddInt32("cache_generation", generation);
-	message.AddString("account_id", accountId.c_str());
-	message.AddBool("from_cache", true);
-	message.AddBool("cache_available", available);
-	message.AddBool("cache_first", first);
-	message.AddBool("cache_last", last);
-}
-
-static void
-SendDiscoverCacheUnavailable(BMessenger self, int32 tab, int32 generation,
-	const std::string& accountId)
-{
-	BMessage response(kMsgCacheLoaded);
-	AddDiscoverCacheMessageFields(response, tab, generation, accountId, false,
-		true, true);
-	self.SendMessage(&response);
-}
-
-static bool
-IsReadableDiscoverCache(const nlohmann::json& cache,
-	const std::string& accountId)
-{
-	return cache.is_object()
-		&& cache.value("version", 0) == kDiscoverCacheVersion
-		&& cache.value("account_id", "") == accountId
-		&& cache.contains("tabs") && cache["tabs"].is_object();
-}
-
-static std::vector<std::string>
-DiscoverCacheAudiobookIds(const nlohmann::json& cache)
-{
-	std::vector<std::string> audiobookIds;
-	if (!cache.contains("audiobook_ids")
-			|| !cache["audiobook_ids"].is_array()) {
-		return audiobookIds;
-	}
-	for (const auto& id : cache["audiobook_ids"]) {
-		if (id.is_string() && !id.get<std::string>().empty())
-			audiobookIds.push_back(id.get<std::string>());
-	}
-	return audiobookIds;
-}
-
-static bool
-CachedDiscoverRowArraysMatch(int32 tab, const nlohmann::json& row)
-{
-	if (!row.is_object() || !row.contains("values")
-			|| !row.contains("uris") || !row.contains("titles")
-			|| !row["values"].is_array() || !row["uris"].is_array()
-			|| !row["titles"].is_array()
-			|| row["values"].size() != kTabCols[tab].size()
-			|| row["uris"].size() != kTabCols[tab].size()
-			|| row["titles"].size() != kTabCols[tab].size()) {
-		return false;
-	}
-	return true;
-}
-
-static bool
-CachedDiscoverRowPrimaryUriMatches(int32 tab, const nlohmann::json& row)
-{
-	return !row["uris"].empty() && row["uris"][0].is_string()
-		&& PrimaryUriMatchesTab(tab, row["uris"][0].get<std::string>());
-}
-
-static bool
-CachedDiscoverRowColumnsAreStrings(int32 tab, const nlohmann::json& row)
-{
-	for (size_t column = 0; column < kTabCols[tab].size(); column++) {
-		if (!row["values"][column].is_string()
-				|| !row["uris"][column].is_string()
-				|| !row["titles"][column].is_string()) {
-			return false;
-		}
-	}
-	return true;
-}
-
-static bool
-IsValidCachedDiscoverRow(int32 tab, const nlohmann::json& row)
-{
-	return CachedDiscoverRowArraysMatch(tab, row)
-		&& CachedDiscoverRowPrimaryUriMatches(tab, row)
-		&& CachedDiscoverRowColumnsAreStrings(tab, row);
-}
-
-static RowData
-CachedDiscoverRowFromJson(const nlohmann::json& row)
-{
-	RowData cached;
-	for (const auto& value : row["values"])
-		cached.vals.push_back(value.get<std::string>());
-	for (const auto& value : row["uris"])
-		cached.uris.push_back(value.get<std::string>());
-	for (const auto& value : row["titles"])
-		cached.ttls.push_back(value.get<std::string>());
-	cached.writable = !row.contains("writable")
-		|| !row["writable"].is_boolean() || row["writable"].get<bool>();
-	cached.owned = row.contains("owned") && row["owned"].is_boolean()
-		&& row["owned"].get<bool>();
-	return cached;
-}
-
-static std::vector<RowData>
-CachedDiscoverRowsFromJson(int32 tab, const nlohmann::json& rows)
-{
-	std::vector<RowData> cachedRows;
-	for (const auto& row : rows) {
-		if ((int32)cachedRows.size() >= kMaxDiscoverCachedRowsPerTab)
-			break;
-		if (IsValidCachedDiscoverRow(tab, row))
-			cachedRows.push_back(CachedDiscoverRowFromJson(row));
-	}
-	return cachedRows;
-}
-
-static void
-AddDiscoverCacheRows(BMessage& message,
-	const std::vector<RowData>& cachedRows, size_t offset, size_t end)
-{
-	for (size_t index = offset; index < end; index++) {
-		const RowData& row = cachedRows[index];
-		for (const std::string& value : row.vals)
-			message.AddString("v", value.c_str());
-		for (const std::string& value : row.uris)
-			message.AddString("u", value.c_str());
-		for (const std::string& value : row.ttls)
-			message.AddString("t", value.c_str());
-		message.AddBool("writable", row.writable);
-		message.AddBool("owned", row.owned);
-	}
-}
-
-static void
-AddDiscoverAudiobookSnapshot(BMessage& message,
-	const std::vector<std::string>& audiobookIds)
-{
-	message.AddBool("audiobook_ids_snapshot", true);
-	for (const std::string& id : audiobookIds)
-		message.AddString("audiobook_id", id.c_str());
-}
-
-static bool
-SendDiscoverCacheBatches(BMessenger self, int32 tab, int32 generation,
-	const std::string& accountId, const std::vector<RowData>& cachedRows,
-	const std::vector<std::string>& audiobookIds, bool hasAudiobookIds)
-{
-	size_t offset = 0;
-	bool firstBatch = true;
-	do {
-		size_t end = std::min(offset + (size_t)kDiscoverCacheBatchRows,
-			cachedRows.size());
-		BMessage rows(kMsgCacheLoaded);
-		AddDiscoverCacheMessageFields(rows, tab, generation, accountId, true,
-			firstBatch, end >= cachedRows.size());
-		if (firstBatch && hasAudiobookIds)
-			AddDiscoverAudiobookSnapshot(rows, audiobookIds);
-		AddDiscoverCacheRows(rows, cachedRows, offset, end);
-		if (self.SendMessage(&rows) != B_OK)
-			return false;
-		firstBatch = false;
-		offset = end;
-	} while (offset < cachedRows.size());
-	return true;
-}
-
-static void
-LoadPersistentDiscoverCache(BMessenger self, const std::string& path,
-	const std::string& accountId, int32 generation, int32 tab)
-{
-	nlohmann::json cache;
-	try {
-		if (!ReadDiscoverCacheFile(path, cache)
-				|| !IsReadableDiscoverCache(cache, accountId)) {
-			SendDiscoverCacheUnavailable(self, tab, generation, accountId);
-			return;
-		}
-		auto found = cache["tabs"].find(kTabDefs[tab].id);
-		if (found == cache["tabs"].end() || !found->is_array()) {
-			SendDiscoverCacheUnavailable(self, tab, generation, accountId);
-			return;
-		}
-		std::vector<RowData> cachedRows = CachedDiscoverRowsFromJson(tab,
-			*found);
-		SendDiscoverCacheBatches(self, tab, generation, accountId, cachedRows,
-			DiscoverCacheAudiobookIds(cache), cache.contains("audiobook_ids"));
-	} catch (...) {
-		SendDiscoverCacheUnavailable(self, tab, generation, accountId);
-	}
-}
-
-
 void
 DiscoverWindow::_LoadPersistentCache(int32 tab)
 {
 	if (tab < 0 || tab >= TAB_COUNT || !fLists[tab]
-			|| !_IsTabEffectivelyVisible(tab) || fCacheAccountId.empty()
-			|| fCacheLoadPending[tab] || fCacheBacked[tab]
-			|| fFreshSnapshot[tab])
+			|| !_IsTabEffectivelyVisible(tab) || !fCache.CanRead(tab))
 		return;
-	std::string accountId = fCacheAccountId;
-	std::string path = DiscoverCachePath(accountId, false);
-	if (path.empty())
-		return;
-	fCacheLoadPending[tab] = true;
-	int32 generation = ++fCacheLoadGeneration[tab];
-	BMessenger self(this);
-	std::thread([self, path, accountId, generation, tab]() {
-		LoadPersistentDiscoverCache(self, path, accountId, generation, tab);
-	}).detach();
+	DiscoverCacheRepository::LoadAsync(BMessenger(this), fCache.BeginRead(tab));
 }
 
 
 void
 DiscoverWindow::_ScheduleCacheSave()
 {
-	if (fCacheAccountId.empty()) {
+	if (fCache.AccountId().empty()) {
 		HaifySettings settings = SettingsController::Load();
 		if (settings.spotifyAccountId.empty())
 			return;
-		fCacheAccountId = settings.spotifyAccountId;
+		fCache.SetAccountIfEmpty(settings.spotifyAccountId);
 	}
 	delete fCacheSaveRunner;
-	BMessage save(kMsgSaveCache);
+	BMessage save(MSG_DISCOVER_CACHE_SAVE);
 	fCacheSaveRunner = new BMessageRunner(BMessenger(this), &save,
 		750000LL, 1);
 }
 
 
+static DiscoverRowData
+CapturePlaylistRow(DiscoverRow* row)
+{
+	DiscoverRowData data;
+	for (int32 column = 0; column < 2; column++) {
+		BStringField* field = dynamic_cast<BStringField*>(row->GetField(column));
+		data.vals.emplace_back(field ? field->String() : "");
+		data.uris.push_back(column < (int32)row->fUris.size() ? row->fUris[column] : "");
+		data.ttls.push_back(column < (int32)row->fTitles.size() ? row->fTitles[column] : "");
+	}
+	data.writable = row->fWritable;
+	data.owned = row->fOwned;
+	return data;
+}
+
+static std::vector<DiscoverRowData>
+CaptureDiscoverRows(BColumnListView* list, int32 tab)
+{
+	std::vector<DiscoverRowData> rows;
+	for (int32 index = 0; index < list->CountRows(); index++) {
+		DiscoverRow* row = dynamic_cast<DiscoverRow*>(list->RowAt(index));
+		size_t columns = kTabCols[tab].size();
+		if (!row || row->fUris.size() < columns)
+			continue;
+		DiscoverRowData data;
+		data.writable = row->fWritable;
+		data.owned = row->fOwned;
+		for (size_t column = 0; column < columns; column++) {
+			BStringField* field = dynamic_cast<BStringField*>(row->GetField((int32)column));
+			data.vals.emplace_back(field ? field->String() : "");
+			data.uris.push_back(row->fUris[column]);
+			data.ttls.push_back(column < row->fTitles.size() ? row->fTitles[column] : "");
+		}
+		rows.push_back(std::move(data));
+	}
+	return rows;
+}
+
 void
 DiscoverWindow::_WriteCacheNow()
 {
-	if (fCacheAccountId.empty())
+	if (fCache.AccountId().empty())
 		return;
-	std::string path = DiscoverCachePath(fCacheAccountId, true);
-	if (path.empty())
-		return;
-	WriteDiscoverCacheAsync(path, BuildDiscoverCachePayload(fCacheAccountId,
-		fAudiobookIds, fAudiobookIdsKnown, fLists, fCacheBacked,
-		fFreshSnapshot));
+	DiscoverCacheSnapshot snapshot;
+	snapshot.accountId = fCache.AccountId();
+	snapshot.savedAt = time(nullptr);
+	if (fLibrary.AudiobookIdsKnown())
+		snapshot.audiobookIds = fLibrary.AudiobookIds();
+	for (int32 tab = 0; tab < TAB_COUNT; tab++) {
+		if (fCache.State(tab).invalidated)
+			snapshot.invalidatedTabs.insert(tab);
+		if (tab == TAB_PLAYLISTS && !fPlaylistMutations.CanPersist())
+			continue;
+		if (fLists[tab] && fCache.ShouldPersist(tab))
+			snapshot.tabs[tab] = CaptureDiscoverRows(fLists[tab], tab);
+	}
+	DiscoverCacheRepository::WriteAsync(snapshot);
 }
 
 
 void
 DiscoverWindow::LoadData()
 {
+	_WriteCacheNow();
 	delete fCacheSaveRunner;
 	fCacheSaveRunner = nullptr;
-	HaifySettings settings = SettingsController::Load();
-	fCacheAccountId = settings.spotifyAccountId;
-	fPlaylistSyncGeneration++;
-	fKnownLibraryStates.clear();
-	fLibraryStateGenerations.clear();
-	fAudiobookIds.clear();
-	fAudiobookIdsKnown = false;
+	App* app = dynamic_cast<App*>(be_app);
+	SpotifyApi* api = app ? app->GetApi() : nullptr;
+	std::string account = api ? api->AccountId() : fCache.AccountId();
+	fAsync.Reset(account, _AudiobooksEnabled());
+	fCache.Reset(account);
+	fPlaylistMutations.Reset();
+	for (auto& pending : fPendingPlaylistRemovals)
+		delete pending.second.row;
+	fPendingPlaylistRemovals.clear();
+	fLibrary.Reset();
+	fLibraryWrites.Reset();
 	for (int i = 0; i < TAB_COUNT; i++) {
 		if (fLists[i]) fLists[i]->Clear();
-		fLoaded[i] = false;
-		fCacheBacked[i] = false;
-		fFreshSnapshot[i] = false;
-		fPageLoading[i] = false;
-		fPageHasMore[i] = false;
-		fPageOffset[i] = 0;
-		fPageCursor[i].clear();
-		fTabLoadGeneration[i]++;
-		fCacheLoadGeneration[i]++;
-		fCacheLoadPending[i] = false;
 	}
 	int32 logical = _LogicalTab(fTabView ? fTabView->Selection() : 0);
 	if (logical >= 0) {
@@ -2942,20 +2093,61 @@ DiscoverWindow::LoadData()
 
 
 void
+DiscoverWindow::_EnsureAsyncContext()
+{
+	App* app = dynamic_cast<App*>(be_app);
+	SpotifyApi* api = app ? app->GetApi() : nullptr;
+	std::string account = api ? api->AccountId() : fCache.AccountId();
+	if (!fAsync.Matches(account, _AudiobooksEnabled()))
+		LoadData();
+}
+
+
+bool
+DiscoverWindow::_AcceptAsyncResult(const BMessage& message)
+{
+	auto token = DiscoverMessages::ReadAsyncToken(message);
+	if (!token)
+		return false;
+	// Transport cancellation cannot undo an already submitted remote write.
+	bool mayHaveChanged = message.GetBool(MessageFields::Ok, false)
+		|| message.GetInt32(MessageFields::Status, 0) == -1;
+	auto completed = fAsync.Complete(*token, mayHaveChanged);
+	if (completed.disposition == DiscoverAsyncDisposition::Reconcile) {
+		for (int32 tab : DiscoverAffectedTabs(completed.tab))
+			_ReloadTab(tab);
+	}
+	return completed.disposition == DiscoverAsyncDisposition::Current;
+}
+
+
+bool
+DiscoverWindow::_AcceptDialogContext(const BMessage& message) const
+{
+	auto context = DiscoverMessages::ReadContext(message);
+	return context && fAsync.Accepts(*context);
+}
+
+
+void
 DiscoverWindow::_ReloadTab(int32 tab)
 {
 	if (tab < 0 || tab >= TAB_COUNT)
 		return;
-	if (!fTabVisible[tab] || !fLists[tab]) {
-		fLoaded[tab] = false;
+	_InvalidateTabCache(tab);
+	_ScheduleCacheSave();
+	if (!_IsTabEffectivelyVisible(tab) || !fLists[tab]) {
+		fCache.MarkUnloaded(tab);
 		return;
 	}
 	if (tab == TAB_PLAYLISTS) {
-		ReloadPlaylists();
+		if (fCache.State(tab).loaded)
+			ReloadPlaylists();
+		else
+			_LoadTab(tab);
 		return;
 	}
-	_InvalidateTabCache(tab);
-	fLoaded[tab] = false;
+	fCache.MarkUnloaded(tab);
 	_LoadTab(tab);
 }
 
@@ -2989,58 +2181,30 @@ DiscoverWindow::_ApplyLibraryChange(BMessage* message)
 {
 	if (!message)
 		return;
-	std::string operation = message->GetString("operation", "");
-	std::string uri = message->GetString("uri", "");
-	int32 tab = _LibraryChangeTabForUri(uri);
-	if (tab < 0 || !fLists[tab])
+	DiscoverLibraryChange change{DiscoverOperation(message->GetString(MessageFields::Operation, "")),
+		message->GetString(MessageFields::Uri, "")};
+	int32 tab = DiscoverLibraryChangeController::TargetTab(change.uri);
+	if (tab < 0)
 		return;
-	int32 generation = ++fLibraryChangeGenerations[uri];
-	bool refreshPodcasts = false;
-	if (tab == TAB_AUDIOBOOKS)
-		_UpdateAudiobookIdsForLibraryChange(operation, uri, refreshPodcasts);
-	if (operation == "remove")
-		_ApplyLibraryRemoval(tab, uri);
-	else if (operation == "add")
-		_ApplyLibraryAddition(tab, uri, generation);
-	_RefreshPodcastsAfterLibraryChange(refreshPodcasts);
-}
-
-
-int32
-DiscoverWindow::_LibraryChangeTabForUri(const std::string& uri) const
-{
-	switch (SpotifyItemKindForUri(uri)) {
-		case kSpotifyItemAlbum:
-			return TAB_SAVED_ALBUMS;
-		case kSpotifyItemShow:
-			return TAB_PODCASTS;
-		case kSpotifyItemArtist:
-			return TAB_FOLLOWED_ARTISTS;
-		case kSpotifyItemEpisode:
-			return TAB_SAVED_EPISODES;
-		case kSpotifyItemAudiobook:
-			return TAB_AUDIOBOOKS;
-		default:
-			return -1;
-	}
-}
-
-
-void
-DiscoverWindow::_UpdateAudiobookIdsForLibraryChange(
-	const std::string& operation, const std::string& uri, bool& refreshPodcasts)
-{
-	std::string id = SpotifyItemIdForUri(uri);
-	if (id.empty())
+	auto plan = fLibrary.ApplyChange(change, fCache.State(tab).loaded,
+		_FindRow(tab, change.uri) != nullptr, fCache.State(TAB_PODCASTS).loaded);
+	if (plan.request.tab == TAB_NONE)
 		return;
-	fAudiobookIdsKnown = true;
-	if (operation == "add") {
-		fAudiobookIds.insert(id);
+	bool reload = fCache.State(tab).loaded;
+	_InvalidateTabCache(tab);
+	if (plan.removeRow)
+		_ApplyLibraryRemoval(tab, change.uri);
+	if (plan.resolveAddition)
+		_ResolveLibraryAddition(tab, change.uri, plan.request.generation);
+	if (plan.removePodcastDuplicates)
 		_RemoveAudiobookDuplicatesFromPodcasts();
-	} else if (operation == "remove") {
-		refreshPodcasts = fAudiobookIds.erase(id) > 0;
-	}
+	if (plan.invalidatePodcasts)
+		_InvalidateTabCache(TAB_PODCASTS);
 	_ScheduleCacheSave();
+	if (reload)
+		_ReloadTab(tab);
+	if (plan.refreshPodcasts)
+		_ReloadTab(TAB_PODCASTS);
 }
 
 
@@ -3053,53 +2217,30 @@ DiscoverWindow::_ApplyLibraryRemoval(int32 tab, const std::string& uri)
 		delete row;
 		_ScheduleCacheSave();
 	}
-	if (fLoaded[tab])
-		fLoadTime[tab] = system_time();
-}
-
-
-void
-DiscoverWindow::_ApplyLibraryAddition(int32 tab, const std::string& uri,
-	int32 generation)
-{
-	if (!fLoaded[tab] || _FindRow(tab, uri))
-		return;
-	// Resolve just the newly saved object. This preserves the current list,
-	// selection and scroll position instead of rebuilding the whole tab.
-	_ResolveLibraryAddition(tab, uri, generation);
-}
-
-
-void
-DiscoverWindow::_RefreshPodcastsAfterLibraryChange(bool refreshPodcasts)
-{
-	if (refreshPodcasts && fLoaded[TAB_PODCASTS]) {
-		_InvalidateTabCache(TAB_PODCASTS);
-		fLoaded[TAB_PODCASTS] = false;
-		_LoadTab(TAB_PODCASTS);
-	}
+	if (fCache.State(tab).loaded)
+		fCache.Touch(tab, system_time());
 }
 
 
 void
 DiscoverWindow::_ApplyAudiobookIdSnapshot(BMessage* message)
 {
-	if (!message)
+	if (!message || (message->GetBool(MessageFields::FromCache, false)
+			&& fLibrary.AudiobookIdsKnown()))
 		return;
 	int32 generation = -1;
-	if (message->FindInt32("load_generation", &generation) == B_OK
-			&& generation != fTabLoadGeneration[TAB_PODCASTS]) {
+	if (message->FindInt32(MessageFields::LoadGeneration, &generation) == B_OK
+			&& generation != fCache.State(TAB_PODCASTS).loadGeneration) {
 		return;
 	}
 	std::set<std::string> ids;
 	const char* value = nullptr;
 	for (int32 index = 0;
-			message->FindString("audiobook_id", index, &value) == B_OK; index++) {
+			message->FindString(MessageFields::AudiobookId, index, &value) == B_OK; index++) {
 		if (value && value[0])
 			ids.insert(value);
 	}
-	fAudiobookIds.swap(ids);
-	fAudiobookIdsKnown = true;
+	fLibrary.SetAudiobookSnapshot(std::move(ids));
 	_RemoveAudiobookDuplicatesFromPodcasts();
 	_ScheduleCacheSave();
 }
@@ -3117,8 +2258,7 @@ DiscoverWindow::_RemoveAudiobookDuplicatesFromPodcasts()
 		if (!row || row->fUris.empty())
 			continue;
 		std::string id = SpotifyItemIdForUri(row->fUris[0]);
-		if (SpotifyEffectiveItemKind(kSpotifyItemShow, id, fAudiobookIds)
-				!= kSpotifyItemAudiobook) {
+		if (!fLibrary.IsAudiobook(id)) {
 			continue;
 		}
 		list->RemoveRow(row);
@@ -3129,216 +2269,49 @@ DiscoverWindow::_RemoveAudiobookDuplicatesFromPodcasts()
 		_ScheduleCacheSave();
 }
 
-static bool
-BuildResolvedAlbumRow(const std::string& uri, const nlohmann::json& item,
-	const std::string& name, RowData& row)
-{
-	std::string artist = "Unknown";
-	std::string artistUri;
-	if (item.contains("artists") && item["artists"].is_array()
-			&& !item["artists"].empty() && item["artists"][0].is_object()) {
-		artist = JsonString(item["artists"][0], "name", "Unknown");
-		artistUri = JsonString(item["artists"][0], "uri");
-	}
-	row.vals = {name, artist};
-	row.uris = {uri, artistUri};
-	row.ttls = {name, artist};
-	return true;
-}
-
-static bool
-BuildResolvedPodcastRow(const std::string& uri, const nlohmann::json& item,
-	const std::string& name, RowData& row)
-{
-	row.vals = {name, JsonString(item, "publisher", "Unknown")};
-	row.uris = {uri, ""};
-	row.ttls = {name, ""};
-	return true;
-}
-
-static bool
-BuildResolvedArtistRow(const std::string& uri, const nlohmann::json& item,
-	const std::string& name, RowData& row)
-{
-	std::string genre = "Artist";
-	if (item.contains("genres") && item["genres"].is_array()
-			&& !item["genres"].empty() && item["genres"][0].is_string()) {
-		genre = item["genres"][0].get<std::string>();
-	}
-	row.vals = {name, genre};
-	row.uris = {uri, ""};
-	row.ttls = {name, ""};
-	return true;
-}
-
-static bool
-BuildResolvedEpisodeRow(const std::string& uri, const nlohmann::json& item,
-	const std::string& name, bool showProgress, RowData& row)
-{
-	if (name.empty())
-		return false;
-	std::string showName;
-	std::string showUri;
-	if (item.contains("show") && item["show"].is_object()) {
-		showName = JsonString(item["show"], "name");
-		std::string showId = JsonString(item["show"], "id");
-		showUri = showId.empty() ? JsonString(item["show"], "uri")
-			: SpotifyUriForItemKind(kSpotifyItemShow, showId);
-	}
-	std::string progress;
-	if (showProgress && item.contains("resume_point")
-			&& item["resume_point"].is_object()) {
-		const auto& resume = item["resume_point"];
-		progress = JsonBool(resume, "fully_played")
-			? B_TRANSLATE("Done")
-			: DurationText(JsonInt32(resume, "resume_position_ms"));
-	}
-	row.vals = {name, showName, JsonString(item, "release_date"),
-		DurationText(JsonInt32(item, "duration_ms")), progress};
-	row.uris = {uri, showUri, "", "", ""};
-	row.ttls = {name, showName, "", "", ""};
-	return true;
-}
-
-static bool
-BuildResolvedAudiobookRow(const std::string& uri, const nlohmann::json& item,
-	const std::string& name, RowData& row)
-{
-	std::string author;
-	if (item.contains("authors") && item["authors"].is_array()
-			&& !item["authors"].empty() && item["authors"][0].is_object()) {
-		author = JsonString(item["authors"][0], "name");
-	}
-	row.vals = {name, author};
-	row.uris = {uri, ""};
-	row.ttls = {name, ""};
-	return true;
-}
-
-static bool
-BuildResolvedLibraryRow(int32 tab, const std::string& uri,
-	const nlohmann::json& item, bool showProgress, RowData& row)
-{
-	std::string name = JsonString(item, "name");
-	if (tab != TAB_SAVED_EPISODES && name.empty())
-		name = "Unknown";
-	if (tab == TAB_SAVED_ALBUMS)
-		return BuildResolvedAlbumRow(uri, item, name, row);
-	if (tab == TAB_PODCASTS)
-		return BuildResolvedPodcastRow(uri, item, name, row);
-	if (tab == TAB_FOLLOWED_ARTISTS)
-		return BuildResolvedArtistRow(uri, item, name, row);
-	if (tab == TAB_SAVED_EPISODES)
-		return BuildResolvedEpisodeRow(uri, item, name, showProgress, row);
-	if (tab == TAB_AUDIOBOOKS)
-		return BuildResolvedAudiobookRow(uri, item, name, row);
-	return false;
-}
-
-static void
-AddResolvedLibraryRowToMessage(BMessage& result, const RowData& row)
-{
-	for (const std::string& value : row.vals)
-		result.AddString("v", value.c_str());
-	for (const std::string& value : row.uris)
-		result.AddString("u", value.c_str());
-	for (const std::string& value : row.ttls)
-		result.AddString("t", value.c_str());
-}
-
-
 void
-DiscoverWindow::_ResolveLibraryAddition(int32 tab, const std::string& uri,
-	int32 generation)
+DiscoverWindow::_ResolveLibraryAddition(int32 tab, const std::string& uri, int32 generation)
 {
 	App* app = dynamic_cast<App*>(be_app);
 	SpotifyApi* api = app ? app->GetApi() : nullptr;
-	if (!api || uri.empty())
+	if (!api)
 		return;
-
-	size_t separator = uri.rfind(':');
-	if (separator == std::string::npos || separator + 1 >= uri.size())
-		return;
-	std::string id = uri.substr(separator + 1);
-	BMessenger self(this);
-	HaifySettings accountSettings = SettingsController::Load();
-	bool showProgress = accountSettings.grantedScopes.find(
-		"user-read-playback-position") != std::string::npos;
-	JsonCallback done = [self, tab, uri, generation, showProgress](bool ok,
-			const nlohmann::json& item) {
-		BMessage result('lAdd');
-		result.AddInt32("tab", tab);
-		result.AddInt32("generation", generation);
-		result.AddString("uri", uri.c_str());
-		result.AddBool("ok", ok && item.is_object());
-		if (!ok || !item.is_object()) {
-			self.SendMessage(&result);
-			return;
-		}
-
-		RowData row;
-		if (!BuildResolvedLibraryRow(tab, uri, item, showProgress, row))
-			result.ReplaceBool("ok", false);
-		else
-			AddResolvedLibraryRowToMessage(result, row);
-		self.SendMessage(&result);
-	};
-
-	if (tab == TAB_SAVED_ALBUMS)
-		api->Content().GetAlbum(id, done);
-	else if (tab == TAB_PODCASTS)
-		api->Content().GetShow(id, done);
-	else if (tab == TAB_FOLLOWED_ARTISTS)
-		api->Artists().GetArtist(id, done);
-	else if (tab == TAB_SAVED_EPISODES)
-		api->Content().GetEpisode(id, done);
-	else if (tab == TAB_AUDIOBOOKS)
-		api->Content().GetAudiobook(id, done);
+	HaifySettings settings = SettingsController::Load();
+	bool showProgress = settings.grantedScopes.find("user-read-playback-position") != std::string::npos;
+	DiscoverLibraryRequests::ResolveAddition(*api, {tab, uri, generation}, showProgress,
+		B_TRANSLATE("Done"), BMessenger(this));
 }
 
 
 void
 DiscoverWindow::_ApplyResolvedLibraryAddition(BMessage* message)
 {
-	if (!message || !message->GetBool("ok", false))
+	if (!message)
 		return;
-	int32 tab = message->GetInt32("tab", -1);
-	int32 generation = message->GetInt32("generation", -1);
-	std::string uri = message->GetString("uri", "");
-	if (!_CanApplyResolvedLibraryAddition(tab, uri, generation))
+	int32 tab = message->GetInt32(MessageFields::Tab, -1);
+	int32 generation = message->GetInt32(MessageFields::Generation, -1);
+	std::string uri = message->GetString(MessageFields::Uri, "");
+	if (!fLibrary.AcceptsAddition({tab, uri, generation}))
 		return;
-
-	std::vector<std::string> values;
-	std::vector<std::string> uris;
-	std::vector<std::string> titles;
-	const char* value = nullptr;
-	for (int32 i = 0; message->FindString("v", i, &value) == B_OK; i++)
-		values.push_back(value ? value : "");
-	for (int32 i = 0; message->FindString("u", i, &value) == B_OK; i++)
-		uris.push_back(value ? value : "");
-	for (int32 i = 0; message->FindString("t", i, &value) == B_OK; i++)
-		titles.push_back(value ? value : "");
-	if (values.size() != kTabCols[tab].size()
-			|| uris.size() != values.size() || titles.size() != values.size()) {
+	fLibrary.CompleteAddition({tab, uri, generation});
+	if (!message->GetBool(MessageFields::Ok, false)) {
+		std::fprintf(stderr, "Haify: discover library row resolution failed (%ld, API %s)\n",
+			(long)message->GetInt32(MessageFields::Status, 0),
+			message->GetBool(MessageFields::ApiOk, false) ? "response malformed" : "request failed");
 		return;
 	}
+	if (!fLists[tab] || !fCache.State(tab).loaded || _FindRow(tab, uri))
+		return;
+
+	auto row = DiscoverMessages::ReadResolvedLibraryRow(*message, tab, uri);
+	if (!row)
+		return;
 
 	_RemoveEmptyRows(tab);
-	fLists[tab]->AddRow(new DiscoverRow(values, uris, titles), 0);
-	fLoadTime[tab] = system_time();
+	fLists[tab]->AddRow(new DiscoverRow(row->vals, row->uris, row->ttls,
+		row->writable, row->owned), 0);
+	fCache.Touch(tab, system_time());
 	_ScheduleCacheSave();
-}
-
-
-bool
-DiscoverWindow::_CanApplyResolvedLibraryAddition(int32 logicalTab,
-	const std::string& uri, int32 generation) const
-{
-	return logicalTab >= 0 && logicalTab < TAB_COUNT && fLists[logicalTab]
-		&& fLoaded[logicalTab]
-		&& fLibraryChangeGenerations.find(uri) != fLibraryChangeGenerations.end()
-		&& fLibraryChangeGenerations.at(uri) == generation
-		&& !_FindRow(logicalTab, uri);
 }
 
 
@@ -3390,42 +2363,140 @@ DiscoverWindow::_UpdatePlaylistRow(DiscoverRow* row, const std::string& name,
 
 
 void
+DiscoverWindow::_QueuePlaylistMutation(DiscoverChangeOperation operation,
+	const std::string& id, const std::string& name)
+{
+	App* app = dynamic_cast<App*>(be_app);
+	if (!app || !app->GetApi())
+		return;
+	DiscoverRow* row = _FindPlaylistRow(PlaylistUri(id));
+	std::optional<DiscoverRowData> existing;
+	if (row)
+		existing = CapturePlaylistRow(row);
+	auto plan = fPlaylistMutations.QueueMutation(operation, id, name, existing);
+	if (!plan.accepted)
+		return;
+	_InvalidateTabCache(TAB_PLAYLISTS);
+	_RenderPlaylistMutation(id, plan);
+	if (plan.dispatch)
+		_DispatchPlaylistMutation(*plan.dispatch);
+}
+
+
+void
+DiscoverWindow::_DispatchPlaylistMutation(const DiscoverPlaylistMutationRequest& request)
+{
+	App* app = dynamic_cast<App*>(be_app);
+	SpotifyApi* api = app ? app->GetApi() : nullptr;
+	auto token = fAsync.Begin(TAB_PLAYLISTS);
+	if (api) {
+		DiscoverPlaylistRequests::Mutate(*api, request, token, BMessenger(this));
+	} else {
+		BMessage failure = DiscoverMessages::OperationResult(
+			MSG_DISCOVER_PLAYLIST_MUTATION_RESULT, token, false, -1);
+		failure.AddString(MessageFields::Id, request.id.c_str());
+		failure.AddInt32(MessageFields::Generation, request.generation);
+		failure.AddString(MessageFields::Operation, DiscoverOperationName(request.operation));
+		PostMessage(&failure);
+	}
+}
+
+
+void
+DiscoverWindow::_DetachPlaylistRow(const std::string& id)
+{
+	if (fPendingPlaylistRemovals.count(id))
+		return;
+	DiscoverRow* row = _FindPlaylistRow(PlaylistUri(id));
+	if (!row)
+		return;
+	auto* list = fLists[TAB_PLAYLISTS];
+	fPendingPlaylistRemovals[id] = {row, list->IndexOf(row), list->CurrentSelection() == row};
+	list->RemoveRow(row);
+}
+
+
+DiscoverRow*
+DiscoverWindow::_RestorePlaylistRow(const std::string& id)
+{
+	auto found = fPendingPlaylistRemovals.find(id);
+	if (found == fPendingPlaylistRemovals.end())
+		return _FindPlaylistRow(PlaylistUri(id));
+	auto pending = found->second;
+	fPendingPlaylistRemovals.erase(found);
+	auto* list = fLists[TAB_PLAYLISTS];
+	list->AddRow(pending.row, std::max(int32(0), std::min(pending.index, list->CountRows())));
+	if (pending.selected)
+		list->AddToSelection(pending.row);
+	return pending.row;
+}
+
+
+void
+DiscoverWindow::_DiscardDetachedPlaylistRow(const std::string& id)
+{
+	auto found = fPendingPlaylistRemovals.find(id);
+	if (found == fPendingPlaylistRemovals.end())
+		return;
+	delete found->second.row;
+	fPendingPlaylistRemovals.erase(found);
+}
+
+
+void
+DiscoverWindow::_RenderPlaylistMutation(const std::string& id,
+	const DiscoverPlaylistMutationPlan& plan)
+{
+	if (!fLists[TAB_PLAYLISTS])
+		return;
+	if (plan.row) {
+		DiscoverRow* row = _RestorePlaylistRow(id);
+		_AddOrUpdatePlaylistRow(row, PlaylistUri(id), plan.row->vals[0], plan.row->vals[1],
+			plan.row->writable, plan.row->owned);
+	} else if (plan.pending) {
+		_DetachPlaylistRow(id);
+	} else {
+		_DiscardDetachedPlaylistRow(id);
+		_RemovePlaylistRow(_FindPlaylistRow(PlaylistUri(id)));
+	}
+	static_cast<DiscoverListView*>(fLists[TAB_PLAYLISTS])->SetPlayingUri(fCurrentTrackUri);
+}
+
+
+void
 DiscoverWindow::_ApplyPlaylistChange(BMessage* message)
 {
-	if (!message || !fLists[TAB_PLAYLISTS] || !fLoaded[TAB_PLAYLISTS])
+	if (!message)
 		return;
-
-	std::string operation = message->GetString("operation", "");
-	std::string id = message->GetString("id", "");
-	std::string uri = message->GetString("uri", "");
-	if (uri.empty())
-		uri = PlaylistUri(id);
-	if (uri.empty() || uri == SpotifyItemUriPrefix(kSpotifyItemPlaylist))
+	auto change = DiscoverMessages::ReadPlaylistChange(*message);
+	if (!change)
 		return;
-	fPlaylistSyncGeneration++;
-	fLoadTime[TAB_PLAYLISTS] = system_time();
-
-	DiscoverRow* row = _FindPlaylistRow(uri);
-	if (operation == "remove") {
-		_RemovePlaylistRow(row);
+	_InvalidateTabCache(TAB_PLAYLISTS);
+	_ScheduleCacheSave();
+	fPlaylistMutations.InvalidateSnapshot();
+	if (!fLists[TAB_PLAYLISTS] || !fCache.State(TAB_PLAYLISTS).loaded)
 		return;
+	fCache.Touch(TAB_PLAYLISTS, system_time());
+	DiscoverRow* row = _FindPlaylistRow(change->uri);
+	std::optional<DiscoverRowData> existing;
+	if (row)
+		existing = CapturePlaylistRow(row);
+	auto plan = fPlaylistMutations.PlanChange(*change, existing);
+	switch (plan.action) {
+		case DiscoverPlaylistRowAction::Remove:
+			_DiscardDetachedPlaylistRow(SpotifyItemIdForUri(change->uri));
+			_RemovePlaylistRow(row);
+			break;
+		case DiscoverPlaylistRowAction::Upsert:
+			_AddOrUpdatePlaylistRow(row, change->uri, plan.row.vals[0],
+				plan.row.vals[1], plan.row.writable, plan.row.owned);
+			break;
+		case DiscoverPlaylistRowAction::Reload:
+			break;
+		case DiscoverPlaylistRowAction::Ignore:
+			break;
 	}
-
-	std::string name = message->GetString("name", "");
-	std::string owner = message->GetString("owner", "");
-	bool writable = message->GetBool("writable", true);
-	bool owned = message->GetBool("owned", row ? row->fOwned : false);
-	if (operation == "rename") {
-		if (row)
-			_RenamePlaylistRow(row, name);
-		else
-			ReloadPlaylists();
-		return;
-	}
-	if (operation != "add" || name.empty())
-		return;
-
-	_AddOrUpdatePlaylistRow(row, uri, name, owner, writable, owned);
+	ReloadPlaylists();
 }
 
 
@@ -3436,14 +2507,6 @@ DiscoverWindow::_RemovePlaylistRow(DiscoverRow* row)
 		return;
 	fLists[TAB_PLAYLISTS]->RemoveRow(row);
 	delete row;
-	_ScheduleCacheSave();
-}
-
-
-void
-DiscoverWindow::_RenamePlaylistRow(DiscoverRow* row, const std::string& name)
-{
-	_UpdatePlaylistRow(row, name, "", row->fWritable, row->fOwned);
 	_ScheduleCacheSave();
 }
 
@@ -3473,131 +2536,81 @@ DiscoverWindow::_ApplyPlaylistSnapshot(BMessage* message)
 {
 	if (!_CanApplyPlaylistSnapshot(message))
 		return;
-
-	std::set<std::string> serverUris;
-	for (int32 i = 0;; i++) {
-		if (!_ApplyPlaylistSnapshotItem(message, i, serverUris))
-			break;
+	fPlaylistMutations.InvalidateSnapshot();
+	auto plan = fPlaylistMutations.PlanSnapshot(CaptureDiscoverRows(fLists[TAB_PLAYLISTS], TAB_PLAYLISTS),
+		DiscoverMessages::ReadPlaylistSnapshot(*message));
+	for (const auto& data : plan.upserts) {
+		DiscoverRow* row = _FindPlaylistRow(data.uris[0]);
+		if (row)
+			_UpdatePlaylistRow(row, data.vals[0], data.vals[1], data.writable, data.owned);
+		else
+			fLists[TAB_PLAYLISTS]->AddRow(new DiscoverRow(data.vals, data.uris, data.ttls,
+				data.writable, data.owned));
 	}
-
-	_RemoveMissingPlaylistSnapshotRows(serverUris);
-	fLoadTime[TAB_PLAYLISTS] = system_time();
-	fFreshSnapshot[TAB_PLAYLISTS] = true;
-	fCacheBacked[TAB_PLAYLISTS] = false;
+	for (const auto& uri : plan.removals)
+		_RemovePlaylistRow(_FindPlaylistRow(uri));
+	_ReorderPlaylistRows(plan.order);
+	static_cast<DiscoverListView*>(fLists[TAB_PLAYLISTS])->SetPlayingUri(fCurrentTrackUri);
+	fCache.Touch(TAB_PLAYLISTS, system_time());
+	fCache.CompleteRows(TAB_PLAYLISTS, false, true);
 	_ScheduleCacheSave();
+}
+
+
+void
+DiscoverWindow::_ReorderPlaylistRows(const std::vector<std::string>& order)
+{
+	auto* list = fLists[TAB_PLAYLISTS];
+	int32 target = 0;
+	for (const auto& uri : order) {
+		DiscoverRow* row = _FindPlaylistRow(uri);
+		if (!row)
+			continue;
+		if (list->IndexOf(row) != target) {
+			bool selected = list->CurrentSelection() == row;
+			list->RemoveRow(row);
+			list->AddRow(row, target);
+			if (selected)
+				list->AddToSelection(row);
+		}
+		target++;
+	}
 }
 
 
 bool
 DiscoverWindow::_CanApplyPlaylistSnapshot(BMessage* message) const
 {
-	if (!message || !fLists[TAB_PLAYLISTS] || !fLoaded[TAB_PLAYLISTS])
+	if (!message || !fLists[TAB_PLAYLISTS] || !fCache.State(TAB_PLAYLISTS).loaded)
 		return false;
 	int32 generation = -1;
-	return message->FindInt32("generation", &generation) == B_OK
-		&& generation == fPlaylistSyncGeneration;
-}
-
-
-bool
-DiscoverWindow::_ApplyPlaylistSnapshotItem(BMessage* message, int32 index,
-	std::set<std::string>& serverUris)
-{
-	const char* uri = nullptr;
-	if (message->FindString("uri", index, &uri) != B_OK)
-		return false;
-	const char* name = "Unknown";
-	const char* owner = "Spotify";
-	message->FindString("name", index, &name);
-	message->FindString("owner", index, &owner);
-	bool writable = true;
-	message->FindBool("writable", index, &writable);
-	bool owned = false;
-	message->FindBool("owned", index, &owned);
-
-	std::string playlistUri = uri ? uri : "";
-	if (playlistUri.empty())
-		return true;
-	std::string id = SpotifyItemKindForUri(playlistUri)
-		== kSpotifyItemPlaylist ? SpotifyItemIdForUri(playlistUri) : "";
-	serverUris.insert(playlistUri);
-	if (!id.empty() && fPendingPlaylistRemovals.find(id)
-			!= fPendingPlaylistRemovals.end())
-		return true;
-
-	DiscoverRow* row = _FindPlaylistRow(playlistUri);
-	if (row) {
-		_UpdatePlaylistRow(row, name, owner, writable, owned);
-	} else {
-		fLists[TAB_PLAYLISTS]->AddRow(new DiscoverRow(
-			{name, owner}, {playlistUri, ""}, {name, ""}, writable, owned));
-	}
-	return true;
-}
-
-
-void
-DiscoverWindow::_RemoveMissingPlaylistSnapshotRows(
-	const std::set<std::string>& serverUris)
-{
-	for (int32 i = fLists[TAB_PLAYLISTS]->CountRows() - 1; i >= 0; i--) {
-		DiscoverRow* row = dynamic_cast<DiscoverRow*>(
-			fLists[TAB_PLAYLISTS]->RowAt(i));
-		if (!row || row->fUris.empty()
-				|| row->fUris[0] == "spotify:collection")
-			continue;
-		if (serverUris.find(row->fUris[0]) == serverUris.end()) {
-			fLists[TAB_PLAYLISTS]->RemoveRow(row);
-			delete row;
-		}
-	}
+	return message->FindInt32(MessageFields::Generation, &generation) == B_OK
+		&& fPlaylistMutations.AcceptsSnapshot(generation);
 }
 
 
 void
 DiscoverWindow::ReloadPlaylists()
 {
-	if (!fLists[TAB_PLAYLISTS] || !fLoaded[TAB_PLAYLISTS])
+	if (!fLists[TAB_PLAYLISTS] || !fCache.State(TAB_PLAYLISTS).loaded)
 		return;
 	App* app = dynamic_cast<App*>(be_app);
 	SpotifyApi* api = app ? app->GetApi() : nullptr;
 	if (!api)
 		return;
 
-	HaifySettings settings = SettingsController::Load();
-	std::string accountId = settings.spotifyAccountId;
-	int32 generation = ++fPlaylistSyncGeneration;
+	std::string accountId = api->AccountId();
+	api->Playlists().InvalidatePlaylists();
+	int32 generation = fPlaylistMutations.BeginSnapshot();
 	BMessenger self(this);
 	api->Playlists().GetPlaylists([self, accountId, generation](bool ok,
 			const nlohmann::json& data) {
-		if (!ok || !data.contains("items") || !data["items"].is_array())
+		if (!ok)
 			return;
-		BMessage snapshot('pSyn');
-		snapshot.AddInt32("generation", generation);
-		for (const auto& item : data["items"]) {
-			if (!item.is_object())
-				continue;
-			std::string uri = JsonString(item, "uri");
-			if (uri.empty())
-				continue;
-			std::string owner = "Spotify";
-			std::string ownerAccountId;
-			std::string ownerLegacyId;
-			if (item.contains("owner") && item["owner"].is_object()) {
-				owner = JsonString(item["owner"], "display_name", "Spotify");
-				ownerAccountId = JsonString(item["owner"], "account_id");
-				ownerLegacyId = JsonString(item["owner"], "id");
-			}
-			snapshot.AddString("uri", uri.c_str());
-			snapshot.AddString("name", JsonString(item, "name", "Unknown").c_str());
-			snapshot.AddString("owner", owner.c_str());
-			bool owned = !accountId.empty()
-				&& (ownerAccountId == accountId || ownerLegacyId == accountId);
-			snapshot.AddBool("owned", owned);
-			snapshot.AddBool("writable", SpotifyPlaylistIsWritable(
-				JsonBool(item, "collaborative"), ownerAccountId,
-				ownerLegacyId, accountId));
-		}
+		auto rows = DiscoverRowFactory::PlaylistRows(data, accountId);
+		if (!rows)
+			return;
+		BMessage snapshot = DiscoverMessages::PlaylistSnapshot(*rows, generation);
 		self.SendMessage(&snapshot);
 	});
 }
@@ -3606,11 +2619,13 @@ DiscoverWindow::ReloadPlaylists()
 void
 DiscoverWindow::_InvalidateTabCache(int32 tab)
 {
+	fCache.Invalidate(tab);
 	App* app = dynamic_cast<App*>(be_app);
 	SpotifyApi* api = app ? app->GetApi() : nullptr;
 	if (!api)
 		return;
 	switch (tab) {
+		case TAB_PLAYLISTS: api->Playlists().InvalidatePlaylists(); break;
 		case TAB_TOP_TRACKS: api->Content().InvalidateTopItems("tracks"); break;
 		case TAB_TOP_ARTISTS: api->Content().InvalidateTopItems("artists"); break;
 		case TAB_NEW_RELEASES: api->Content().InvalidateNewReleases(); break;
@@ -3635,7 +2650,7 @@ DiscoverWindow::_CheckLazyLoad()
 	if (tab != TAB_FOLLOWED_ARTISTS && tab != TAB_SAVED_EPISODES
 			&& tab != TAB_AUDIOBOOKS)
 		return;
-	if (!fLoaded[tab] || fPageLoading[tab] || !fPageHasMore[tab]
+	if (!fCache.State(tab).loaded || fCache.State(tab).pageLoading || !fCache.State(tab).pageHasMore
 			|| !fLists[tab])
 		return;
 	BScrollBar* scroll = nullptr;
@@ -3653,114 +2668,26 @@ DiscoverWindow::_CheckLazyLoad()
 }
 
 
-static RowData
-TrackLikeDiscoverRow(const nlohmann::json& item)
-{
-	std::string name = item.value("name", "Unknown");
-	std::string artist = "Unknown";
-	std::string artistUri;
-	if (item.contains("artists") && item["artists"].is_array()
-			&& !item["artists"].empty()) {
-		artist = item["artists"][0].value("name", "Unknown");
-		artistUri = item["artists"][0].value("uri", "");
-	}
-	return {{name, artist}, {item.value("uri", ""), artistUri},
-		{name, artist}};
-}
-
-static std::vector<RowData>
-TopTrackRows(const nlohmann::json& data)
-{
-	std::vector<RowData> rows;
-	if (!data.contains("items"))
-		return rows;
-	for (const auto& item : data["items"]) {
-		if (item.is_object())
-			rows.push_back(TrackLikeDiscoverRow(item));
-	}
-	return rows;
-}
-
-static std::vector<RowData>
-TopArtistRows(const nlohmann::json& data)
-{
-	std::vector<RowData> rows;
-	if (!data.contains("items"))
-		return rows;
-	for (const auto& item : data["items"]) {
-		if (!item.is_object())
-			continue;
-		std::string name = item.value("name", "Unknown");
-		std::string genre = "Artist";
-		if (item.contains("genres") && item["genres"].is_array()
-				&& !item["genres"].empty())
-			genre = item["genres"][0].get<std::string>();
-		rows.push_back({{name, genre}, {item.value("uri", ""), ""},
-			{name, ""}});
-	}
-	return rows;
-}
-
-static std::vector<RowData>
-NewReleaseRows(const nlohmann::json& data)
-{
-	std::vector<RowData> rows;
-	if (!data.contains("albums") || !data["albums"].contains("items"))
-		return rows;
-	for (const auto& item : data["albums"]["items"]) {
-		if (item.is_object())
-			rows.push_back(TrackLikeDiscoverRow(item));
-	}
-	return rows;
-}
-
-static std::vector<RowData>
-SavedAlbumRows(const nlohmann::json& data)
-{
-	std::vector<RowData> rows;
-	if (!data.contains("items"))
-		return rows;
-	for (const auto& item : data["items"]) {
-		if (item.contains("album") && item["album"].is_object())
-			rows.push_back(TrackLikeDiscoverRow(item["album"]));
-	}
-	return rows;
-}
-
 static void
 SendDiscoverTabRows(BMessenger messenger, int32 tab, bool snapshot,
-	int32 loadGeneration, const std::vector<RowData>& rows)
+	int32 loadGeneration, const std::vector<DiscoverRowData>& rows)
 {
-	BMessage* msg = new BMessage('uRow');
-	msg->AddInt32("tab", tab);
-	msg->AddInt32("load_generation", loadGeneration);
-	msg->AddInt32("cols", rows.empty()
-		? (int32)kTabCols[tab].size() : (int32)rows[0].vals.size());
-	msg->AddBool("snapshot", snapshot);
-	for (const RowData& row : rows) {
-		for (const std::string& value : row.vals)
-			msg->AddString("v", value.c_str());
-		for (const std::string& uri : row.uris)
-			msg->AddString("u", uri.c_str());
-		for (const std::string& title : row.ttls)
-			msg->AddString("t", title.c_str());
-		msg->AddBool("writable", row.writable);
-		msg->AddBool("owned", row.owned);
-	}
-	messenger.SendMessage(msg);
-	delete msg;
+	BMessage message(MSG_DISCOVER_ROWS);
+	message.AddInt32(MessageFields::Tab, tab);
+	message.AddInt32(MessageFields::LoadGeneration, loadGeneration);
+	message.AddInt32(MessageFields::Columns, DiscoverTabColumnCount(tab));
+	message.AddBool(MessageFields::Snapshot, snapshot);
+	DiscoverMessages::AppendRows(message, rows, 0, rows.size());
+	messenger.SendMessage(&message);
 }
 
 static void
 SendDiscoverPageDone(BMessenger messenger, int32 tab, int32 loadGeneration,
-	const std::string& nextCursor, bool hasMore)
+	const std::string& nextCursor, bool hasMore,
+	std::optional<int32_t> nextOffset = std::nullopt)
 {
-	BMessage done(kMsgPageDone);
-	done.AddInt32("tab", tab);
-	done.AddInt32("load_generation", loadGeneration);
-	if (!nextCursor.empty())
-		done.AddString("next_cursor", nextCursor.c_str());
-	done.AddBool("has_more", hasMore);
+	BMessage done = DiscoverMessages::PageDone(
+		{tab, loadGeneration, hasMore, nextOffset, nextCursor});
 	messenger.SendMessage(&done);
 }
 
@@ -3788,40 +2715,11 @@ static void
 SendAudiobookIdsSnapshot(BMessenger messenger, int32 loadGeneration,
 	const std::set<std::string>& audiobookIds)
 {
-	BMessage ids(kMsgAudiobookIdsUpdated);
-	ids.AddInt32("load_generation", loadGeneration);
+	BMessage ids(MSG_DISCOVER_AUDIOBOOK_IDS);
+	ids.AddInt32(MessageFields::LoadGeneration, loadGeneration);
 	for (const std::string& id : audiobookIds)
-		ids.AddString("audiobook_id", id.c_str());
+		ids.AddString(MessageFields::AudiobookId, id.c_str());
 	messenger.SendMessage(&ids);
-}
-
-static std::vector<RowData>
-PodcastRows(const nlohmann::json& data,
-	const std::set<std::string>& audiobookIds)
-{
-	std::vector<RowData> rows;
-	if (!data.contains("items") || !data["items"].is_array())
-		return rows;
-	for (const auto& item : data["items"]) {
-		if (!item.is_object() || !item.contains("show")
-				|| !item["show"].is_object())
-			continue;
-		const auto& show = item["show"];
-		std::string id = JsonString(show, "id");
-		std::string uri = JsonString(show, "uri");
-		if (id.empty())
-			id = SpotifyItemIdForUri(uri);
-		if (JsonString(show, "type") != "show"
-				|| !PrimaryUriMatchesTab(TAB_PODCASTS, uri)
-				|| SpotifyEffectiveItemKind(kSpotifyItemShow, id,
-					audiobookIds) == kSpotifyItemAudiobook) {
-			continue;
-		}
-		std::string name = show.value("name", "Unknown");
-		std::string publisher = show.value("publisher", "Unknown");
-		rows.push_back({{name, publisher}, {uri, ""}, {name, ""}});
-	}
-	return rows;
 }
 
 static std::string
@@ -3836,30 +2734,6 @@ FollowedArtistsNextCursor(const nlohmann::json& data)
 	if (cursors.contains("after") && cursors["after"].is_string())
 		return cursors["after"].get<std::string>();
 	return "";
-}
-
-static std::vector<RowData>
-FollowedArtistRows(const nlohmann::json& data)
-{
-	std::vector<RowData> rows;
-	if (!data.contains("artists") || !data["artists"].is_object()
-			|| !data["artists"].contains("items")
-			|| !data["artists"]["items"].is_array())
-		return rows;
-	for (const auto& item : data["artists"]["items"]) {
-		if (!item.is_object())
-			continue;
-		std::string name = item.contains("name") && item["name"].is_string()
-			? item["name"].get<std::string>() : "Unknown";
-		std::string uri = item.contains("uri") && item["uri"].is_string()
-			? item["uri"].get<std::string>() : "";
-		std::string genre = "Artist";
-		if (item.contains("genres") && item["genres"].is_array()
-				&& !item["genres"].empty() && item["genres"][0].is_string())
-			genre = item["genres"][0].get<std::string>();
-		rows.push_back({{name, genre}, {uri, ""}, {name, ""}});
-	}
-	return rows;
 }
 
 static bool
@@ -3891,7 +2765,7 @@ HandleFollowedArtistsResponse(bool ok, const nlohmann::json& data,
 			"", false);
 		return;
 	}
-	std::vector<RowData> rows = FollowedArtistRows(data);
+	std::vector<DiscoverRowData> rows = DiscoverRowFactory::FollowedArtistRows(data);
 	SendDiscoverTabRows(messenger, TAB_FOLLOWED_ARTISTS, snapshot,
 		loadGeneration, rows);
 	std::string next = FollowedArtistsNextCursor(data);
@@ -3904,104 +2778,31 @@ HandleFollowedArtistsResponse(bool ok, const nlohmann::json& data,
 		!next.empty());
 }
 
-static RowData
-SavedEpisodeRow(const nlohmann::json& episode, bool showProgress)
-{
-	std::string showName;
-	std::string showUri;
-	if (episode.contains("show") && episode["show"].is_object()) {
-		showName = JsonString(episode["show"], "name");
-		std::string showId = JsonString(episode["show"], "id");
-		showUri = !showId.empty()
-			? SpotifyUriForItemKind(kSpotifyItemShow, showId)
-			: JsonString(episode["show"], "uri");
-	}
-	std::string episodeId = JsonString(episode, "id");
-	std::string episodeUri = !episodeId.empty()
-		? SpotifyUriForItemKind(kSpotifyItemEpisode, episodeId)
-		: JsonString(episode, "uri");
-	std::string episodeName = JsonString(episode, "name");
-	std::string progress;
-	if (showProgress && episode.contains("resume_point")
-			&& episode["resume_point"].is_object()) {
-		const auto& resume = episode["resume_point"];
-		progress = JsonBool(resume, "fully_played")
-			? B_TRANSLATE("Done")
-			: DurationText(JsonInt32(resume, "resume_position_ms"));
-	}
-	return {{episodeName, showName, JsonString(episode, "release_date"),
-		DurationText(JsonInt32(episode, "duration_ms")), progress},
-		{episodeUri, showUri, "", "", ""},
-		{episodeName, showName, "", "", ""}};
-}
-
-static std::vector<RowData>
-SavedEpisodeRows(const nlohmann::json& data, bool showProgress)
-{
-	std::vector<RowData> rows;
-	if (!data.contains("items") || !data["items"].is_array())
-		return rows;
-	for (const auto& saved : data["items"]) {
-		if (!saved.is_object() || !saved.contains("episode")
-				|| !saved["episode"].is_object())
-			continue;
-		const auto& episode = saved["episode"];
-		if (JsonString(episode, "type") != "episode")
-			continue;
-		RowData row = SavedEpisodeRow(episode, showProgress);
-		if (!row.vals[0].empty()
-				&& PrimaryUriMatchesTab(TAB_SAVED_EPISODES, row.uris[0]))
-			rows.push_back(std::move(row));
-	}
-	return rows;
-}
-
 static void
 HandleSavedEpisodesResponse(bool ok, const nlohmann::json& data,
 	BMessenger messenger, int32 offset, bool showProgress, bool snapshot,
 	int32 loadGeneration)
 {
-	if (!ok || !data.is_object() || !data.contains("items")
-			|| !data["items"].is_array()) {
+	if (!ok) {
 		SendDiscoverPageDone(messenger, TAB_SAVED_EPISODES, loadGeneration, "",
 			false);
 		return;
 	}
-	std::vector<RowData> rows = SavedEpisodeRows(data, showProgress);
-	SendDiscoverTabRows(messenger, TAB_SAVED_EPISODES, snapshot,
-		loadGeneration, rows);
-	int32 count = ok && data.contains("items") && data["items"].is_array()
-		? (int32)data["items"].size() : 0;
-	int32 total = ok ? JsonInt32(data, "total", offset + count)
-		: offset + count;
-	SendDiscoverPageDone(messenger, TAB_SAVED_EPISODES, loadGeneration, "",
-		ok && count > 0 && offset + count < total);
-}
-
-static std::vector<RowData>
-AudiobookRows(const nlohmann::json& data)
-{
-	std::vector<RowData> rows;
-	if (!data.contains("items") || !data["items"].is_array())
-		return rows;
-	for (const auto& book : data["items"]) {
-		if (!book.is_object() || JsonString(book, "type") != "audiobook")
-			continue;
-		std::string id = JsonString(book, "id");
-		std::string uri = !id.empty()
-			? SpotifyUriForItemKind(kSpotifyItemAudiobook, id)
-			: JsonString(book, "uri");
-		if (!PrimaryUriMatchesTab(TAB_AUDIOBOOKS, uri))
-			continue;
-		std::string author;
-		if (book.contains("authors") && book["authors"].is_array()
-				&& !book["authors"].empty()
-				&& book["authors"][0].is_object())
-			author = JsonString(book["authors"][0], "name");
-		std::string name = JsonString(book, "name", "Unknown");
-		rows.push_back({{name, author}, {uri, ""}, {name, ""}});
+	auto rows = DiscoverRowFactory::SavedEpisodeRows(data, showProgress,
+		B_TRANSLATE("Done"));
+	if (!rows) {
+		SendDiscoverPageDone(messenger, TAB_SAVED_EPISODES, loadGeneration, "",
+			false);
+		return;
 	}
-	return rows;
+	SendDiscoverTabRows(messenger, TAB_SAVED_EPISODES, snapshot,
+		loadGeneration, *rows);
+	// Paging counts source items, including entries the mapper cannot display.
+	int32 count = (int32)data["items"].size();
+	int32 total = JsonInt32(data, "total", offset + count);
+	auto page = AdvanceDiscoverPage(offset, count, total);
+	SendDiscoverPageDone(messenger, TAB_SAVED_EPISODES, loadGeneration, "",
+		page.hasMore, page.nextOffset);
 }
 
 static void
@@ -4014,15 +2815,14 @@ HandleAudiobooksResponse(bool ok, const nlohmann::json& data,
 			false);
 		return;
 	}
-	std::vector<RowData> rows = AudiobookRows(data);
+	std::vector<DiscoverRowData> rows = DiscoverRowFactory::AudiobookRows(data);
 	SendDiscoverTabRows(messenger, TAB_AUDIOBOOKS, snapshot, loadGeneration,
 		rows);
-	int32 count = ok && data.contains("items") && data["items"].is_array()
-		? (int32)data["items"].size() : 0;
-	int32 total = ok ? JsonInt32(data, "total", offset + count)
-		: offset + count;
+	int32 count = (int32)data["items"].size();
+	int32 total = JsonInt32(data, "total", offset + count);
+	auto page = AdvanceDiscoverPage(offset, count, total);
 	SendDiscoverPageDone(messenger, TAB_AUDIOBOOKS, loadGeneration, "",
-		ok && count > 0 && offset + count < total);
+		page.hasMore, page.nextOffset);
 }
 
 bool
@@ -4035,24 +2835,14 @@ DiscoverWindow::_CanLoadTab(int32 tab, bool nextPage, SpotifyApi*& api) const
 	api = app ? app->GetApi() : nullptr;
 	if (!api)
 		return false;
-	bool paged = tab == TAB_FOLLOWED_ARTISTS
-		|| tab == TAB_SAVED_EPISODES || tab == TAB_AUDIOBOOKS;
-	return !nextPage || (paged && !fPageLoading[tab] && fPageHasMore[tab]);
+	return !nextPage || fCache.CanLoadNext(tab);
 }
 
 
 void
 DiscoverWindow::_PrepareLoadTab(int32 tab, bool nextPage)
 {
-	if (nextPage)
-		return;
-	fTabLoadGeneration[tab]++;
-	fLoaded[tab] = true;
-	fLoadTime[tab] = system_time();
-	fPageLoading[tab] = false;
-	fPageHasMore[tab] = true;
-	fPageOffset[tab] = 0;
-	fPageCursor[tab].clear();
+	fCache.PrepareLoad(tab, nextPage, system_time());
 }
 
 
@@ -4077,7 +2867,7 @@ DiscoverWindow::_LoadTopTracksTab(SpotifyApi* api, const BMessenger& messenger,
 				const nlohmann::json& data) {
 		if (ok)
 			SendDiscoverTabRows(messenger, TAB_TOP_TRACKS, snapshot,
-				loadGeneration, TopTrackRows(data));
+				loadGeneration, DiscoverRowFactory::TopTrackRows(data));
 	});
 }
 
@@ -4091,7 +2881,7 @@ DiscoverWindow::_LoadTopArtistsTab(SpotifyApi* api, const BMessenger& messenger,
 				const nlohmann::json& data) {
 		if (ok)
 			SendDiscoverTabRows(messenger, TAB_TOP_ARTISTS, snapshot,
-				loadGeneration, TopArtistRows(data));
+				loadGeneration, DiscoverRowFactory::TopArtistRows(data));
 	});
 }
 
@@ -4105,7 +2895,7 @@ DiscoverWindow::_LoadNewReleasesTab(SpotifyApi* api,
 				const nlohmann::json& data) {
 		if (ok)
 			SendDiscoverTabRows(messenger, TAB_NEW_RELEASES, snapshot,
-				loadGeneration, NewReleaseRows(data));
+				loadGeneration, DiscoverRowFactory::NewReleaseRows(data));
 	});
 }
 
@@ -4119,7 +2909,7 @@ DiscoverWindow::_LoadSavedAlbumsTab(SpotifyApi* api,
 				const nlohmann::json& data) {
 		if (ok)
 			SendDiscoverTabRows(messenger, TAB_SAVED_ALBUMS, snapshot,
-				loadGeneration, SavedAlbumRows(data));
+				loadGeneration, DiscoverRowFactory::SavedAlbumRows(data));
 	});
 }
 
@@ -4128,7 +2918,7 @@ void
 DiscoverWindow::_LoadPodcastsTab(SpotifyApi* api, const BMessenger& messenger,
 	bool, int32 loadGeneration)
 {
-	std::set<std::string> cachedAudiobookIds = fAudiobookIds;
+	std::set<std::string> cachedAudiobookIds = fLibrary.AudiobookIds();
 	auto loadShows = [api, messenger, loadGeneration](
 			const std::set<std::string>& audiobookIds, bool freshIds) {
 		if (freshIds)
@@ -4138,7 +2928,7 @@ DiscoverWindow::_LoadPodcastsTab(SpotifyApi* api, const BMessenger& messenger,
 					const nlohmann::json& data) {
 			if (ok) {
 				SendDiscoverTabRows(messenger, TAB_PODCASTS, true,
-					loadGeneration, PodcastRows(data, audiobookIds));
+					loadGeneration, DiscoverRowFactory::PodcastRows(data, audiobookIds));
 			}
 		});
 	};
@@ -4156,8 +2946,8 @@ void
 DiscoverWindow::_LoadFollowedArtistsTab(SpotifyApi* api,
 	const BMessenger& messenger, bool snapshot, int32 loadGeneration)
 {
-	fPageLoading[TAB_FOLLOWED_ARTISTS] = true;
-	std::string after = fPageCursor[TAB_FOLLOWED_ARTISTS];
+	fCache.BeginPage(TAB_FOLLOWED_ARTISTS);
+	std::string after = fCache.State(TAB_FOLLOWED_ARTISTS).pageCursor;
 	api->Artists().GetFollowedArtists(after, 50,
 		[messenger, snapshot, loadGeneration](bool ok,
 				const nlohmann::json& data) {
@@ -4174,8 +2964,8 @@ DiscoverWindow::_LoadSavedEpisodesTab(SpotifyApi* api,
 	HaifySettings accountSettings = SettingsController::Load();
 	bool showProgress = accountSettings.grantedScopes.find(
 		"user-read-playback-position") != std::string::npos;
-	fPageLoading[TAB_SAVED_EPISODES] = true;
-	int32 offset = fPageOffset[TAB_SAVED_EPISODES];
+	fCache.BeginPage(TAB_SAVED_EPISODES);
+	int32 offset = fCache.State(TAB_SAVED_EPISODES).pageOffset;
 	api->Library().GetSavedEpisodes(offset, 50,
 		[messenger, offset, showProgress, snapshot, loadGeneration](bool ok,
 				const nlohmann::json& data) {
@@ -4189,8 +2979,8 @@ void
 DiscoverWindow::_LoadAudiobooksTab(SpotifyApi* api, const BMessenger& messenger,
 	bool snapshot, int32 loadGeneration)
 {
-	fPageLoading[TAB_AUDIOBOOKS] = true;
-	int32 offset = fPageOffset[TAB_AUDIOBOOKS];
+	fCache.BeginPage(TAB_AUDIOBOOKS);
+	int32 offset = fCache.State(TAB_AUDIOBOOKS).pageOffset;
 	api->Library().GetSavedAudiobooks(offset, 50,
 		[messenger, offset, snapshot, loadGeneration](bool ok,
 				const nlohmann::json& data) {
@@ -4221,7 +3011,7 @@ DiscoverWindow::_LoadTab(int32 tab, bool nextPage)
 		&DiscoverWindow::_LoadSavedEpisodesTab,
 		&DiscoverWindow::_LoadAudiobooksTab
 	};
-	(this->*loaders[tab])(api, messenger, snapshot, fTabLoadGeneration[tab]);
+	(this->*loaders[tab])(api, messenger, snapshot, fCache.State(tab).loadGeneration);
 }
 
 
@@ -4235,13 +3025,15 @@ DiscoverWindow::_ShowPlaylistContextMenu(const std::string& playlistId,
 
 	if (owned) {
 		BMessage* renMsg = new BMessage('plRn');
-		renMsg->AddString("id", playlistId.c_str());
+		renMsg->AddString(MessageFields::Id, playlistId.c_str());
+		DiscoverMessages::AddContext(*renMsg, fAsync.Context());
 		menu->AddItem(new BMenuItem(B_TRANSLATE("Rename" B_UTF8_ELLIPSIS), renMsg));
 	}
 
 	BMessage* delMsg = new BMessage('plDl');
-	delMsg->AddString("id",    playlistId.c_str());
-	delMsg->AddBool  ("owned", owned);
+	delMsg->AddString(MessageFields::Id,    playlistId.c_str());
+	DiscoverMessages::AddContext(*delMsg, fAsync.Context());
+	delMsg->AddBool(MessageFields::Owned, owned);
 	menu->AddItem(new BMenuItem(
 		owned ? B_TRANSLATE("Delete Playlist") : B_TRANSLATE("Unfollow Playlist"),
 		delMsg));

@@ -1,4 +1,6 @@
+#include "Messages.h"
 #include "PlaybackDevicePromptWindow.h"
+#include "MessageContracts.h"
 
 #include <Button.h>
 #include <Catalog.h>
@@ -44,11 +46,11 @@ public:
 		BButton* local = new BButton("local",
 			librespotRunning ? B_TRANSLATE("Use local librespot")
 				: B_TRANSLATE("Start local librespot"),
-			new BMessage(kMsgPlaybackDeviceStartLocal));
+			new BMessage(MSG_PLAYBACK_DEVICE_START_LOCAL));
 		BButton* cancel = new BButton("cancel", B_TRANSLATE("Cancel"),
 			new BMessage(B_QUIT_REQUESTED));
 		fUse = new BButton("use", B_TRANSLATE("Use Device"),
-			new BMessage(kMsgPlaybackDeviceSelected));
+			new BMessage(MSG_PLAYBACK_DEVICE_SELECTED));
 		fUse->SetEnabled(!fDevices.empty());
 
 		BLayoutBuilder::Group<>(this, B_VERTICAL, B_USE_DEFAULT_SPACING)
@@ -68,8 +70,8 @@ public:
 
 	bool QuitRequested() override
 	{
-		BMessage closed(kMsgPlaybackDevicePromptClosed);
-		closed.AddBool("cancelled", !fCommitted);
+		BMessage closed = MessageContracts::MakeDevicePromptResult({
+			MessageContracts::DevicePromptAction::Closed, "", !fCommitted});
 		fTarget.SendMessage(&closed);
 		return true;
 	}
@@ -77,24 +79,28 @@ public:
 	void MessageReceived(BMessage* message) override
 	{
 		switch (message->what) {
-			case kMsgPlaybackDeviceSelected:
+			case MSG_PLAYBACK_DEVICE_SELECTED:
 			{
 				int32 selection = fList ? fList->CurrentSelection() : -1;
 				if (selection >= 0 && selection < (int32)fDevices.size()) {
-					BMessage selected(kMsgPlaybackDeviceSelected);
-					selected.AddString("device_id",
-						fDevices[selection].id.c_str());
+					BMessage selected = MessageContracts::MakeDevicePromptResult({
+						MessageContracts::DevicePromptAction::Selected,
+						fDevices[selection].id});
 					fCommitted = true;
 					fTarget.SendMessage(&selected);
 					PostMessage(B_QUIT_REQUESTED);
 				}
 				return;
 			}
-			case kMsgPlaybackDeviceStartLocal:
+			case MSG_PLAYBACK_DEVICE_START_LOCAL:
+			{
 				fCommitted = true;
-				fTarget.SendMessage(kMsgPlaybackDeviceStartLocal);
+				BMessage local = MessageContracts::MakeDevicePromptResult({
+					MessageContracts::DevicePromptAction::StartLocal});
+				fTarget.SendMessage(&local);
 				PostMessage(B_QUIT_REQUESTED);
 				return;
+			}
 			default:
 				BWindow::MessageReceived(message);
 				return;

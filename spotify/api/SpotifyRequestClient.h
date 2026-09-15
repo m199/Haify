@@ -5,6 +5,9 @@
 #include <functional>
 #include <Locker.h>
 #include <map>
+#include <memory>
+#include <optional>
+#include <cstdint>
 #include <string>
 #include <vector>
 
@@ -23,6 +26,9 @@ public:
     bool            SetAccessToken(const std::string& token);
     bool            SetAccountId(const std::string& accountId);
     std::string     AccountId() const;
+    // Only synchronous request submission may run here, never a wait for I/O.
+    bool            DispatchForAccount(const std::string& account,
+                        const std::function<void()>& operation);
     void            SetTokenRefreshHandler(TokenRefreshHandler handler);
     void            SetRequestHandler(RequestHandler handler);
     void            ClearSession();
@@ -42,6 +48,13 @@ public:
     void            InvalidateCachePrefix(const std::string& prefix);
 
 private:
+	struct PendingGet {
+		std::vector<JsonCallback> callbacks;
+	};
+	void            _Request(const std::string& method, const std::string& path,
+	                    const std::string& body, RawCallback callback, bool allowRefresh,
+	                    const std::string& contentType, std::optional<uint64_t> session);
+	bool            _SessionMatches(uint64_t session) const;
     std::string     _CacheKey(const std::string& path) const;
 
     std::string     fAccessToken;
@@ -50,5 +63,6 @@ private:
     RequestHandler  fRequestHandler;
     mutable BLocker fLock;
     std::map<std::string, ApiCacheEntry> fCache;
-    std::map<std::string, std::vector<JsonCallback>> fPendingGets;
+    std::map<std::string, std::shared_ptr<PendingGet>> fPendingGets;
+	uint64_t        fSessionGeneration = 0;
 };

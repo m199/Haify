@@ -5,6 +5,7 @@
 #include "SettingsController.h"
 #include "TrackContextMenu.h"
 #include "Messages.h"
+#include "MessageContracts.h"
 #include "NowPlayingItem.h"
 #include "PlaybackDevicePromptWindow.h"
 #include "PlaybackDeviceResolver.h"
@@ -217,21 +218,6 @@ _FillPlaybackPollMessage(BMessage& message, bool ok,
 	if (hasItem)
 		_FillTrackMessage(message, data["item"],
 			data.value("currently_playing_type", ""));
-}
-
-
-static std::vector<std::string>
-_QueueUrisFromMessage(BMessage* message)
-{
-	std::vector<std::string> uris;
-	const char* uri = nullptr;
-	for (int32 index = 0;
-			message->FindString("next_queue_uri", index, &uri) == B_OK;
-			index++) {
-		if (uri && uri[0])
-			uris.push_back(uri);
-	}
-	return uris;
 }
 
 
@@ -597,8 +583,8 @@ PlayerWindow::_ReadPlaybackMessage(BMessage* message) const
 	update.trackUri = message->GetString("track_uri", "");
 	update.repeatState = message->GetString("repeat_state", "off");
 	update.shuffleState = message->GetBool("shuffle_state", false);
-	update.effectiveTitle = message->GetString("title", "");
-	update.effectiveArtist = message->GetString("artist", "");
+	update.effectiveTitle = message->GetString(MessageFields::Title, "");
+	update.effectiveArtist = message->GetString(MessageFields::Artist, "");
 	update.effectiveAlbumId = message->GetString("album_id", "");
 	update.effectiveArtistId = message->GetString("artist_id", "");
 	update.effectiveItemKind = message->GetString(kNowPlayingItemKindField, "");
@@ -614,7 +600,7 @@ PlayerWindow::_ReadPlaybackMessage(BMessage* message) const
 	update.effectiveArtworkUrl = ResolvePlaybackArtworkUrl(
 		message->GetString("artwork_url", ""), fLastArtworkUrl,
 		update.preserveCurrentArtwork);
-	update.deviceId = message->GetString("device_id", "");
+	update.deviceId = message->GetString(MessageFields::DeviceId, "");
 	update.deviceName = message->GetString("device_name", "");
 	update.deviceType = message->GetString("device_type", "");
 	return update;
@@ -854,8 +840,7 @@ PlayerWindow::_ApplyTrackChangedState(const PlaybackMessageData& update)
 	fQueueTrackUri.clear();
 	fHasPredictedNext = false;
 	fPredictedNext.MakeEmpty();
-	BMessage nowPlaying('pStU');
-	nowPlaying.AddString("trackUri", update.trackUri.c_str());
+	BMessage nowPlaying = MessageContracts::MakeCurrentTrackUpdate({update.trackUri});
 	be_app->PostMessage(&nowPlaying);
 }
 
@@ -927,9 +912,9 @@ PlayerWindow::_SyncAudiobookQueueForPlayback(
 void
 PlayerWindow::_ApplyOptimisticPlay(BMessage* message)
 {
-	const char* uri = message->GetString("uri", "");
+	const char* uri = message->GetString(MessageFields::Uri, "");
 	if (!uri || !uri[0])
-		uri = message->GetString("trackUri", "");
+		uri = message->GetString(MessageFields::TrackUri, "");
 	if (!uri || !uri[0])
 		return;
 
@@ -938,7 +923,7 @@ PlayerWindow::_ApplyOptimisticPlay(BMessage* message)
 	optimistic.AddBool("optimistic", true);
 	optimistic.AddBool("is_playing", true);
 	optimistic.AddInt32("progress_ms",
-		message->GetInt32("start_position_ms", 0));
+		message->GetInt32(MessageFields::StartPositionMs, 0));
 	optimistic.AddInt32("duration_ms", message->GetInt32("duration_ms", 0));
 	optimistic.AddString("repeat_state", fRepeatState.c_str());
 	optimistic.AddBool("shuffle_state", fShuffleOn);
@@ -946,7 +931,7 @@ PlayerWindow::_ApplyOptimisticPlay(BMessage* message)
 		optimistic.AddInt32("volume_percent", fVolumePct);
 
 	std::string uriString = uri;
-	std::string contextUri = message->GetString("context_uri", "");
+	std::string contextUri = message->GetString(MessageFields::ContextUri, "");
 	std::string itemKind = message->GetString(kNowPlayingItemKindField, "");
 	if (itemKind.empty()) {
 		SpotifyItemKind kind = SpotifyItemKindForUri(uriString);
@@ -963,8 +948,8 @@ PlayerWindow::_ApplyOptimisticPlay(BMessage* message)
 		parentKind = "track";
 
 	optimistic.AddString("track_uri", uri);
-	optimistic.AddString("title", message->GetString("title", ""));
-	optimistic.AddString("artist", message->GetString("artist", ""));
+	optimistic.AddString(MessageFields::Title, message->GetString(MessageFields::Title, ""));
+	optimistic.AddString(MessageFields::Artist, message->GetString(MessageFields::Artist, ""));
 	optimistic.AddString("album_id", message->GetString("album_id", ""));
 	optimistic.AddString("artist_id", message->GetString("artist_id", ""));
 	optimistic.AddString(kNowPlayingItemKindField, itemKind.c_str());
@@ -1041,10 +1026,8 @@ PlayerWindow::_PlayUri(BMessage* message)
 	if (!api)
 		return;
 
-	const char* uri = message->GetString("uri", "");
-	if (!uri || !uri[0])
-		uri = message->GetString("trackUri", "");
-	if (!uri || !uri[0])
+	MessageContracts::PlayCommand command;
+	if (!MessageContracts::ReadPlayCommand(*message, command))
 		return;
 
 	if (!_EnsurePlaybackDeviceThen(message))
@@ -1061,16 +1044,14 @@ PlayerWindow::_PlayUriNow(BMessage* message)
 	if (!api)
 		return;
 
-	const char* uri = message->GetString("uri", "");
-	if (!uri || !uri[0])
-		uri = message->GetString("trackUri", "");
-	if (!uri || !uri[0])
+	MessageContracts::PlayCommand command;
+	if (!MessageContracts::ReadPlayCommand(*message, command))
 		return;
 
-	std::string uriStr = uri;
-	std::string contextUri = message->GetString("context_uri", "");
-	std::string deviceId = message->GetString("device_id", "");
-	std::vector<std::string> queueUris = _QueueUrisFromMessage(message);
+	const std::string& uriStr = command.uri;
+	const std::string& contextUri = command.contextUri;
+	const std::string& deviceId = command.deviceId;
+	const std::vector<std::string>& queueUris = command.nextQueueUris;
 	bool audiobookQueue = _MessageTargetsAudiobookQueue(message);
 
 	SpotifyItemKind kind = SpotifyItemKindForUri(uriStr);
@@ -1087,9 +1068,8 @@ PlayerWindow::_PlayUriNow(BMessage* message)
 				fVolumePct);
 		}
 
-		int32 startPositionMs = message->GetInt32("start_position_ms", 0);
 		_StartPlayableUri(api, uriStr, contextUri, queueUris,
-			audiobookQueue, startPositionMs, deviceId, fShuffleOn);
+			audiobookQueue, command.startPositionMs, deviceId, fShuffleOn);
 		_ScheduleVerifyPoll(kVerifyPollDelay);
 		return;
 	}
@@ -1105,12 +1085,11 @@ PlayerWindow::_EnsurePlaybackDeviceThen(BMessage* message)
 {
 	if (!message)
 		return false;
-	const char* explicitDevice = message->GetString("device_id", "");
+	const char* explicitDevice = message->GetString(MessageFields::DeviceId, "");
 	if (explicitDevice && explicitDevice[0])
 		return true;
 	if (!fCurrentDeviceId.empty()) {
-		message->AddString("device_id", fCurrentDeviceId.c_str());
-		return true;
+		return MessageContracts::SetPlaybackDevice(*message, fCurrentDeviceId);
 	}
 
 	fPendingPlaybackCommand = *message;
@@ -1177,10 +1156,10 @@ PlayerWindow::_ShowPlaybackDevicePrompt(BMessage* message)
 void
 PlayerWindow::_ApplyPlaybackDeviceSelection(BMessage* message)
 {
-	const char* deviceId = message->GetString("device_id", "");
-	if (!deviceId || !deviceId[0])
+	MessageContracts::DevicePromptResult result;
+	if (!MessageContracts::ReadDevicePromptResult(*message, result))
 		return;
-	_ExecutePendingPlaybackCommand(deviceId);
+	_ExecutePendingPlaybackCommand(result.deviceId);
 }
 
 
@@ -1237,13 +1216,13 @@ PlayerWindow::_ExecutePendingPlaybackCommand(const std::string& deviceId)
 	if (!fHasPendingPlaybackCommand)
 		return;
 	BMessage command(fPendingPlaybackCommand);
+	if (!MessageContracts::SetPlaybackDevice(command, deviceId))
+		return;
 	fPendingPlaybackCommand.MakeEmpty();
 	fHasPendingPlaybackCommand = false;
 	fPlaybackDevicePromptOpen = false;
 	delete fLocalPlaybackDeviceTimer;
 	fLocalPlaybackDeviceTimer = nullptr;
-	command.RemoveName("device_id");
-	command.AddString("device_id", deviceId.c_str());
 	fCurrentDeviceId = deviceId;
 	_ExecutePlaybackCommand(&command);
 }
@@ -1255,11 +1234,11 @@ PlayerWindow::_ExecutePlaybackCommand(BMessage* message)
 	if (!message)
 		return;
 	switch (message->what) {
-		case 'play':
+		case MSG_PLAY_URI:
 			_PlayUriNow(message);
 			return;
 		case MSG_PLAY_PAUSE:
-			_ResumePlayback(message->GetString("device_id", ""));
+			_ResumePlayback(message->GetString(MessageFields::DeviceId, ""));
 			return;
 		default:
 			return;
@@ -1776,9 +1755,8 @@ PlayerWindow::_PlayNextAudiobookChapter()
 	if (nextUri.empty())
 		return false;
 
-	BMessage play('play');
-	play.AddString("uri", nextUri.c_str());
-	play.AddString("artist", fCurrentArtist.c_str());
+	BMessage play = MessageContracts::MakePlayCommand({nextUri.c_str()});
+	play.AddString(MessageFields::Artist, fCurrentArtist.c_str());
 	play.AddString(kNowPlayingItemKindField, "chapter");
 	play.AddString(kNowPlayingPrimaryOpenUriField,
 		fCurrentPrimaryOpenUri.c_str());
@@ -2162,7 +2140,7 @@ PlayerWindow::_HandlePlaybackMessage(BMessage* message)
 			_PublishReplicantState();
 			return true;
 
-		case 'play':
+		case MSG_PLAY_URI:
 			_PlayUri(message);
 			return true;
 
@@ -2192,21 +2170,26 @@ PlayerWindow::_HandlePlaybackDeviceMessage(BMessage* message)
 			_ApplyPlaybackDeviceChoices(message);
 			return true;
 
-		case kMsgPlaybackDeviceSelected:
+		case MSG_PLAYBACK_DEVICE_SELECTED:
 			_ApplyPlaybackDeviceSelection(message);
 			return true;
 
-		case kMsgPlaybackDeviceStartLocal:
+		case MSG_PLAYBACK_DEVICE_START_LOCAL:
 			_StartLocalPlaybackDevice();
 			return true;
 
-		case kMsgPlaybackDevicePromptClosed:
+		case MSG_PLAYBACK_DEVICE_PROMPT_CLOSED:
+		{
+			MessageContracts::DevicePromptResult result;
+			if (!MessageContracts::ReadDevicePromptResult(*message, result))
+				return true;
 			fPlaybackDevicePromptOpen = false;
-			if (message->GetBool("cancelled", false)) {
+			if (result.cancelled) {
 				fPendingPlaybackCommand.MakeEmpty();
 				fHasPendingPlaybackCommand = false;
 			}
 			return true;
+		}
 
 		case kMsgRetryLocalPlaybackDevice:
 			_RetryLocalPlaybackDevice();

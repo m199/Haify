@@ -1,4 +1,6 @@
 #include "HttpClient.h"
+#include "HttpRequestCompletion.h"
+#include "HaifyDebug.h"
 
 #include <DataIO.h>
 #include <HttpHeaders.h>
@@ -15,6 +17,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <limits>
+#include <memory>
 #include <string>
 #include <utility>
 
@@ -350,70 +353,115 @@ RunDeleteRequest(const ReqState& req)
     return response;
 }
 
+static HttpResponse
+NativeRequestFailure(const char* operation, status_t status)
+{
+    return {-1, std::string("Haiku ") + operation + " failed: "
+        + strerror(status) + " (native_status=" + std::to_string(status) + ")"};
+}
+
+static status_t
+ConfigureHttpRequest(BHttpRequest& request, const ReqState& req)
+{
+    request.SetMethod(req.method.c_str());
+    request.SetFollowLocation(true);
+    auto headers = std::make_unique<BHttpHeaders>();
+    for (const auto& header : req.headers)
+        headers->AddHeader(header.first.c_str(), header.second.c_str());
+    request.AdoptHeaders(headers.release());
+
+    auto body = std::make_unique<BMallocIO>();
+    if (!req.body.empty()) {
+        ssize_t written = body->Write(req.body.data(), req.body.size());
+        if (written < 0)
+            return static_cast<status_t>(written);
+        if (static_cast<size_t>(written) != req.body.size())
+            return B_IO_ERROR;
+        off_t position = body->Seek(0, SEEK_SET);
+        if (position < 0)
+            return static_cast<status_t>(position);
+    }
+    request.AdoptInputData(body.release(), static_cast<ssize_t>(req.body.size()));
+    return B_OK;
+}
+
+static HttpResponse
+ReadProtocolResponse(const BUrlRequest& request, const BMallocIO& output)
+{
+    const BHttpResult& result = static_cast<const BHttpResult&>(request.Result());
+    int httpStatus = static_cast<int>(result.StatusCode());
+    // The request worker's exit value is B_OK even when the protocol fails.
+    // Status() carries the network/TLS/protocol result after the worker exits.
+    status_t nativeStatus = request.Status();
+    int status = HttpRequestCompletion::ResponseStatus(nativeStatus, httpStatus);
+    if (status < 0) {
+        if (nativeStatus != B_OK) {
+            HttpResponse failure = NativeRequestFailure("request", nativeStatus);
+            failure.body += " (http_status=" + std::to_string(httpStatus) + ")";
+            return failure;
+        }
+        return {-1, "No valid HTTP response (http_status="
+            + std::to_string(httpStatus) + ")"};
+    }
+
+    HttpResponse response(status);
+    if (result.HasHeaders()) {
+        const char* value = result.Headers().HeaderValue("Retry-After");
+        if (value)
+            response.retryAfter = atoi(value);
+    }
+    if (output.BufferLength() > 0) {
+        response.body.assign(static_cast<const char*>(output.Buffer()),
+            output.BufferLength());
+    }
+    return response;
+}
+
+static HttpResponse
+RunProtocolRequest(const ReqState& req)
+{
+    BMallocIO output;
+    BUrl burl(req.url.c_str(), false);
+    std::unique_ptr<BUrlRequest> urlReq(
+        BUrlProtocolRoster::MakeRequest(burl, &output));
+    if (!urlReq)
+        return {-1, "MakeRequest failed"};
+    urlReq->SetTimeout(30000000LL);
+
+    auto* httpReq = dynamic_cast<BHttpRequest*>(urlReq.get());
+    if (!httpReq)
+        return {-1, "URL did not create an HTTP request"};
+    status_t configured = ConfigureHttpRequest(*httpReq, req);
+    if (configured != B_OK)
+        return NativeRequestFailure("request body setup", configured);
+
+    thread_id thread = urlReq->Run();
+    if (thread < 0)
+        return NativeRequestFailure("request Run", thread);
+    status_t exitValue = B_OK;
+    auto wait = [thread, &exitValue]() { return wait_for_thread(thread, &exitValue); };
+    auto completion = HttpRequestCompletion::WaitUntilFinished(wait);
+    if (completion.interruptions > 0) {
+        DEBUG_PRINT("HTTP %s wait resumed after %u interruptions\n",
+            req.method.c_str(), completion.interruptions);
+    }
+    if (completion.status != B_OK) {
+        urlReq->Stop();
+        // Stop joins in libnetservices; also finish a join interrupted inside
+        // Stop before releasing the request and its output buffer.
+        HttpRequestCompletion::WaitUntilFinished(wait);
+        return NativeRequestFailure("wait_for_thread", completion.status);
+    }
+    return ReadProtocolResponse(*urlReq, output);
+}
+
 static int32
 RunRequest(void* data)
 {
-    auto* req = static_cast<ReqState*>(data);
-
-    if (req->method == "DELETE") {
-        HttpResponse response = RunDeleteRequest(*req);
-        req->cb(response);
-        delete req;
-        return 0;
-    }
-
-    BMallocIO output;
-    BUrl burl(req->url.c_str(), false);
-    BUrlRequest* urlReq = BUrlProtocolRoster::MakeRequest(burl, &output);
-
-    if (!urlReq) {
-        req->cb({-1, "MakeRequest failed", -1});
-        delete req;
-        return 1;
-    }
-    urlReq->SetTimeout(30000000LL);
-
-    BHttpRequest* httpReq = dynamic_cast<BHttpRequest*>(urlReq);
-    if (httpReq) {
-        httpReq->SetMethod(req->method.c_str());
-        httpReq->SetFollowLocation(true);
-
-        BHttpHeaders* headers = new BHttpHeaders();
-        for (const auto& header : req->headers)
-            headers->AddHeader(header.first.c_str(), header.second.c_str());
-        httpReq->AdoptHeaders(headers);
-
-        BMallocIO* body = new BMallocIO();
-        if (!req->body.empty()) {
-            body->Write(req->body.data(), req->body.size());
-            body->Seek(0, SEEK_SET);
-        }
-        httpReq->AdoptInputData(body, (ssize_t)req->body.size());
-    }
-
-    thread_id thread = urlReq->Run();
-    status_t exitValue = B_OK;
-    if (thread >= 0)
-        wait_for_thread(thread, &exitValue);
-
-    int statusCode = -1;
-    int retryAfter = -1;
-    if (httpReq) {
-        const BHttpResult& result
-            = static_cast<const BHttpResult&>(urlReq->Result());
-        statusCode = (int)result.StatusCode();
-        if (result.HasHeaders()) {
-            const char* value = result.Headers().HeaderValue("Retry-After");
-            if (value)
-                retryAfter = atoi(value);
-        }
-    }
-
-    std::string body((const char*)output.Buffer(), output.BufferLength());
-    req->cb({statusCode, body, retryAfter});
-
-    delete urlReq;
-    delete req;
+    std::unique_ptr<ReqState> req(static_cast<ReqState*>(data));
+    HttpResponse response = req->method == "DELETE"
+        ? RunDeleteRequest(*req) : RunProtocolRequest(*req);
+    req->cb(response);
     return 0;
 }
 

@@ -4,6 +4,7 @@
 #include "HaifyDragState.h"
 #include "HaifyDebug.h"
 #include "Messages.h"
+#include "MessageContracts.h"
 #include "PlaylistTrackRow.h"
 #include "PlaylistWindow.h"
 #include "spotify/SpotifyUri.h"
@@ -151,7 +152,7 @@ public:
 		if (!fOwner || !message || message->what != B_MOUSE_MOVED)
 			return B_DISPATCH_MESSAGE;
 		BMessage drag;
-		if (!GetHaifyActiveDragMessage(drag) || drag.what != 'drag')
+		if (!GetHaifyActiveDragMessage(drag) || drag.what != MSG_DRAG_ITEM)
 			return B_DISPATCH_MESSAGE;
 
 		BView* view = dynamic_cast<BView*>(*target);
@@ -262,7 +263,7 @@ TrackListView::MessageReceived(BMessage* message)
 		DEBUG_PRINT("TrackListView received dropped message (what=%.4s)\n",
 			(char*)&message->what);
 	}
-	if (message->WasDropped() && message->what == 'drag') {
+	if (message->WasDropped() && message->what == MSG_DRAG_ITEM) {
 		DEBUG_PRINT("TrackListView: Posting 'drag' drop to Window\n");
 		ClearDropMarker();
 		ClearHaifyActiveDragMessage();
@@ -309,31 +310,28 @@ TrackListView::InitiateDrag(BPoint point, bool)
 		DEBUG_PRINT("InitiateDrag: Initiating drag for track %s\n",
 			row->fTrackUri.c_str());
 		if (!row->fTrackUri.empty()) {
-			BMessage dragMessage('drag');
-			dragMessage.AddString("uri", row->fTrackUri.c_str());
-			dragMessage.AddString("itemType",
-				SpotifyItemTypeName(SpotifyItemKindForUri(row->fTrackUri)));
-			dragMessage.AddString("trackUri", row->fTrackUri.c_str());
+			MessageContracts::DragItem item{row->fTrackUri,
+				SpotifyItemKindForUri(row->fTrackUri)};
 			if (PlaylistWindow* window =
 					dynamic_cast<PlaylistWindow*>(Window())) {
-				dragMessage.AddString("sourcePlaylist",
-					window->GetUri().c_str());
+				item.sourcePlaylist = window->GetUri();
 				for (int32 i = 0; i < CountRows(); i++) {
 					if (RowAt(i) == row) {
-						dragMessage.AddInt32("sourceIndex", i);
+						item.sourceIndex = i;
 						break;
 					}
 				}
 			}
+			BMessage dragMessage = MessageContracts::MakeDragItem(item);
 			auto getString = [&](int32 column) -> const char* {
 				BStringField* field =
 					dynamic_cast<BStringField*>(row->GetField(column));
 				return field ? field->String() : "";
 			};
-			dragMessage.AddString("title", getString(1));
-			dragMessage.AddString("artist", getString(2));
-			dragMessage.AddString("album", getString(5));
-			dragMessage.AddString("duration", getString(6));
+			dragMessage.AddString(MessageFields::Title, getString(1));
+			dragMessage.AddString(MessageFields::Artist, getString(2));
+			dragMessage.AddString(MessageFields::Album, getString(5));
+			dragMessage.AddString(MessageFields::Duration, getString(6));
 
 			BRect dragRect(point.x - 100, point.y - 10, point.x + 100,
 				point.y + 10);
@@ -355,7 +353,7 @@ TrackListView::MouseMoved(BPoint point, uint32 transit,
 {
 	if (transit == B_EXITED_VIEW)
 		ClearDropMarker();
-	else if (dragMessage && dragMessage->what == 'drag') {
+	else if (dragMessage && dragMessage->what == MSG_DRAG_ITEM) {
 		_UpdateDropMarker(point, dragMessage);
 		if (Window())
 			Window()->PostMessage(kMsgCheckLazyLoad);
@@ -459,10 +457,10 @@ TrackListView::_UpdateDropMarker(BPoint point, const BMessage* dragMessage)
 	bool canReorderDrag = false;
 	if (PlaylistWindow* window = dynamic_cast<PlaylistWindow*>(Window())) {
 		std::string sourcePlaylist = dragMessage
-			? dragMessage->GetString("sourcePlaylist", "") : "";
+			? dragMessage->GetString(MessageFields::SourcePlaylist, "") : "";
 		canReorderDrag = !sourcePlaylist.empty()
 			&& sourcePlaylist == window->GetUri()
-			&& dragMessage->GetInt32("sourceIndex", -1) >= 0;
+			&& dragMessage->GetInt32(MessageFields::SourceIndex, -1) >= 0;
 	}
 
 	if (canReorderDrag && (flags & kDropFeedbackInsertMarker) != 0) {

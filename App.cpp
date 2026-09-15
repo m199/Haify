@@ -1,5 +1,6 @@
 #include "App.h"
 #include "Messages.h"
+#include "MessageContracts.h"
 #include "PlayerWindow.h"
 #include "ArtworkWindow.h"
 #include "DiscoverWindow.h"
@@ -304,8 +305,7 @@ App::_SendCurrentTrackTo(BWindow* window)
 	if (!trackUri || !trackUri[0])
 		return;
 
-	BMessage msg('pStU');
-	msg.AddString("trackUri", trackUri);
+	BMessage msg = MessageContracts::MakeCurrentTrackUpdate({trackUri});
 	window->PostMessage(&msg);
 }
 
@@ -321,8 +321,7 @@ App::_BroadcastPlayingTrack(const char* trackUri)
 			fLastReplicantState.AddString("track_uri", trackUri);
 	}
 
-	BMessage msg('pStU');
-	msg.AddString("trackUri", trackUri);
+	BMessage msg = MessageContracts::MakeCurrentTrackUpdate({trackUri});
 	for (int32 i = 0; i < CountWindows(); i++) {
 		BWindow* win = WindowAt(i);
 		if (win)
@@ -420,6 +419,8 @@ App::_OpenPlaylistWindow(BMessage* message)
 void
 App::_BroadcastPlaylistsChanged(BMessage* message)
 {
+	if (!MessageContracts::MatchesAccount(*message, fApi ? fApi->AccountId() : ""))
+		return;
 	for (int32 i = 0; i < CountWindows(); i++) {
 		DiscoverWindow* window = dynamic_cast<DiscoverWindow*>(WindowAt(i));
 		if (window)
@@ -431,6 +432,8 @@ App::_BroadcastPlaylistsChanged(BMessage* message)
 void
 App::_BroadcastLibraryChanged(BMessage* message)
 {
+	if (!MessageContracts::MatchesAccount(*message, fApi ? fApi->AccountId() : ""))
+		return;
 	const char* operation = nullptr;
 	const char* uri = nullptr;
 	bool isDelta = message->FindString("operation", &operation) == B_OK
@@ -642,12 +645,12 @@ App::_ApplyReplicantState(BMessage* message)
 void
 App::_ForwardPlayerCommand(BMessage* message)
 {
-	if (message->what == 'play') {
-		const char* uri = message->GetString("uri", "");
-		if ((!uri || !uri[0]))
-			uri = message->GetString("trackUri", "");
-		if (uri && SpotifyItemIsPlayable(SpotifyItemKindForUri(uri)))
-			_BroadcastPlayingTrack(uri);
+	if (message->what == MSG_PLAY_URI) {
+		MessageContracts::PlayCommand command;
+		if (!MessageContracts::ReadPlayCommand(*message, command))
+			return;
+		if (SpotifyItemIsPlayable(SpotifyItemKindForUri(command.uri)))
+			_BroadcastPlayingTrack(command.uri.c_str());
 	}
 	if (fPlayerWindow)
 		fPlayerWindow->PostMessage(message);
@@ -697,8 +700,8 @@ App::_OpenSpotifyUri(BMessage* message)
 {
 	const char* uri = nullptr;
 	const char* title = nullptr;
-	message->FindString("uri", &uri);
-	message->FindString("title", &title);
+	message->FindString(MessageFields::Uri, &uri);
+	message->FindString(MessageFields::Title, &title);
 	if (!uri || !uri[0])
 		return;
 	std::string uriString = uri;
@@ -714,8 +717,7 @@ App::_OpenSpotifyUri(BMessage* message)
 	else if (kind == kSpotifyItemAudiobook)
 		_OpenAudiobookUri(SpotifyItemIdForUri(uriString));
 	else if (kind == kSpotifyItemTrack) {
-		BMessage play('play');
-		play.AddString("uri", uriString.c_str());
+		BMessage play = MessageContracts::MakePlayCommand({uriString.c_str()});
 		PostMessage(&play);
 	} else if (_ShouldResolveShowAsAudiobook(message, kind)) {
 		_ResolveShowOrAudiobook(uriString, titleString);
@@ -1238,9 +1240,13 @@ App::_HandleStateMessage(BMessage* message)
 		case 'spAc':
 			_ApplySpotifyAccount(message);
 			return true;
-		case 'pStU':
-			_BroadcastPlayingTrack(message->GetString("trackUri", ""));
+		case MSG_CURRENT_TRACK_UPDATE:
+		{
+			MessageContracts::CurrentTrackUpdate update;
+			if (MessageContracts::ReadCurrentTrackUpdate(*message, update))
+				_BroadcastPlayingTrack(update.uri.c_str());
 			return true;
+		}
 		default:
 			return false;
 	}
@@ -1285,7 +1291,7 @@ App::_HandlePlayerMessage(BMessage* message)
 		case MSG_SHOW_ADD_TRACK_MENU:
 		case MSG_SEEK_REQUEST:
 		case MSG_SEEKBAR_COLOR_DROPPED:
-		case 'play':
+		case MSG_PLAY_URI:
 			_ForwardPlayerCommand(message);
 			return true;
 		case 'poll':

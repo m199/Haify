@@ -7,6 +7,7 @@
 #include "TextInputDialog.h"
 #include "MediaHeaderStyle.h"
 #include "Messages.h"
+#include "MessageContracts.h"
 #include "NowPlayingFields.h"
 #include "SettingsController.h"
 #include "HaifyDebug.h"
@@ -734,7 +735,7 @@ PlaylistWindow::_HandleDataMessage(BMessage* message)
 		case 'uTtl':
 			_ApplyTitleUpdate(message);
 			return true;
-		case 'pStU':
+		case MSG_CURRENT_TRACK_UPDATE:
 			_ApplyPlayingTrackUpdate(message);
 			return true;
 		case 'uCov':
@@ -968,9 +969,9 @@ PlaylistWindow::_ShowPlaylistSnapshotConflict()
 void
 PlaylistWindow::_ApplyPlayingTrackUpdate(BMessage* message)
 {
-	const char* trackUri;
-	if (message->FindString("trackUri", &trackUri) == B_OK)
-		SetPlayingTrack(trackUri);
+	MessageContracts::CurrentTrackUpdate update;
+	if (MessageContracts::ReadCurrentTrackUpdate(*message, update))
+		SetPlayingTrack(update.uri.c_str());
 }
 
 
@@ -1085,12 +1086,10 @@ PlaylistWindow::_RenamePlaylist(BMessage* message)
 void
 PlaylistWindow::_PlayTrackFromMessage(BMessage* message)
 {
-	const char* trackUri = message->GetString("trackUri", "");
+	const char* trackUri = message->GetString(MessageFields::TrackUri, "");
 	if (!*trackUri)
 		return;
-	BMessage play('play');
-	play.AddString("uri", trackUri);
-	play.AddString("context_uri", fUri.c_str());
+	BMessage play = MessageContracts::MakePlayCommand({trackUri, fUri});
 	bool podcast = SpotifyItemKindForUri(fUri) == kSpotifyItemShow;
 	for (int32 i = 0; i < fTrackList->CountRows(); i++) {
 		TrackRow* row = (TrackRow*)fTrackList->RowAt(i);
@@ -1099,9 +1098,9 @@ PlaylistWindow::_PlayTrackFromMessage(BMessage* message)
 		BStringField* title = dynamic_cast<BStringField*>(row->GetField(1));
 		BStringField* artist = dynamic_cast<BStringField*>(row->GetField(2));
 		if (title)
-			play.AddString("title", title->String());
+			play.AddString(MessageFields::Title, title->String());
 		if (!podcast && artist)
-			play.AddString("artist", artist->String());
+			play.AddString(MessageFields::Artist, artist->String());
 		break;
 	}
 	_AddFollowingTrackQueue(play, trackUri);
@@ -1117,16 +1116,14 @@ PlaylistWindow::_PlayCurrentTrack()
 	if (!row || row->fTrackUri.empty())
 		return;
 
-	BMessage play('play');
-	play.AddString("uri", row->fTrackUri.c_str());
-	play.AddString("context_uri", fUri.c_str());
+	BMessage play = MessageContracts::MakePlayCommand({row->fTrackUri, fUri});
 	bool podcast = SpotifyItemKindForUri(fUri) == kSpotifyItemShow;
 	BStringField* title = dynamic_cast<BStringField*>(row->GetField(1));
 	BStringField* artist = dynamic_cast<BStringField*>(row->GetField(2));
 	if (title)
-		play.AddString("title", title->String());
+		play.AddString(MessageFields::Title, title->String());
 	if (!podcast && artist)
-		play.AddString("artist", artist->String());
+		play.AddString(MessageFields::Artist, artist->String());
 	_AddFollowingTrackQueue(play, row->fTrackUri);
 	_AddPodcastNowPlayingContext(play);
 	be_app->PostMessage(&play);
@@ -1325,23 +1322,19 @@ void
 PlaylistWindow::_HandleTrackDrop(BMessage* message)
 {
 	ClearHaifyActiveDragMessage();
-	const char* trackUri = message->GetString("trackUri", "");
-	if (!trackUri || !trackUri[0])
-		trackUri = message->GetString("uri", "");
-	const char* sourcePlaylist = message->GetString("sourcePlaylist", "");
-	int32 sourceIndex = message->GetInt32("sourceIndex", -1);
-	std::string type = message->GetString("itemType", "");
+	MessageContracts::DragItem item;
+	if (!MessageContracts::ReadDragItem(*message, item))
+		return;
 	bool mutationPending = fTrackRemovalPending || fTrackReorderPending
 		|| fPlaylistClearPending;
-	PlaylistDropAction action = ResolvePlaylistDropAction(fUri,
-		sourcePlaylist, sourceIndex, type, trackUri, fPlaylistOwned,
-		mutationPending);
+	PlaylistDropAction action = ResolvePlaylistDropAction(fUri, item,
+		fPlaylistOwned, mutationPending);
 	if (action == kPlaylistDropReorder) {
-		_HandleTrackReorderDrop(message, sourceIndex);
+		_HandleTrackReorderDrop(message, item.sourceIndex);
 		return;
 	}
 	if (action == kPlaylistDropAddPlayableItem) {
-		_AddDroppedPlayableItem(message, trackUri);
+		_AddDroppedPlayableItem(message, item.uri.c_str());
 		return;
 	}
 	DEBUG_PRINT("PlaylistWindow: Drop received without playable track uri\n");
@@ -1696,8 +1689,7 @@ PlaylistWindow::_PlayContextUri()
 {
 	if (fUri.empty())
 		return;
-	BMessage play('play');
-	play.AddString("uri", fUri.c_str());
+	BMessage play = MessageContracts::MakePlayCommand({fUri});
 	be_app->PostMessage(&play);
 }
 
@@ -2121,7 +2113,7 @@ public:
 		: BMessageFilter(B_ANY_DELIVERY, B_ANY_SOURCE), fWindow(window) {}
 
 	filter_result Filter(BMessage* message, BHandler** target) {
-		if (message->what == 'drag') {
+		if (message->what == MSG_DRAG_ITEM) {
 			DEBUG_PRINT("DropFilter: caught 'drag' message! WasDropped=%d, target=%p\n", message->WasDropped(), *target);
 			if (message->WasDropped()) {
 				DEBUG_PRINT("DropFilter: forwarding dropped message to window\n");
@@ -3234,7 +3226,7 @@ PlaylistWindow::_AddFollowingTrackQueue(BMessage& play,
 			found = row->fTrackUri == trackUri;
 			continue;
 		}
-		play.AddString("next_queue_uri", row->fTrackUri.c_str());
+		play.AddString(MessageFields::NextQueueUri, row->fTrackUri.c_str());
 	}
 }
 

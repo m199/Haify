@@ -231,6 +231,12 @@ PlaylistApi::GetPlaylists(JsonCallback callback)
 }
 
 void
+PlaylistApi::InvalidatePlaylists()
+{
+    fInvalidateCachePrefix("/me/playlists");
+}
+
+void
 PlaylistApi::_GetPlaylistsPage(int offset, nlohmann::json items,
     JsonCallback callback)
 {

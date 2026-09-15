@@ -5,6 +5,7 @@
 #include "ClickableLabelView.h"
 #include "MediaHeaderStyle.h"
 #include "Messages.h"
+#include "MessageContracts.h"
 #include "NowPlayingFields.h"
 #include "spotify/SpotifyUri.h"
 #include "spotify/api/SpotifyApi.h"
@@ -260,13 +261,12 @@ void EpisodeWindow::_PlayEpisode()
     if (fEpisodeUri.empty())
         return;
 
-    BMessage play('play');
-    play.AddString("uri", fEpisodeUri.c_str());
-    play.AddString("title", fName->Text());
+    BMessage play = MessageContracts::MakePlayCommand({fEpisodeUri.c_str()});
+    play.AddString(MessageFields::Title, fName->Text());
     if (!fShowName.empty())
-        play.AddString("artist", fShowName.c_str());
+        play.AddString(MessageFields::Artist, fShowName.c_str());
     if (!fShowUri.empty()) {
-        play.AddString("context_uri", fShowUri.c_str());
+        play.AddString(MessageFields::ContextUri, fShowUri.c_str());
         play.AddString(kNowPlayingPrimaryOpenUriField, fShowUri.c_str());
         play.AddString(kNowPlayingParentUriField, fShowUri.c_str());
         play.AddString(kNowPlayingParentKindField, "show");

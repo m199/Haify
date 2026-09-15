@@ -1,5 +1,6 @@
 #include "TrackContextMenu.h"
 #include "Messages.h"
+#include "MessageContracts.h"
 #include "spotify/SpotifyUri.h"
 #include "spotify/api/SpotifyApi.h"
 
@@ -31,7 +32,7 @@ public:
             for (const auto& playlist : playlists) {
                 BMessage* addMessage = new BMessage('addP');
                 addMessage->AddString("trackUri", fItemUri.c_str());
-                addMessage->AddString("playlistId", playlist.first.c_str());
+                addMessage->AddString(MessageFields::PlaylistId, playlist.first.c_str());
                 AddItem(new BMenuItem(playlist.second.c_str(), addMessage));
             }
             if (playlists.empty()) {
@@ -63,11 +64,15 @@ HasExplicitSavedContext(SpotifyItemKind itemKind,
 static void
 RequestPlayableLibraryState(const std::string& itemUri,
     const std::string& contextUri, BPoint screenPt, BMessenger win,
-    SpotifyApi* api, bool libraryOnly)
+    SpotifyApi* api, bool libraryOnly, const BMessage* commandContext)
 {
+    BMessage context;
+    if (commandContext)
+        context.AddMessage(MessageFields::CommandContext, commandContext);
     api->Library().CheckLibraryItems({itemUri}, [itemUri, contextUri,
-        screenPt, win, libraryOnly](bool ok, const nlohmann::json& data) {
-        BMessage result('iCmR');
+        screenPt, win, libraryOnly, context](bool ok, const nlohmann::json& data) {
+        BMessage result(context);
+        result.what = 'iCmR';
         result.AddString("uri", itemUri.c_str());
         result.AddString("context_uri", contextUri.c_str());
         result.AddPoint("screen_point", screenPt);
@@ -83,16 +88,15 @@ AddPlayableMenuItems(BPopUpMenu* menu, const std::string& itemUri,
     SpotifyItemKind itemKind, SpotifyApi* api)
 {
     BMessage* playMsg = new BMessage('tply');
-    playMsg->AddString("trackUri", itemUri.c_str());
+    playMsg->AddString(MessageFields::TrackUri, itemUri.c_str());
     menu->AddItem(new BMenuItem(B_TRANSLATE("Play"), playMsg));
     if (itemKind == kSpotifyItemEpisode) {
         BMessage* openMsg = new BMessage('open');
-        openMsg->AddString("uri", itemUri.c_str());
+        openMsg->AddString(MessageFields::Uri, itemUri.c_str());
         menu->AddItem(new BMenuItem(B_TRANSLATE("Open Details"), openMsg));
     }
     if (api) {
-        BMessage* queueMsg = new BMessage('addQ');
-        queueMsg->AddString("trackUri", itemUri.c_str());
+        BMessage* queueMsg = new BMessage(MessageContracts::MakeQueueCommand({itemUri}));
         menu->AddItem(new BMenuItem(B_TRANSLATE("Add to Queue"), queueMsg));
     }
     menu->AddSeparatorItem();
@@ -177,10 +181,13 @@ HandlePlayableMenuSelection(BMessage* message, const std::string& itemUri,
         return;
 
     switch (message->what) {
-        case 'addQ':
-            if (api)
-                api->Playback().AddToQueue(itemUri, nullptr);
+        case MSG_QUEUE_ITEM:
+        {
+            MessageContracts::QueueCommand command;
+            if (api && MessageContracts::ReadQueueCommand(*message, command))
+                api->Playback().AddToQueue(command.uri, nullptr);
             break;
+        }
         case 'likT':
             if (api) {
                 api->Library().SaveLibraryItems({itemUri}, [itemUri](
@@ -191,7 +198,7 @@ HandlePlayableMenuSelection(BMessage* message, const std::string& itemUri,
             break;
         case 'addP':
             if (api) {
-                const char* playlistId = message->GetString("playlistId", "");
+                const char* playlistId = message->GetString(MessageFields::PlaylistId, "");
                 if (*playlistId) {
                     api->Playlists().AddTrackToPlaylist(playlistId, itemUri,
                         nullptr);
@@ -207,7 +214,8 @@ HandlePlayableMenuSelection(BMessage* message, const std::string& itemUri,
 void
 ShowPlayableItemContextMenu(const std::string& itemUri,
     const std::string& contextUri, BPoint screenPt, BMessenger win,
-    SpotifyApi* api, bool libraryOnly, bool libraryStateKnown, bool saved)
+    SpotifyApi* api, bool libraryOnly, bool libraryStateKnown, bool saved,
+    const BMessage* commandContext)
 {
     if (itemUri.empty()) return;
     SpotifyItemKind itemKind = SpotifyItemKindForUri(itemUri);
@@ -219,15 +227,24 @@ ShowPlayableItemContextMenu(const std::string& itemUri,
     }
     if (!libraryStateKnown && api) {
         RequestPlayableLibraryState(itemUri, contextUri, screenPt, win, api,
-            libraryOnly);
+            libraryOnly, commandContext);
         return;
     }
 
     BPopUpMenu* menu = BuildPlayableItemContextMenu(itemUri, contextUri,
         itemKind, api, libraryOnly, saved);
     BMenuItem* selected = menu->Go(screenPt, false, true);
-    if (selected)
-        HandlePlayableMenuSelection(selected->Message(), itemUri, win, api);
+    if (selected && selected->Message()) {
+        if (commandContext) {
+            // The caller owns these commands and checks their context before
+            // executing side effects. Copy before destroying the popup menu.
+            BMessage command(*selected->Message());
+            command.AddMessage(MessageFields::CommandContext, commandContext);
+            win.SendMessage(&command);
+        } else {
+            HandlePlayableMenuSelection(selected->Message(), itemUri, win, api);
+        }
+    }
     delete menu;
 }
 

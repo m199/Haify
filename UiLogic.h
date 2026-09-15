@@ -1,5 +1,7 @@
 #pragma once
 
+#include "DragItem.h"
+
 #include "spotify/SpotifyUri.h"
 #include "spotify/SpotifyPlaylistPolicy.h"
 
@@ -220,23 +222,6 @@ NowPlayingUsesTrackIds(const std::string& itemKind,
 	return true;
 }
 
-inline std::vector<std::string>
-NormalizeStableOrder(const std::vector<std::string>& configured,
-	const std::vector<std::string>& known)
-{
-	std::vector<std::string> result;
-	for (const std::string& id : configured) {
-		if (std::find(known.begin(), known.end(), id) != known.end()
-				&& std::find(result.begin(), result.end(), id) == result.end())
-			result.push_back(id);
-	}
-	for (const std::string& id : known) {
-		if (std::find(result.begin(), result.end(), id) == result.end())
-			result.push_back(id);
-	}
-	return result;
-}
-
 inline SpotifyItemKind
 ResolveDroppedSpotifyItemKind(const std::string& itemType,
 	const std::string& uri)
@@ -272,6 +257,29 @@ ResolvePlaylistDropAction(const std::string& targetPlaylistUri,
 		return kPlaylistDropAddPlayableItem;
 	}
 	return kPlaylistDropIgnore;
+}
+
+inline PlaylistDropAction
+ResolvePlaylistDropAction(const std::string& targetPlaylistUri,
+	const MessageContracts::DragItem& item, bool targetWritable,
+	bool mutationPending)
+{
+	PlaylistDropAction action = ResolvePlaylistDropAction(targetPlaylistUri,
+		item.sourcePlaylist, item.sourceIndex, SpotifyItemTypeName(item.kind),
+		item.uri, targetWritable, mutationPending);
+	if (item.intent == MessageContracts::DropIntent::Add
+			&& action != kPlaylistDropAddPlayableItem)
+		return kPlaylistDropIgnore;
+	if (item.intent == MessageContracts::DropIntent::Reorder
+			&& action != kPlaylistDropReorder)
+		return kPlaylistDropIgnore;
+	return action;
+}
+
+inline bool
+DragItemCanCopy(const MessageContracts::DragItem& item)
+{
+	return item.intent != MessageContracts::DropIntent::Reorder;
 }
 
 inline int

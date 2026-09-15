@@ -3,6 +3,7 @@
 #include "App.h"
 #include "HaifyDragState.h"
 #include "Messages.h"
+#include "MessageContracts.h"
 #include "SettingsController.h"
 #include "DiscoverListView.h"
 #include "spotify/SpotifyUri.h"
@@ -288,7 +289,7 @@ public:
 		QueueRow* row = dynamic_cast<QueueRow*>(CurrentSelection());
 		if (!row || row->fUri.empty()) return;
 		BMessage msg('tply');
-		msg.AddString("trackUri", row->fUri.c_str());
+		msg.AddString(MessageFields::TrackUri, row->fUri.c_str());
 		Window()->PostMessage(&msg);
 	}
 
@@ -299,20 +300,17 @@ public:
 		if (!row || row->fUri.empty())
 			return false;
 
-		BMessage drag('drag');
-		drag.AddString("uri", row->fUri.c_str());
-		drag.AddString("itemType", SpotifyItemKindForUri(row->fUri)
-			== kSpotifyItemEpisode ? "episode" : "track");
-		drag.AddString("trackUri", row->fUri.c_str());
+		BMessage drag = MessageContracts::MakeDragItem({row->fUri,
+			SpotifyItemKindForUri(row->fUri)});
 		BStringField* title = dynamic_cast<BStringField*>(row->GetField(0));
 		BStringField* artist = dynamic_cast<BStringField*>(row->GetField(1));
 		BStringField* duration = dynamic_cast<BStringField*>(row->GetField(2));
 		if (title)
-			drag.AddString("title", title->String());
+			drag.AddString(MessageFields::Title, title->String());
 		if (artist)
-			drag.AddString("artist", artist->String());
+			drag.AddString(MessageFields::Artist, artist->String());
 		if (duration)
-			drag.AddString("duration", duration->String());
+			drag.AddString(MessageFields::Duration, duration->String());
 		BRect dragRect(point.x - 100, point.y - 10, point.x + 100, point.y + 10);
 		DeselectAll();
 		SetHaifyActiveDragMessage(drag);
@@ -331,7 +329,7 @@ public:
 		BTabView::Select(tab);
 		if (Window()) {
 			BMessage msg(kMsgTabSelected);
-			msg.AddInt32("tab", tab);
+			msg.AddInt32(MessageFields::Tab, tab);
 			Window()->PostMessage(&msg);
 		}
 	}
@@ -440,7 +438,7 @@ QueueWindow::MessageReceived(BMessage* message)
 		case kMsgTabSelected:
 		{
 			int32 tab = 0;
-			message->FindInt32("tab", &tab);
+			message->FindInt32(MessageFields::Tab, &tab);
 			_LoadRecentIfNeeded(tab);
 			break;
 		}
@@ -456,9 +454,8 @@ QueueWindow::MessageReceived(BMessage* message)
 				_LoadRecent();
 			break;
 
-		case 'pStU':
+		case MSG_CURRENT_TRACK_UPDATE:
 			_ApplyPlayingTrack(message);
-			_LoadQueue();
 			break;
 
 		case 'qItm':
@@ -473,7 +470,7 @@ QueueWindow::MessageReceived(BMessage* message)
 			_PlayTrackFromMessage(message);
 			break;
 
-		case 'play':
+		case MSG_PLAY_URI:
 			_ForwardPlayMessage(message);
 			break;
 
@@ -512,9 +509,11 @@ QueueWindow::_RefreshQueueAndRecent()
 void
 QueueWindow::_ApplyPlayingTrack(BMessage* message)
 {
-	const char* uri;
-	if (message->FindString("trackUri", &uri) == B_OK)
-		SetPlayingTrack(uri);
+	MessageContracts::CurrentTrackUpdate update;
+	if (MessageContracts::ReadCurrentTrackUpdate(*message, update)) {
+		SetPlayingTrack(update.uri.c_str());
+		_LoadQueue();
+	}
 }
 
 
@@ -650,12 +649,11 @@ QueueWindow::_ApplyRecentRows(BMessage* message)
 void
 QueueWindow::_PlayTrackFromMessage(BMessage* message)
 {
-	const char* uri = message->GetString("trackUri", "");
+	const char* uri = message->GetString(MessageFields::TrackUri, "");
 	if (!*uri)
 		return;
 
-	BMessage play('play');
-	play.AddString("uri", uri);
+	BMessage play = MessageContracts::MakePlayCommand({uri});
 	be_app->PostMessage(&play);
 }
 
@@ -663,8 +661,8 @@ QueueWindow::_PlayTrackFromMessage(BMessage* message)
 void
 QueueWindow::_ForwardPlayMessage(BMessage* message)
 {
-	const char* uri = nullptr;
-	if (message->FindString("uri", &uri) == B_OK && uri)
+	MessageContracts::PlayCommand command;
+	if (MessageContracts::ReadPlayCommand(*message, command))
 		be_app->PostMessage(message);
 }
 

@@ -20,6 +20,10 @@ public:
 
     void            SetAccessToken(const std::string& token);
     void            SetAccountId(const std::string& accountId);
+    std::string     AccountId() const { return fClient.AccountId(); }
+    bool            DispatchForAccount(const std::string& account,
+                        const std::function<void()>& operation)
+                        { return fClient.DispatchForAccount(account, operation); }
     void            SetTokenRefreshHandler(TokenRefreshHandler handler);
     void            SetRequestHandler(RequestHandler handler);
     void            ClearSession();

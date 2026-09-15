@@ -2,6 +2,7 @@
 #include "DropMarkerStyle.h"
 #include "HaifyDragState.h"
 #include "Messages.h"
+#include "MessageContracts.h"
 #include "spotify/SpotifyUri.h"
 
 #include <Application.h>
@@ -174,7 +175,7 @@ public:
 			return B_DISPATCH_MESSAGE;
 
 		BMessage show('rCf!');
-		show.AddPoint("screenPt", screenWhere);
+		show.AddPoint(MessageFields::ScreenPoint, screenWhere);
 		if (fOwner->Looper())
 			fOwner->Looper()->PostMessage(&show, fOwner);
 		return B_SKIP_MESSAGE;
@@ -194,7 +195,7 @@ public:
 
 	filter_result Filter(BMessage* msg, BHandler** target) override
 	{
-		if (!fOwner || !msg || !msg->WasDropped() || msg->what != 'drag')
+		if (!fOwner || !msg || !msg->WasDropped() || msg->what != MSG_DRAG_ITEM)
 			return B_DISPATCH_MESSAGE;
 
 		BView* view = dynamic_cast<BView*>(*target);
@@ -233,7 +234,7 @@ public:
 		if (!fOwner || !msg || msg->what != B_MOUSE_MOVED)
 			return B_DISPATCH_MESSAGE;
 		BMessage drag;
-		if (!GetHaifyActiveDragMessage(drag) || drag.what != 'drag')
+		if (!GetHaifyActiveDragMessage(drag) || drag.what != MSG_DRAG_ITEM)
 			return B_DISPATCH_MESSAGE;
 
 		BView* view = dynamic_cast<BView*>(*target);
@@ -378,7 +379,7 @@ DiscoverListView::MouseMoved(BPoint point, uint32 transit,
 		ClearDropMarker();
 		if (Window())
 			Window()->PostMessage(MSG_DISCOVER_DRAG_EXIT);
-	} else if (dragMessage && dragMessage->what == 'drag') {
+	} else if (dragMessage && dragMessage->what == MSG_DRAG_ITEM) {
 		BPoint mouse;
 		uint32 buttons = 0;
 		GetMouse(&mouse, &buttons, false);
@@ -394,8 +395,8 @@ DiscoverListView::MouseMoved(BPoint point, uint32 transit,
 		ConvertToScreen(&screen);
 		BMessage hover(*dragMessage);
 		hover.what = MSG_DISCOVER_DRAG_HOVER;
-		hover.AddInt32("tab", fLogicalTab);
-		hover.AddPoint("screenPt", screen);
+		hover.AddInt32(MessageFields::Tab, fLogicalTab);
+		hover.AddPoint(MessageFields::ScreenPoint, screen);
 		if (Window())
 			Window()->PostMessage(&hover);
 		return;
@@ -435,11 +436,11 @@ DiscoverListView::_ShowContextMenuAt(BPoint screenWhere)
 
 	BMessage rClk('rClk');
 	rClk.AddString("uri",      row->fUris[col].c_str());
-	rClk.AddInt32("tab", fLogicalTab);
+	rClk.AddInt32(MessageFields::Tab, fLogicalTab);
 	rClk.AddBool("owned", row->fOwned);
 	if (col < (int32)row->fTitles.size())
 		rClk.AddString("title", row->fTitles[col].c_str());
-	rClk.AddPoint ("screenPt", screenWhere);
+	rClk.AddPoint (MessageFields::ScreenPoint, screenWhere);
 	Window()->PostMessage(&rClk);
 }
 
@@ -462,13 +463,13 @@ DiscoverListView::MessageReceived(BMessage* message)
 		_ClearDropMarkerIfDragEnded();
 		return;
 	}
-	if (message->WasDropped() && message->what == 'drag') {
+	if (message->WasDropped() && message->what == MSG_DRAG_ITEM) {
 		ForwardDroppedMessage(message);
 		return;
 	}
 	if (message->what == 'rCf!') {
 		BPoint screen;
-		if (message->FindPoint("screenPt", &screen) == B_OK)
+		if (message->FindPoint(MessageFields::ScreenPoint, &screen) == B_OK)
 			_ShowContextMenuAt(screen);
 		return;
 	}
@@ -479,23 +480,23 @@ DiscoverListView::MessageReceived(BMessage* message)
 void
 DiscoverListView::ForwardDroppedMessage(BMessage* message)
 {
-	if (!message || message->what != 'drag')
+	if (!message || message->what != MSG_DRAG_ITEM)
 		return;
 
 	ClearDropMarker();
 	ClearHaifyActiveDragMessage();
 	DeselectAll();
 	BMessage drop(*message);
-	drop.what = 'dDrp';
-	drop.AddInt32("tab", fLogicalTab);
+	drop.what = MSG_DISCOVER_DROP;
+	drop.AddInt32(MessageFields::Tab, fLogicalTab);
 	BPoint point = RowPointFromScreen(this, message->DropPoint());
 	DiscoverRow* targetRow = dynamic_cast<DiscoverRow*>(RowAt(point));
 	if (targetRow && !targetRow->fUris.empty()
 			&& !targetRow->fUris[0].empty()) {
-		drop.AddString("targetUri", targetRow->fUris[0].c_str());
-		drop.AddBool("targetWritable", targetRow->fWritable);
+		drop.AddString(MessageFields::TargetUri, targetRow->fUris[0].c_str());
+		drop.AddBool(MessageFields::TargetWritable, targetRow->fWritable);
 		if (!targetRow->fTitles.empty())
-			drop.AddString("targetTitle", targetRow->fTitles[0].c_str());
+			drop.AddString(MessageFields::TargetTitle, targetRow->fTitles[0].c_str());
 	}
 	if (Window())
 		Window()->PostMessage(&drop);
@@ -536,12 +537,12 @@ void
 DiscoverListView::UpdateDropMarkerFromDrag(BPoint screenWhere,
 	const BMessage* dragMessage)
 {
-	if (!dragMessage || dragMessage->what != 'drag')
+	if (!dragMessage || dragMessage->what != MSG_DRAG_ITEM)
 		return;
 	BMessage hover(*dragMessage);
 	hover.what = MSG_DISCOVER_DRAG_HOVER;
-	hover.AddInt32("tab", fLogicalTab);
-	hover.AddPoint("screenPt", screenWhere);
+	hover.AddInt32(MessageFields::Tab, fLogicalTab);
+	hover.AddPoint(MessageFields::ScreenPoint, screenWhere);
 	if (Window())
 		Window()->PostMessage(&hover);
 }
@@ -574,7 +575,7 @@ DiscoverListView::InitiateDrag(BPoint point, bool)
 	if (column < 0)
 		return false;
 
-	BMessage drag('drag');
+	BMessage drag(MSG_DRAG_ITEM);
 	if (!_BuildDragMessage(row, column, drag))
 		return false;
 
@@ -625,20 +626,13 @@ DiscoverListView::_BuildDragMessage(DiscoverRow* row, int32 column,
 	SpotifyItemKind kind = SpotifyItemKindForUri(uri);
 	if (kind == kSpotifyItemUnknown || kind == kSpotifyItemPlaylist)
 		return false;
-	std::string itemType = SpotifyItemTypeName(kind);
-
-	drag.AddString("uri", uri.c_str());
-	drag.AddString("itemType", itemType.c_str());
-	if (SpotifyItemCanAddToPlaylist(kind))
-		drag.AddString("trackUri", uri.c_str());
-	if (kind == kSpotifyItemAlbum)
-		drag.AddString("albumUri", uri.c_str());
+	drag = MessageContracts::MakeDragItem({uri, kind});
 	if (column < (int32)row->fTitles.size())
-		drag.AddString("title", row->fTitles[column].c_str());
+		drag.AddString(MessageFields::Title, row->fTitles[column].c_str());
 	else if (column < (int32)row->fUris.size())
-		drag.AddString("title", "");
+		drag.AddString(MessageFields::Title, "");
 	if (row->fTitles.size() > 1)
-		drag.AddString("artist", row->fTitles[1].c_str());
+		drag.AddString(MessageFields::Artist, row->fTitles[1].c_str());
 	return true;
 }
 
@@ -727,11 +721,10 @@ DiscoverListView::_PostPlayClick(DiscoverRow* row, const std::string& uri,
 	const std::string& title)
 {
 	SetPlayingUri(uri);
-	BMessage msg('play');
-	msg.AddString("uri", uri.c_str());
-	msg.AddString("title", title.c_str());
+	BMessage msg = MessageContracts::MakePlayCommand({uri});
+	msg.AddString(MessageFields::Title, title.c_str());
 	if (row->fTitles.size() > 1)
-		msg.AddString("artist", row->fTitles[1].c_str());
+		msg.AddString(MessageFields::Artist, row->fTitles[1].c_str());
 	Window()->PostMessage(&msg);
 }
 
@@ -750,11 +743,11 @@ DiscoverListView::_PostRouteClick(DiscoverRow* row, const std::string& uri,
 	const std::string& title)
 {
 	bool playable = SpotifyItemIsPlayable(SpotifyItemKindForUri(uri));
-	BMessage msg(playable ? 'play' : 'open');
-	msg.AddString("uri", uri.c_str());
-	msg.AddString("title", title.c_str());
+	BMessage msg(playable ? MSG_PLAY_URI : 'open');
+	msg.AddString(MessageFields::Uri, uri.c_str());
+	msg.AddString(MessageFields::Title, title.c_str());
 	if (row->fTitles.size() > 1)
-		msg.AddString("artist", row->fTitles[1].c_str());
+		msg.AddString(MessageFields::Artist, row->fTitles[1].c_str());
 	Window()->PostMessage(&msg);
 }
 

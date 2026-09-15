@@ -5,6 +5,7 @@
 #include "HaifyDragState.h"
 #include "MediaHeaderStyle.h"
 #include "Messages.h"
+#include "MessageContracts.h"
 #include "HaifyDebug.h"
 #include "spotify/SpotifyUri.h"
 #include "spotify/api/SpotifyApi.h"
@@ -288,13 +289,11 @@ public:
 		if (!row || row->fTrackUri.empty())
 			return false;
 
-		BMessage drag('drag');
-		drag.AddString("uri", row->fTrackUri.c_str());
-		drag.AddString("itemType", "track");
-		drag.AddString("trackUri", row->fTrackUri.c_str());
+		BMessage drag = MessageContracts::MakeDragItem({row->fTrackUri,
+			kSpotifyItemTrack});
 		BStringField* title = dynamic_cast<BStringField*>(row->GetField(1));
 		if (title)
-			drag.AddString("title", title->String());
+			drag.AddString(MessageFields::Title, title->String());
 		BRect dragRect(point.x - 100, point.y - 10, point.x + 100, point.y + 10);
 		DeselectAll();
 		SetHaifyActiveDragMessage(drag);
@@ -415,11 +414,8 @@ public:
 			row->fAlbumId);
 		if (uri.empty())
 			return false;
-		BMessage drag('drag');
-		drag.AddString("uri", uri.c_str());
-		drag.AddString("itemType", "album");
-		drag.AddString("albumUri", uri.c_str());
-		drag.AddString("title", row->fAlbumName.c_str());
+		BMessage drag = MessageContracts::MakeDragItem({uri, kSpotifyItemAlbum});
+		drag.AddString(MessageFields::Title, row->fAlbumName.c_str());
 		BRect dragRect(point.x - 100, point.y - 10, point.x + 100, point.y + 10);
 		DeselectAll();
 		SetHaifyActiveDragMessage(drag);
@@ -735,9 +731,13 @@ ArtistWindow::_HandleArtistStateMessage(BMessage* message)
 	case kMsgRetryTopTracks:
 		_RetryTopTracks(message);
 		return true;
-	case 'pStU':
-		_SetPlayingTrack(message->GetString("trackUri", ""));
+	case MSG_CURRENT_TRACK_UPDATE:
+	{
+		MessageContracts::CurrentTrackUpdate update;
+		if (MessageContracts::ReadCurrentTrackUpdate(*message, update))
+			_SetPlayingTrack(update.uri.c_str());
 		return true;
+	}
 	default:
 		return false;
 	}
@@ -985,11 +985,10 @@ ArtistWindow::_PlayTrack(BMessage* message)
 	if (uri.empty())
 		return;
 
-	BMessage play('play');
-	play.AddString("uri", uri.c_str());
+	BMessage play = MessageContracts::MakePlayCommand({uri.c_str()});
 	std::string contextUri = SpotifyUriForItemKind(kSpotifyItemArtist,
 		fArtistId);
-	play.AddString("context_uri", contextUri.c_str());
+	play.AddString(MessageFields::ContextUri, contextUri.c_str());
 	_AddPlayingTrackMetadata(play, uri);
 	be_app->PostMessage(&play);
 	_SetPlayingTrack(uri.c_str());

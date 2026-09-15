@@ -26,6 +26,7 @@ public:
     void            ClearSession();
 
     void            GetPlaylists(JsonCallback callback);
+    void            InvalidatePlaylists();
     void            GetPlaylist(const std::string& playlistId,
                                 JsonCallback callback);
     void            InvalidatePlaylist(const std::string& playlistId);

@@ -5,6 +5,7 @@
 #include <string>
 
 class SpotifyApi;
+class BMessage;
 
 void ShowPlayableItemContextMenu(
     const std::string& itemUri,
@@ -14,7 +15,8 @@ void ShowPlayableItemContextMenu(
     SpotifyApi*        api,
     bool               libraryOnly = false,
     bool               libraryStateKnown = false,
-    bool               saved = false
+    bool               saved = false,
+    const BMessage*    commandContext = nullptr
 );
 
 // Compatibility entry point for existing callers. It now supports tracks and

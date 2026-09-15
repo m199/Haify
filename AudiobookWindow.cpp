@@ -7,6 +7,7 @@
 #include "MediaDescriptionView.h"
 #include "MediaHeaderStyle.h"
 #include "Messages.h"
+#include "MessageContracts.h"
 #include "NowPlayingFields.h"
 #include "TrackContextMenu.h"
 #include "spotify/SpotifyUri.h"
@@ -704,7 +705,7 @@ AudiobookWindow::_AddFollowingChapterQueue(BMessage& play,
 				fChapterList->RowAt(next));
 			if (nextRow && !nextRow->fUris.empty()
 					&& !nextRow->fUris[0].empty()) {
-				play.AddString("next_queue_uri", nextRow->fUris[0].c_str());
+				play.AddString(MessageFields::NextQueueUri, nextRow->fUris[0].c_str());
 			}
 		}
 		break;
@@ -874,17 +875,16 @@ AudiobookWindow::_PlayChapterUri(const std::string& uri, const char* title,
 	std::string audiobookUri = fAudiobookUri.empty()
 		? SpotifyUriForItemKind(kSpotifyItemAudiobook, fAudiobookId)
 		: fAudiobookUri;
-	BMessage play('play');
-	play.AddString("uri", uri.c_str());
-	play.AddString("title", title ? title : "");
-	play.AddString("artist", fName->Text());
+	BMessage play = MessageContracts::MakePlayCommand({uri.c_str()});
+	play.AddString(MessageFields::Title, title ? title : "");
+	play.AddString(MessageFields::Artist, fName->Text());
 	play.AddString(kNowPlayingItemKindField, "chapter");
 	play.AddString(kNowPlayingPrimaryOpenUriField, audiobookUri.c_str());
 	play.AddString(kNowPlayingParentUriField, audiobookUri.c_str());
 	play.AddString(kNowPlayingParentKindField, "audiobook");
 	play.AddString(kNowPlayingAudiobookIdField, fAudiobookId.c_str());
 	if (startPositionMs > 0)
-		play.AddInt32("start_position_ms", startPositionMs);
+		play.AddInt32(MessageFields::StartPositionMs, startPositionMs);
 	_AddFollowingChapterQueue(play, uri);
 	be_app->PostMessage(&play);
 }
@@ -1013,7 +1013,7 @@ AudiobookWindow::MessageReceived(BMessage* message)
 			_ApplyChapters(message);
 			break;
 
-		case 'play':
+		case MSG_PLAY_URI:
 			_PlayChapter(message);
 			break;
 

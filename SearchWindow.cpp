@@ -1,6 +1,7 @@
 #include "SearchWindow.h"
 #include "App.h"
 #include "Messages.h"
+#include "MessageContracts.h"
 #include "SettingsController.h"
 #include "DiscoverListView.h"
 #include "spotify/SpotifyUri.h"
@@ -201,26 +202,25 @@ AddSearchPrimaryActionItems(BPopUpMenu* menu, const std::string& uri,
 	const std::string& title, SpotifyItemKind kind, SpotifyApi* api)
 {
 	if (SpotifyItemIsPlayable(kind)) {
-		BMessage* play = new BMessage('play');
-		play->AddString("uri", uri.c_str());
+		BMessage* play = new BMessage(MessageContracts::MakePlayCommand({uri.c_str()}));
 		menu->AddItem(new BMenuItem(B_TRANSLATE("Play"), play));
 		if (kind == kSpotifyItemEpisode) {
 			BMessage* open = new BMessage('open');
-			open->AddString("uri", uri.c_str());
-			open->AddString("title", title.c_str());
+			open->AddString(MessageFields::Uri, uri.c_str());
+			open->AddString(MessageFields::Title, title.c_str());
 			menu->AddItem(new BMenuItem(B_TRANSLATE("Open Details"), open));
 		}
 		if (api) {
-			BMessage* queue = new BMessage('sQue');
-			queue->AddString("uri", uri.c_str());
+			BMessage* queue = new BMessage(MessageContracts::MakeQueueCommand(
+				{uri}, MSG_SEARCH_QUEUE_ITEM));
 			menu->AddItem(new BMenuItem(B_TRANSLATE("Add to Queue"), queue));
 		}
 		return;
 	}
 
 	BMessage* open = new BMessage('open');
-	open->AddString("uri", uri.c_str());
-	open->AddString("title", title.c_str());
+	open->AddString(MessageFields::Uri, uri.c_str());
+	open->AddString(MessageFields::Title, title.c_str());
 	menu->AddItem(new BMenuItem(B_TRANSLATE("Open"), open));
 }
 
@@ -343,8 +343,10 @@ HandleSearchMenuSelection(BMessage* message, const std::string& uri,
 {
 	if (!message)
 		return;
-	if (message->what == 'sQue' && api) {
-		api->Playback().AddToQueue(uri, nullptr);
+	if (message->what == MSG_SEARCH_QUEUE_ITEM && api) {
+		MessageContracts::QueueCommand command;
+		if (MessageContracts::ReadQueueCommand(*message, command))
+			api->Playback().AddToQueue(command.uri, nullptr);
 		return;
 	}
 	if (message->what == 'sAdd' || message->what == 'sRem') {
@@ -522,7 +524,7 @@ SearchWindow::MessageReceived(BMessage* message)
 			_ApplyResults(message);
 			break;
 
-		case 'pStU':
+		case MSG_CURRENT_TRACK_UPDATE:
 			_ApplyPlayingTrack(message);
 			break;
 
@@ -550,7 +552,7 @@ SearchWindow::MessageReceived(BMessage* message)
 			_PlayTrackFromMessage(message);
 			break;
 
-		case 'play':
+		case MSG_PLAY_URI:
 			_ForwardPlay(message);
 			break;
 
@@ -635,10 +637,10 @@ SearchWindow::_ApplyResults(BMessage* message)
 void
 SearchWindow::_ApplyPlayingTrack(BMessage* message)
 {
-	const char* uri = nullptr;
-	if (message->FindString("trackUri", &uri) == B_OK && uri) {
-		fCurrentTrackUri = uri;
-		static_cast<DiscoverListView*>(fList)->SetPlayingUri(uri);
+	MessageContracts::CurrentTrackUpdate update;
+	if (MessageContracts::ReadCurrentTrackUpdate(*message, update)) {
+		fCurrentTrackUri = update.uri;
+		static_cast<DiscoverListView*>(fList)->SetPlayingUri(update.uri);
 	}
 }
 
@@ -765,12 +767,11 @@ SearchWindow::_ApplyPlaylistActionResult(BMessage* message)
 void
 SearchWindow::_PlayTrackFromMessage(BMessage* message)
 {
-	const char* uri = message->GetString("trackUri", "");
+	const char* uri = message->GetString(MessageFields::TrackUri, "");
 	if (!*uri)
 		return;
 
-	BMessage forward('play');
-	forward.AddString("uri", uri);
+	BMessage forward = MessageContracts::MakePlayCommand({uri});
 	be_app->PostMessage(&forward);
 }
 
@@ -778,13 +779,11 @@ SearchWindow::_PlayTrackFromMessage(BMessage* message)
 void
 SearchWindow::_ForwardPlay(BMessage* message)
 {
-	const char* uri = nullptr;
-	if (message->FindString("uri", &uri) != B_OK || !uri)
+	MessageContracts::PlayCommand command;
+	if (!MessageContracts::ReadPlayCommand(*message, command))
 		return;
 
-	BMessage forward('play');
-	forward.AddString("uri", uri);
-	be_app->PostMessage(&forward);
+	be_app->PostMessage(message);
 }
 
 

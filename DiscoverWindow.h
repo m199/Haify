@@ -1,6 +1,13 @@
 #ifndef DISCOVERWINDOW_H
 #define DISCOVERWINDOW_H
 
+#include "discover/DiscoverTabPolicy.h"
+#include "discover/DiscoverAsyncScope.h"
+#include "discover/DiscoverCacheController.h"
+#include "discover/DiscoverLibraryChangeController.h"
+#include "discover/DiscoverLibraryWriteController.h"
+#include "discover/DiscoverPlaylistMutationController.h"
+
 #include <Window.h>
 #include <OS.h>
 #include <Point.h>
@@ -22,8 +29,6 @@ class DiscoverRow;
 struct HaifySettings;
 class SpotifyApi;
 
-static const int32 kDiscoverTabCount = 9;
-
 class DiscoverWindow : public BWindow {
 public:
 								DiscoverWindow();
@@ -36,6 +41,9 @@ public:
 								BHandler* target);
 
 private:
+	void                    _EnsureAsyncContext();
+	bool                    _AcceptAsyncResult(const BMessage& message);
+	bool                    _AcceptDialogContext(const BMessage& message) const;
 	struct RowUpdateData {
 		int32					tab = -1;
 		int32					cols = 0;
@@ -79,8 +87,6 @@ private:
 								RowUpdateData& update);
 	bool					_ApplyFreshRowUpdateStart(BMessage* message,
 								const RowUpdateData& update);
-	void					_CollectRowUpdateStrings(BMessage* message,
-								RowUpdateData& update);
 	void					_ApplyRowUpdateRows(BMessage* message,
 								RowUpdateData& update);
 	void					_ApplyRowUpdateRow(BMessage* message,
@@ -128,22 +134,27 @@ private:
 	void					_HandleDiscoverDragHover(BMessage* message);
 	void					_HandleDiscoverDrop(BMessage* message);
 	void					_ApplyPlaylistDropResult(BMessage* message);
-	void					_ApplyLibraryStatusResult(BMessage* message);
-	void					_ApplyLibraryAddResult(BMessage* message);
-	void					_SaveAlbumFromMessage(BMessage* message);
-	void					_RemoveAlbumFromMessage(BMessage* message);
-	void					_RemoveFollowedItem(BMessage* message);
-	void					_ApplyRemoveFollowedItemResult(BMessage* message);
-	void					_RemovePlayableFromLibrary(BMessage* message);
+	void                    _ApplyLibraryCommand(BMessage* message);
+	void                    _QueueLibraryWrite(const DiscoverLibraryWriteRequest& command);
+	void                    _DispatchLibraryWrite(const DiscoverLibraryWriteRequest& request);
+	void                    _ApplyLibraryWriteResult(BMessage* message);
 	void					_PlayTrackFromMessage(BMessage* message);
 	void					_ShowNewPlaylistDialog();
 	void					_CreatePlaylist(BMessage* message);
 	void					_ApplyPlaylistCreateResult(BMessage* message);
 	void					_ShowRenamePlaylistDialog(BMessage* message);
 	void					_RenamePlaylist(BMessage* message);
-	void					_ApplyPlaylistRenameResult(BMessage* message);
+	void                    _QueuePlaylistMutation(DiscoverChangeOperation operation,
+	                            const std::string& id, const std::string& name = "");
+	void                    _DispatchPlaylistMutation(const DiscoverPlaylistMutationRequest& request);
+	void                    _ApplyPlaylistMutationResult(BMessage* message);
+	void                    _RenderPlaylistMutation(const std::string& id,
+	                            const DiscoverPlaylistMutationPlan& plan);
+	void                    _DetachPlaylistRow(const std::string& id);
+	DiscoverRow*            _RestorePlaylistRow(const std::string& id);
+	void                    _DiscardDetachedPlaylistRow(const std::string& id);
+	void                    _ReorderPlaylistRows(const std::vector<std::string>& order);
 	void					_DeletePlaylist(BMessage* message);
-	void					_ApplyPlaylistDeleteResult(BMessage* message);
 	void					_ApplyPlaylistsChanged(BMessage* message);
 	void					_ApplyLibraryChanged(BMessage* message);
 	void					_ReloadTabFromMessage(BMessage* message);
@@ -154,8 +165,6 @@ private:
 	void					_ReloadTab(int32 logicalTab);
 	void					_ApplyPlaylistChange(BMessage* message);
 	void					_RemovePlaylistRow(DiscoverRow* row);
-	void					_RenamePlaylistRow(DiscoverRow* row,
-								const std::string& name);
 	void					_AddOrUpdatePlaylistRow(DiscoverRow* row,
 								const std::string& uri,
 								const std::string& name,
@@ -164,32 +173,12 @@ private:
 	void					_ApplyPlaylistSnapshot(BMessage* message);
 	bool					_CanApplyPlaylistSnapshot(
 								BMessage* message) const;
-	bool					_ApplyPlaylistSnapshotItem(
-								BMessage* message, int32 index,
-								std::set<std::string>& serverUris);
-	void					_RemoveMissingPlaylistSnapshotRows(
-								const std::set<std::string>& serverUris);
 	void					_ApplyLibraryChange(BMessage* message);
-	int32					_LibraryChangeTabForUri(
-								const std::string& uri) const;
-	void					_UpdateAudiobookIdsForLibraryChange(
-								const std::string& operation,
-								const std::string& uri,
-								bool& refreshPodcasts);
 	void					_ApplyLibraryRemoval(int32 tab,
 								const std::string& uri);
-	void					_ApplyLibraryAddition(int32 tab,
-								const std::string& uri,
-								int32 generation);
-	void					_RefreshPodcastsAfterLibraryChange(
-								bool refreshPodcasts);
 	void					_ResolveLibraryAddition(int32 logicalTab,
 								const std::string& uri, int32 generation);
 	void					_ApplyResolvedLibraryAddition(BMessage* message);
-	bool					_CanApplyResolvedLibraryAddition(
-								int32 logicalTab,
-								const std::string& uri,
-								int32 generation) const;
 	void					_RemoveEmptyRows(int32 logicalTab);
 	void					_ApplyAudiobookIdSnapshot(BMessage* message);
 	void					_RemoveAudiobookDuplicatesFromPodcasts();
@@ -243,7 +232,6 @@ private:
 	bool					_HandlePlaylistDrop(const std::string& itemUri,
 								const std::string& targetUri, bool writable);
 	void					_HandleLibraryDrop(const std::string& uri);
-	int32					_DropTargetTabForUri(const std::string& uri) const;
 	int32					_VisualTabForLogical(int32 logicalTab) const;
 	bool					_IsPointerOverDropTargetTab(
 								int32 logicalTab) const;
@@ -264,34 +252,19 @@ private:
 	BTab*					fTabs[kDiscoverTabCount];
 	BColumnListView*		fLists[kDiscoverTabCount];
 	BMenuItem*				fTabMenuItems[kDiscoverTabCount];
-	bool					fTabVisible[kDiscoverTabCount];
-	bool					fLoaded[kDiscoverTabCount];
-	bigtime_t				fLoadTime[kDiscoverTabCount];
-	bool					fPageLoading[kDiscoverTabCount];
-	bool					fPageHasMore[kDiscoverTabCount];
-	bool					fCacheBacked[kDiscoverTabCount];
-	bool					fFreshSnapshot[kDiscoverTabCount];
-	int32					fPageOffset[kDiscoverTabCount];
-	int32					fTabLoadGeneration[kDiscoverTabCount];
-	std::string				fPageCursor[kDiscoverTabCount];
+	DiscoverTabVisibility	fTabVisible{};
 	BMessageRunner*			fLazyLoadRunner = nullptr;
 	BMessageRunner*			fCacheSaveRunner = nullptr;
 	BMessageRunner*			fDropTabSwitchRunner = nullptr;
 	int32					fPendingDropTab = -1;
-	int32					fCacheLoadGeneration[kDiscoverTabCount];
-	bool					fCacheLoadPending[kDiscoverTabCount];
-	std::string				fCacheAccountId;
-	std::set<std::string>	fAudiobookIds;
-	bool					fAudiobookIdsKnown = false;
-	int32					fTabMap[kDiscoverTabCount];
-	std::vector<int32>		fTabOrder;
+	DiscoverCacheController fCache;
+	DiscoverAsyncScope fAsync;
+	DiscoverLibraryChangeController fLibrary;
+	DiscoverLibraryWriteController fLibraryWrites;
+	DiscoverTabLayout		fTabLayout;
+	DiscoverTabOrder			fTabOrder;
 	std::string				fCurrentTrackUri;
-	int32					fPlaylistSyncGeneration;
-	std::map<std::string, int32>
-							fLibraryChangeGenerations;
-	std::map<std::string, bool>	fKnownLibraryStates;
-	std::map<std::string, int32>
-							fLibraryStateGenerations;
+	DiscoverPlaylistMutationController fPlaylistMutations;
 
 	struct PendingPlaylistRemoval {
 		DiscoverRow*	row = nullptr;
@@ -301,7 +274,6 @@ private:
 	std::map<std::string, PendingPlaylistRemoval>
 							fPendingPlaylistRemovals;
 
-	static const bigtime_t	kCacheExpiry = 5LL * 60 * 1000000;
 };
 
 #endif
