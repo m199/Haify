@@ -1,6 +1,7 @@
 #pragma once
 
 #include "DragItem.h"
+#include "playlist/PlaylistReorderPolicy.h"
 
 #include "spotify/SpotifyUri.h"
 #include "spotify/SpotifyPlaylistPolicy.h"
@@ -14,12 +15,6 @@ enum PlaylistDropAction {
 	kPlaylistDropIgnore = 0,
 	kPlaylistDropAddPlayableItem,
 	kPlaylistDropReorder
-};
-
-struct PlaylistReorderPlan {
-	bool shouldMove = false;
-	int targetIndex = -1;
-	int insertBefore = -1;
 };
 
 struct PlaylistMetadataPageState {
@@ -151,6 +146,14 @@ ShouldCarryAudiobookContextAcrossChapterChange(bool optimistic,
 		&& reportedParentKind.empty()
 		&& SpotifyItemKindForUri(currentOpenUri) == kSpotifyItemAudiobook
 		&& SpotifyItemKindForUri(reportedOpenUri) != kSpotifyItemShow;
+}
+
+// Preview a track switch only while a known item is already playing. Finding
+// a device (including a starting librespot) is not a playback confirmation.
+inline bool
+ShouldPreviewPlaybackStart(bool isPlaying, const std::string& currentTrackUri)
+{
+	return isPlaying && SpotifyItemIsPlayable(SpotifyItemKindForUri(currentTrackUri));
 }
 
 inline bool
@@ -289,24 +292,6 @@ ResolvePlaylistDropInsertBefore(int sourceIndex, int targetIndex, int rowCount)
 	if (targetIndex < rowCount && targetIndex > sourceIndex)
 		return targetIndex + 1;
 	return targetIndex;
-}
-
-inline PlaylistReorderPlan
-ResolvePlaylistReorderPlan(int sourceIndex, int rangeLength, int insertBefore,
-	int rowCount)
-{
-	PlaylistReorderPlan plan;
-	if (sourceIndex < 0 || rangeLength < 1 || rowCount < 1
-			|| sourceIndex + rangeLength > rowCount) {
-		return plan;
-	}
-	plan.insertBefore = std::max(0, std::min(insertBefore, rowCount));
-	plan.targetIndex = plan.insertBefore > sourceIndex
-		? plan.insertBefore - rangeLength : plan.insertBefore;
-	plan.targetIndex = std::max(0, std::min(plan.targetIndex,
-		rowCount - rangeLength));
-	plan.shouldMove = plan.targetIndex != sourceIndex;
-	return plan;
 }
 
 inline bool

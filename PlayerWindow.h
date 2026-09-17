@@ -130,7 +130,7 @@ private:
 	void					_ApplyAuthStatus(BMessage* message);
 	void					_ApplyDeviceList(BMessage* message);
 	void					_TransferToDevice(BMessage* message);
-	void					_ApplyOptimisticPlay(BMessage* message);
+	bool					_ApplyOptimisticPlay(BMessage* message);
 	void					_ResolveAudiobookContextForPlayback(
 								const std::string& trackUri,
 								const std::string& parentKind,

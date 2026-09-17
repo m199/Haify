@@ -1,11 +1,14 @@
 #pragma once
 
 #include "DropMarkerController.h"
+#include "DragItem.h"
 
 #include <ColumnListView.h>
 #include <InterfaceDefs.h>
 #include <Point.h>
 #include <SupportDefs.h>
+#include <cstdint>
+#include <vector>
 
 class BMessage;
 class BMessageRunner;
@@ -31,9 +34,17 @@ public:
 		const BMessage* dragMessage);
 	void ClearDropMarker();
 	void SetDropFeedbackFlags(DropFeedbackFlags flags);
+	std::vector<int32_t> SelectedRowIndices() const;
 
 private:
-	class RightClickFilter;
+	class MouseDownFilter;
+	class MouseUpFilter;
+	MessageContracts::DragItem _DragItemForRow(BRow* row) const;
+	void _RememberDragSelection(BPoint point);
+	bool _DragSelectionIsCurrent(const MessageContracts::DragItem& saved,
+		BRow* row) const;
+	bool _RestoreDragSelection(BRow* row);
+	void _FinishDeferredClick();
 
 	void _UpdateDropMarker(BPoint point, const BMessage* dragMessage);
 	void _StartDropMarkerCleanupRunner();
@@ -42,6 +53,9 @@ private:
 	int32 _ColumnAt(float x) const;
 	DropMarkerController fDropMarker;
 	BMessageRunner* fDropMarkerCleanupRunner = nullptr;
+	MessageContracts::DragItem fMouseDownDrag;
+	bool fPreserveGroupOnMouseDown = false;
+	bool fDeferredGroupClick = false;
 };
 
 BScrollBar* TrackVerticalScrollBar(TrackListView* list);

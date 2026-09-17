@@ -2,6 +2,14 @@
 #define PLAYLISTWINDOW_H
 
 #include "playlist/PlaylistEpisode.h"
+#include "DragItem.h"
+#include "playlist/PlaylistMetadataController.h"
+#include "playlist/PlaylistPageState.h"
+#include "playlist/PlaylistRemovalController.h"
+#include "playlist/PlaylistReorderController.h"
+#include "playlist/PlaylistWriteController.h"
+#include "playlist/PlaylistCoverController.h"
+#include "playlist/PlaylistPresentation.h"
 #include "spotify/SpotifyUri.h"
 
 #include <Window.h>
@@ -27,7 +35,6 @@ class BView;
 class BStringColumn;
 class TrackListView;
 class MediaDescriptionView;
-struct PlaylistContentTarget;
 class SpotifyApi;
 
 class PlaylistWindow : public BWindow {
@@ -35,8 +42,10 @@ public:
 	PlaylistWindow(const char* playlistName, const char* uri, const char* coverUrl);
 	virtual					~PlaylistWindow();
 	virtual void			MessageReceived(BMessage* message);
+	virtual bool			QuitRequested() override;
 
 	const std::string&      GetUri() const { return fUri; }
+	const std::string&      GetPlaylistSnapshot() const { return fPlaylistSnapshotId; }
 	void                    SetPlayingTrack(const char* trackUri);
 	void					SetCoverUrl(const std::string& coverUrl);
 	void					ShowContextMenu(BView* target, BPoint where, BPoint screenWhere);
@@ -63,20 +72,19 @@ private:
 								BMessage* message);
 	void					_ApplyTrackRemovalResult(BMessage* message);
 	void					_ApplyTrackReorderResult(BMessage* message);
-	void					_ApplyClearPlaylistResult(BMessage* message);
-	void					_ApplyPlaylistAddResult(BMessage* message);
+	void					_ApplyPlaylistWriteResult(BMessage* message);
 	void					_HandleTrackDrop(BMessage* message);
 	void					_HandleTrackReorderDrop(BMessage* message,
-								int32 sourceIndex);
+								const MessageContracts::DragItem& item);
 	void					_AddDroppedPlayableItem(BMessage* message,
 								const char* trackUri);
 	void					_ApplyPageLoadFailure(BMessage* message);
-	void					_ApplyPlaylistMetadata(BMessage* message);
+	void					_ApplyMetadataResult(BMessage* message);
+	void					_ApplyPlaylistMetadata(const PlaylistMetadataResult& result);
 	void					_ApplyPlaylistEditResult(BMessage* message);
 	void					_ApplyLibraryChange(BMessage* message);
 	void					_ApplyAlbumSavedState(BMessage* message);
 	void					_ApplySubscriptionState(BMessage* message);
-	void					_ApplyPlaylistUserState(BMessage* message);
 	void					_UpdatePlaylistDetails(BMessage* message);
 	void					_ApplyPlaylistCoverUploadResult(
 								BMessage* message);
@@ -95,7 +103,7 @@ private:
 	bool					_HandlePlaylistMenuMessage(BMessage* message);
 	bool					_HandlePodcastMessage(BMessage* message);
 	bool					_HandleAppForwardMessage(BMessage* message);
-	void					_ApplyPlaylistRemoveMarked(BMessage* message);
+	void					_ApplyPlaylistSnapshot(BMessage* message);
 	void					_ReloadDataIfIdle();
 	void					_RefreshEpisodes();
 	void					_SaveCacheNowFromMessage();
@@ -115,7 +123,7 @@ private:
 	bool					_CollectPendingTrackRemovals(
 								std::vector<std::pair<std::string, int>>&
 									items);
-	std::vector<std::string> _KnownPlaylistUrisForRemoval() const;
+	std::vector<std::string> _VisiblePlaylistUris() const;
 	void					_RemovePendingTrackRows();
 	void					_ApplyTrackPage(BMessage* message);
 	void					_AddTrackPageRows(BMessage* message);
@@ -130,26 +138,6 @@ private:
 								const std::string& showId,
 								bool ignoreEpisodeCache);
 	void					_LoadNextPage();
-	bool					_LoadTargetPage(SpotifyApi& api,
-								const BMessenger& messenger,
-								const PlaylistContentTarget& target,
-								int32 offset, int32 limit,
-								int32 searchGeneration);
-	void					_LoadCollectionPage(SpotifyApi& api,
-								const BMessenger& messenger, int32 offset,
-								int32 limit, int32 searchGeneration);
-	void					_LoadPlaylistPage(SpotifyApi& api,
-								const BMessenger& messenger,
-								const std::string& playlistId, int32 offset,
-								int32 limit, int32 searchGeneration);
-	void					_LoadAlbumPage(SpotifyApi& api,
-								const BMessenger& messenger,
-								const std::string& albumId, int32 offset,
-								int32 limit, int32 searchGeneration);
-	void					_LoadShowPage(SpotifyApi& api,
-								const BMessenger& messenger,
-								const std::string& showId, int32 offset,
-								int32 limit, int32 searchGeneration);
 	void					_CheckLazyLoad();
 	bool					_CanLazyLoadPage() const;
 	bool					_ShouldLoadNextPageForScroll() const;
@@ -173,29 +161,27 @@ private:
 	void					_ChoosePlaylistCover();
 	void					_UploadPlaylistCover(const entry_ref& ref);
 	void					_ClearPlaylist();
-	void					_FinishClearPlaylist(bool success,
-								const std::string& snapshotId);
+	void					_FinishClearPlaylist(bool success);
+	PlaylistMenuState _PlaylistMenuState() const;
+	bool _PlaylistMutationPending() const;
+	PlaylistWriteContext _PlaylistWriteContext() const;
+	void _SendPlaylistWrite(const PlaylistWriteCommand& command);
 	void					_MoveSelectedItem(int32 delta);
 	bool					_CanMoveSelectedItems(int32 delta) const;
 	bool					_SelectedRowSpan(int32& source, int32& last,
 								int32& selectedCount) const;
 	void					_ShowContiguousSelectionAlert() const;
-	void					_BeginTrackReorder(int32 sourceIndex,
-								int32 rangeLength, int32 insertBefore);
-	bool					_CanBeginTrackReorder(
-								const std::string& playlistId,
-								int32 sourceIndex, int32 rangeLength) const;
-	bool					_BuildPendingTrackReorder(int32 sourceIndex,
-								int32 rangeLength, int32 targetIndex);
+	void					_BeginTrackReorder(const std::vector<int32_t>& indices,
+								int32 insertBefore);
+	void					_SendTrackReorder(const PlaylistReorderCommand& command);
+	bool					_BuildPendingTrackReorder(const std::vector<int32_t>& indices);
 	bool					_IsRowSelected(BRow* row) const;
-	void					_ApplyPendingTrackReorder();
-	void					_FinishTrackReorder(bool success,
-								const std::string& snapshotId);
-	void					_RenumberPlaylistRows();
-	void					_FinishTrackRemoval(bool success);
-	void					_ApplyFinishedTrackRemoval();
+	void					_ApplyPendingTrackReorder(const std::vector<int32_t>& indices);
+	void					_FinishTrackReorder(const PlaylistReorderUpdate& update);
+	void					_ApplyPlaylistPositions(const std::vector<int32_t>& positions);
+	void					_FinishTrackRemoval(const PlaylistRemovalUpdate& update);
+	void					_ApplyFinishedTrackRemoval(const PlaylistRemovalUpdate& update);
 	void					_RollbackFinishedTrackRemoval();
-	std::vector<int32>		_RemovedPlaylistPositions() const;
 	void					_RefreshPlaylistSnapshot();
 	void					_UpdatePlaylistTrackInfo();
 	void					_UpdatePlaylistMenuState();
@@ -236,24 +222,15 @@ private:
 	std::string             fUri;
 	std::string             fCoverUrl;
 	std::string				fPlaylistSnapshotId;
-	std::string				fPlaylistDescription;
-	std::string				fPlaylistOwnerId;
-	std::string				fCurrentUserId;
-	std::string				fCurrentUserLegacyId;
-	bool					fPlaylistPublic = false;
-	bool					fPlaylistOwned = false;
+	PlaylistMetadataState	fMetadata;
 	std::string				fCachedPlaylistSnapshotId;
 	std::string				fCurrentPlayingTrackUri;
 	BMessageRunner*			fLazyLoadRunner	= nullptr;
 	BMessageRunner*			fCacheSaveRunner = nullptr;
 	BMessageRunner*			fEpisodeSearchRunner = nullptr;
 	BMessageRunner*			fEpisodeSearchRetryRunner = nullptr;
-	bool					fPageLoading	= false;
-	bool					fPageHasMore	= false;
-	int32					fPageOffset		= 0;
-	int32					fPageTotal		= 0;
-	int32					fPageBatchSize	= 50;
-	bool					fPodcastHeadRefreshing = false;
+	PlaylistPageState		fPaging;
+	int32					fPageBatchSize = 50;
 	bool					fAlbumSaved = false;
 	bool					fAlbumSavedKnown = false;
 	bool					fAlbumSavePending = false;
@@ -261,37 +238,26 @@ private:
 	struct PendingTrackRemoval {
 		BRow*	row = nullptr;
 		int32	listIndex = -1;
-		int32	playlistPosition = -1;
 		bool	selected = false;
 	};
 	std::vector<PendingTrackRemoval> fPendingTrackRemovals;
-	bool					fTrackRemovalPending = false;
+	PlaylistRemovalController fRemoval;
 	struct PendingTrackReorder {
 		std::vector<BRow*>	rows;
 		std::vector<bool>	selected;
-		int32				sourceIndex = -1;
-		int32				targetIndex = -1;
 	};
 	PendingTrackReorder		fPendingTrackReorder;
-	bool					fTrackReorderPending = false;
+	PlaylistReorderController fReorder;
+	bool fCloseAfterReorder = false;
 	struct PendingPlaylistClear {
 		std::vector<BRow*>	rows;
 		std::vector<bool>	selected;
-		int32				pageOffset = 0;
-		int32				pageTotal = 0;
-		bool				pageHasMore = false;
-		std::string			snapshotId;
 	};
 	PendingPlaylistClear	fPendingPlaylistClear;
-	bool					fPlaylistClearPending = false;
-	int32					fEpisodeOffset	= 0;
-	int32					fEpisodeTotal	= 0;
-	std::string				fEpisodeSearchFilter;
-	int32					fEpisodeSearchGeneration = 0;
-	int32					fEpisodeSearchRetryCount = 0;
-	bool					fEpisodeSearchPaging = false;
-	bool					fEpisodeSearchWaitingRetry = false;
-	bool					fEpisodeSearchFailed = false;
+	PlaylistCoverController fCover;
+	PlaylistClearController fClear;
+	PlaylistAddController fAdd;
+	BRow* fPendingPlaylistAdd = nullptr;
 	std::vector<PlaylistEpisode> fEpisodes;
 	std::vector<PlaylistEpisode> fPendingPodcastHeadEpisodes;
 };

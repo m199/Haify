@@ -9,6 +9,25 @@ SRCS = App.cpp PlayerWindow.cpp NowPlayingItem.cpp NowPlayingItemMapper.cpp Play
 	network/HttpClient.cpp network/OAuthCallbackServer.cpp network/ImageCache.cpp \
 	discover/DiscoverRowFactory.cpp \
 	playlist/PlaylistContent.cpp \
+	playlist/PlaylistMetadataController.cpp \
+	playlist/PlaylistMetadataMessages.cpp \
+	playlist/PlaylistMetadataRequests.cpp \
+	playlist/PlaylistPageController.cpp \
+	playlist/PlaylistPageMessages.cpp \
+	playlist/PlaylistPageRequests.cpp \
+	playlist/PlaylistPageState.cpp \
+	playlist/PlaylistRemovalController.cpp \
+	playlist/PlaylistRemovalMessages.cpp \
+	playlist/PlaylistRemovalRequests.cpp \
+	playlist/PlaylistReorderController.cpp \
+	playlist/PlaylistReorderMessages.cpp \
+	playlist/PlaylistReorderRequests.cpp \
+	playlist/PlaylistWriteController.cpp \
+	playlist/PlaylistWriteMessages.cpp \
+	playlist/PlaylistWriteRequests.cpp \
+	playlist/PlaylistCoverController.cpp \
+	playlist/PlaylistCoverMessages.cpp \
+	playlist/PlaylistCoverRequests.cpp \
 	playlist/PlaylistTrackListView.cpp \
 	playlist/PlaylistTrackRow.cpp \
 	playlist/PlaylistCacheRows.cpp \

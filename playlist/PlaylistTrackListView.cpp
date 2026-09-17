@@ -24,6 +24,7 @@
 #include <algorithm>
 #include <cstring>
 #include <string>
+#include <utility>
 
 static const uint32 kMsgCheckLazyLoad = 'ckLm';
 static const uint32 kMsgDropMarkerCleanup = 'dmCl';
@@ -94,9 +95,9 @@ TrackRowPointFromScreen(BColumnListView* list, BPoint screen)
 }
 
 
-class TrackListView::RightClickFilter : public BMessageFilter {
+class TrackListView::MouseDownFilter : public BMessageFilter {
 public:
-	RightClickFilter(TrackListView* owner)
+	MouseDownFilter(TrackListView* owner)
 		:
 		BMessageFilter(B_ANY_DELIVERY, B_ANY_SOURCE, B_MOUSE_DOWN),
 		fOwner(owner)
@@ -107,13 +108,25 @@ public:
 	{
 		if (!fOwner || !message || message->what != B_MOUSE_DOWN)
 			return B_DISPATCH_MESSAGE;
-		if (!IsSecondaryTrackMouseClick(message))
-			return B_DISPATCH_MESSAGE;
 		BView* view = dynamic_cast<BView*>(*target);
 		if (!IsTrackListContentView(view))
 			return B_DISPATCH_MESSAGE;
 		if (!_IsInsideOwner(view))
 			return B_DISPATCH_MESSAGE;
+		fOwner->fPreserveGroupOnMouseDown = false;
+		fOwner->fDeferredGroupClick = false;
+		if (!IsSecondaryTrackMouseClick(message)) {
+			fOwner->fMouseDownDrag = {};
+			BPoint screen;
+			// Preserve the pre-click group for dragging, including an Alt/Ctrl
+			// click that would otherwise toggle the grabbed selected row off.
+			if ((modifiers() & B_SHIFT_KEY) == 0
+					&& FindTrackScreenPoint(message, view, screen))
+				fOwner->_RememberDragSelection(TrackRowPointFromScreen(fOwner, screen));
+			fOwner->fPreserveGroupOnMouseDown = !fOwner->fMouseDownDrag.sourceIndices.empty()
+				&& (modifiers() & (B_CONTROL_KEY | B_SHIFT_KEY | B_OPTION_KEY | B_COMMAND_KEY)) == 0;
+			return B_DISPATCH_MESSAGE;
+		}
 		BPoint screen;
 		if (!FindTrackScreenPoint(message, view, screen))
 			return B_DISPATCH_MESSAGE;
@@ -134,6 +147,22 @@ private:
 		return false;
 	}
 
+	TrackListView* fOwner;
+};
+
+class TrackListView::MouseUpFilter : public BMessageFilter {
+public:
+	MouseUpFilter(TrackListView* owner)
+		: BMessageFilter(B_ANY_DELIVERY, B_ANY_SOURCE, B_MOUSE_UP), fOwner(owner) {}
+
+	filter_result Filter(BMessage*, BHandler**) override
+	{
+		// Apply an ordinary click before native MouseUp handles double-clicks.
+		fOwner->_FinishDeferredClick();
+		return B_DISPATCH_MESSAGE;
+	}
+
+private:
 	TrackListView* fOwner;
 };
 
@@ -207,10 +236,12 @@ TrackListView::AttachedToWindow()
 {
 	BColumnListView::AttachedToWindow();
 	if (BView* outline = ScrollView()) {
-		outline->AddFilter(new RightClickFilter(this));
+		outline->AddFilter(new MouseDownFilter(this));
+		outline->AddFilter(new MouseUpFilter(this));
 		outline->AddFilter(new TrackMouseMovedFilter(this));
 	} else {
-		AddFilter(new RightClickFilter(this));
+		AddFilter(new MouseDownFilter(this));
+		AddFilter(new MouseUpFilter(this));
 		AddFilter(new TrackMouseMovedFilter(this));
 	}
 }
@@ -299,29 +330,20 @@ TrackListView::KeyDown(const char* bytes, int32 numBytes)
 bool
 TrackListView::InitiateDrag(BPoint point, bool)
 {
-	BRow* baseRow = CurrentSelection();
-	if (!baseRow) {
-		DEBUG_PRINT("InitiateDrag: No selection, using RowAt(pt)\n");
-		baseRow = RowAt(point);
-	}
+	fPreserveGroupOnMouseDown = false;
+	fDeferredGroupClick = false;
+	BRow* baseRow = RowAt(point);
+	if (!baseRow)
+		baseRow = CurrentSelection();
+	if (!_RestoreDragSelection(baseRow))
+		return false;
 
 	if (baseRow) {
 		TrackRow* row = static_cast<TrackRow*>(baseRow);
 		DEBUG_PRINT("InitiateDrag: Initiating drag for track %s\n",
 			row->fTrackUri.c_str());
 		if (!row->fTrackUri.empty()) {
-			MessageContracts::DragItem item{row->fTrackUri,
-				SpotifyItemKindForUri(row->fTrackUri)};
-			if (PlaylistWindow* window =
-					dynamic_cast<PlaylistWindow*>(Window())) {
-				item.sourcePlaylist = window->GetUri();
-				for (int32 i = 0; i < CountRows(); i++) {
-					if (RowAt(i) == row) {
-						item.sourceIndex = i;
-						break;
-					}
-				}
-			}
+			MessageContracts::DragItem item = _DragItemForRow(row);
 			BMessage dragMessage = MessageContracts::MakeDragItem(item);
 			auto getString = [&](int32 column) -> const char* {
 				BStringField* field =
@@ -335,7 +357,6 @@ TrackListView::InitiateDrag(BPoint point, bool)
 
 			BRect dragRect(point.x - 100, point.y - 10, point.x + 100,
 				point.y + 10);
-			DeselectAll();
 			SetHaifyActiveDragMessage(dragMessage);
 			DragMessage(&dragMessage, dragRect, this);
 			return true;
@@ -344,6 +365,108 @@ TrackListView::InitiateDrag(BPoint point, bool)
 		DEBUG_PRINT("InitiateDrag: No row found for drag\n");
 	}
 	return false;
+}
+
+MessageContracts::DragItem
+TrackListView::_DragItemForRow(BRow* baseRow) const
+{
+	auto row = dynamic_cast<TrackRow*>(baseRow);
+	if (!row)
+		return {};
+	MessageContracts::DragItem item{row->fTrackUri, SpotifyItemKindForUri(row->fTrackUri)};
+	auto window = dynamic_cast<PlaylistWindow*>(Window());
+	if (!window)
+		return item;
+	item.sourcePlaylist = window->GetUri();
+	for (int32 i = 0; i < CountRows(); i++) {
+		if (RowAt(i) == row) {
+			item.sourceIndex = i;
+			break;
+		}
+	}
+	auto indices = SelectedRowIndices();
+	if (SpotifyItemKindForUri(item.sourcePlaylist) != kSpotifyItemPlaylist
+			|| indices.size() < 2
+			|| !std::binary_search(indices.begin(), indices.end(), item.sourceIndex))
+		return item;
+	item.sourceIndices = indices;
+	for (int32_t index : indices)
+		item.sourceUris.push_back(static_cast<const TrackRow*>(RowAt(index))->fTrackUri);
+	item.sourceSnapshot = window->GetPlaylistSnapshot();
+	item.intent = MessageContracts::DropIntent::Reorder;
+	return item;
+}
+
+void
+TrackListView::_RememberDragSelection(BPoint point)
+{
+	fMouseDownDrag = _DragItemForRow(RowAt(point));
+}
+
+bool
+TrackListView::_DragSelectionIsCurrent(const MessageContracts::DragItem& saved,
+	BRow* row) const
+{
+	auto window = dynamic_cast<PlaylistWindow*>(Window());
+	if (!row || !window
+			|| saved.sourcePlaylist != window->GetUri()
+			|| saved.sourceSnapshot != window->GetPlaylistSnapshot()
+			|| RowAt(saved.sourceIndex) != row)
+		return false;
+	for (size_t i = 0; i < saved.sourceIndices.size(); i++) {
+		auto selected = dynamic_cast<const TrackRow*>(RowAt(saved.sourceIndices[i]));
+		if (!selected || selected->fTrackUri != saved.sourceUris[i])
+			return false;
+	}
+	return true;
+}
+
+bool
+TrackListView::_RestoreDragSelection(BRow* row)
+{
+	auto saved = std::move(fMouseDownDrag);
+	fMouseDownDrag = {};
+	if (saved.sourceIndices.empty())
+		return true;
+	if (!_DragSelectionIsCurrent(saved, row))
+		return false;
+	DeselectAll();
+	for (int32_t index : saved.sourceIndices)
+		AddToSelection(RowAt(index));
+	return true;
+}
+
+void
+TrackListView::_FinishDeferredClick()
+{
+	fPreserveGroupOnMouseDown = false;
+	if (!fDeferredGroupClick)
+		return;
+	fDeferredGroupClick = false;
+	auto saved = std::move(fMouseDownDrag);
+	fMouseDownDrag = {};
+	BRow* row = RowAt(saved.sourceIndex);
+	if (!_DragSelectionIsCurrent(saved, row))
+		return;
+	DeselectAll();
+	AddToSelection(row);
+	SelectionChanged();
+}
+
+std::vector<int32_t>
+TrackListView::SelectedRowIndices() const
+{
+	std::vector<int32_t> indices;
+	for (BRow* row = CurrentSelection(); row; row = CurrentSelection(row)) {
+		for (int32 i = 0; i < CountRows(); i++) {
+			if (RowAt(i) == row) {
+				indices.push_back(i);
+				break;
+			}
+		}
+	}
+	std::sort(indices.begin(), indices.end());
+	return indices;
 }
 
 
@@ -376,6 +499,16 @@ TrackListView::Draw(BRect update)
 void
 TrackListView::SelectionChanged()
 {
+	if (fPreserveGroupOnMouseDown) {
+		fPreserveGroupOnMouseDown = false;
+		// Native MouseDown just selected the grabbed row. Restore the rest before
+		// returning to the looper, so no frame is drawn with a collapsed group.
+		if (_DragSelectionIsCurrent(fMouseDownDrag, RowAt(fMouseDownDrag.sourceIndex))) {
+			for (int32_t index : fMouseDownDrag.sourceIndices)
+				AddToSelection(RowAt(index));
+			fDeferredGroupClick = true;
+		}
+	}
 	BColumnListView::SelectionChanged();
 	if (Window())
 		Window()->PostMessage(kMsgCheckLazyLoad);

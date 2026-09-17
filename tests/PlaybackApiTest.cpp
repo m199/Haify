@@ -1,5 +1,6 @@
 #include "JsonApiTestSupport.h"
 #include "spotify/api/PlaybackApi.h"
+#include "UiLogic.h"
 
 #include <cstdio>
 
@@ -151,6 +152,34 @@ TestAcceptedPlayDoesNotInventPlaybackState()
 	assert(fixture.transport.requests.size() == 2);
 }
 
+static void
+TestColdPlaybackStartPresentation()
+{
+	PlaybackFixture fixture;
+	// Opening the prompt, starting librespot and discovering its ID do not
+	// establish a playing item. Neither the title preview nor its metadata
+	// request should publish a synthetic playing state at this point.
+	assert(!ShouldPreviewPlaybackStart(false, ""));
+	JsonApiTestResult command;
+	fixture.api.PlayTrack("spotify:track:first", "", command.Callback(), 0, "local");
+	fixture.transport.Reply(0, true, {{"status", 204}});
+	command.Expect(true, {{"status", 204}});
+	assert(!ShouldPreviewPlaybackStart(false, ""));
+	JsonApiTestResult poll;
+	fixture.api.GetPlaybackState(poll.Callback());
+	fixture.transport.Reply(1, true, nlohmann::json::object());
+	poll.Expect(true, nlohmann::json::object());
+	assert(!ShouldPreviewPlaybackStart(false, ""));
+	// A selected/loaded but paused item is also not a running playback.
+	assert(!ShouldPreviewPlaybackStart(false, "spotify:track:first"));
+	assert(!ShouldPreviewPlaybackStart(true, ""));
+	// Once playback reports a running item, subsequent track/episode switches
+	// keep their existing fast presentation.
+	assert(ShouldPreviewPlaybackStart(true, "spotify:track:first"));
+	assert(ShouldPreviewPlaybackStart(true, "spotify:episode:first"));
+	assert(!ShouldPreviewPlaybackStart(true, "spotify:playlist:context"));
+}
+
 int
 main()
 {
@@ -161,5 +190,6 @@ main()
 	TestLiveReadsInvalidateBeforeDispatch();
 	TestFailuresAreNotRetriedOrReplaced();
 	TestAcceptedPlayDoesNotInventPlaybackState();
+	TestColdPlaybackStartPresentation();
 	std::puts("Playback API tests passed.");
 }

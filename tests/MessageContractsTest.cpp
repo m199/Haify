@@ -32,6 +32,103 @@ TestDragCompatibility()
 }
 
 static void
+TestForwardedPlaylistDrop()
+{
+	DragItem source{"spotify:track:one", kSpotifyItemTrack,
+		"spotify:playlist:source", 4};
+	BMessage drag = MakeDragItem(source);
+	drag.AddString(MessageFields::Title, "Track title");
+	// DropFilter copies the original payload but routes it under a local code.
+	BMessage drop(drag);
+	drop.what = MSG_PLAYLIST_DROP;
+	assert(drop.what == 'drpT' && drag.what == MSG_DRAG_ITEM);
+	DragItem result;
+	assert(ReadDragItem(drop, result));
+	assert(result.uri == source.uri && result.kind == source.kind);
+	assert(result.sourcePlaylist == source.sourcePlaylist && result.sourceIndex == 4);
+	assert(result.intent == DropIntent::Automatic);
+	assert(std::string(drop.GetString(MessageFields::Title, "")) == "Track title");
+	assert(ResolvePlaylistDropAction(source.sourcePlaylist, result, true, false)
+		== kPlaylistDropReorder);
+	auto plan = ResolvePlaylistReorderPlan(result.sourceIndex, 1, 1, 8);
+	assert(plan.shouldMove && plan.targetIndex == 1);
+	assert(ResolvePlaylistDropAction("spotify:playlist:other", result, true, false)
+		== kPlaylistDropAddPlayableItem);
+	assert(ResolvePlaylistDropAction(source.sourcePlaylist, result, false, false)
+		== kPlaylistDropIgnore);
+	assert(ResolvePlaylistDropAction(source.sourcePlaylist, result, true, true)
+		== kPlaylistDropIgnore);
+	drop.ReplaceInt32(MessageFields::DropIntent, static_cast<int32>(DropIntent::Reorder));
+	assert(ReadDragItem(drop, result) && result.intent == DropIntent::Reorder);
+	assert(ResolvePlaylistDropAction("spotify:playlist:other", result, true, false)
+		== kPlaylistDropIgnore);
+}
+
+static void
+TestForwardedDragValidation()
+{
+	DragItem source{"spotify:track:one", kSpotifyItemTrack,
+		"spotify:playlist:source", 4};
+	for (uint32 code : {MSG_DRAG_ITEM, MSG_PLAYLIST_DROP,
+		MSG_DISCOVER_DROP, MSG_DISCOVER_DRAG_HOVER}) {
+		BMessage message = MakeDragItem(source);
+		message.what = code;
+		DragItem result;
+		assert(ReadDragItem(message, result));
+		message.RemoveName(MessageFields::SourceIndex);
+		message.AddString(MessageFields::SourceIndex, "4");
+		result.uri = "unchanged";
+		assert(!ReadDragItem(message, result) && result.uri == "unchanged");
+	}
+	BMessage unrelated = MakeDragItem(source);
+	unrelated.what = MSG_PLAY_URI;
+	DragItem result{"unchanged"};
+	assert(!ReadDragItem(unrelated, result) && result.uri == "unchanged");
+}
+
+static void
+TestGroupDrag()
+{
+	DragItem source{"spotify:track:one", kSpotifyItemTrack,
+		"spotify:playlist:source", 2, DropIntent::Reorder};
+	source.sourceIndices = {0, 2, 5};
+	source.sourceUris = {"spotify:track:one", "spotify:track:one", "spotify:episode:two"};
+	source.sourceSnapshot = "before";
+	BMessage message = MakeDragItem(source);
+	message.what = MSG_PLAYLIST_DROP;
+	DragItem result;
+	assert(ReadDragItem(message, result));
+	assert(result.sourceIndices == source.sourceIndices && result.sourceUris == source.sourceUris);
+	assert(result.sourceSnapshot == "before" && result.sourceIndex == 2);
+	assert(ResolvePlaylistDropAction(source.sourcePlaylist, result, true, false)
+		== kPlaylistDropReorder);
+	assert(ResolvePlaylistDropAction("spotify:playlist:other", result, true, false)
+		== kPlaylistDropIgnore);
+	assert(!DragItemCanCopy(result));
+	for (const char* field : {MessageFields::SourceIndices, MessageFields::SourceUris,
+		MessageFields::SourceSnapshot}) {
+		BMessage invalid(message);
+		invalid.RemoveName(field);
+		result.uri = "unchanged";
+		assert(!ReadDragItem(invalid, result) && result.uri == "unchanged");
+		invalid.AddBool(field, true);
+		assert(!ReadDragItem(invalid, result));
+	}
+	for (const std::vector<int32_t>& indices : std::vector<std::vector<int32_t>>{
+		{-1, 2, 5}, {0, 2, 2}, {2, 0, 5}, {0, 3, 5}, {0, 2}}) {
+		auto invalid = source;
+		invalid.sourceIndices = indices;
+		assert(!ReadDragItem(MakeDragItem(invalid), result));
+	}
+	auto invalid = source;
+	invalid.sourceUris[1] = "spotify:track:other";
+	assert(!ReadDragItem(MakeDragItem(invalid), result));
+	invalid = source;
+	invalid.intent = DropIntent::Automatic;
+	assert(!ReadDragItem(MakeDragItem(invalid), result));
+}
+
+static void
 TestMalformedDrag()
 {
 	DragItem result{"unchanged"};
@@ -201,6 +298,9 @@ int
 main()
 {
 	TestDragCompatibility();
+	TestForwardedPlaylistDrop();
+	TestForwardedDragValidation();
+	TestGroupDrag();
 	TestMalformedDrag();
 	TestDropIntent();
 	TestDiscoverTarget();

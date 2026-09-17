@@ -3,6 +3,7 @@
 #include "spotify/SpotifyUri.h"
 #include <cstdint>
 #include <string>
+#include <vector>
 
 namespace MessageContracts {
 
@@ -14,6 +15,9 @@ struct DragItem {
 	std::string sourcePlaylist = "";
 	int32_t sourceIndex = -1;
 	DropIntent intent = DropIntent::Automatic;
+	std::vector<int32_t> sourceIndices = {};
+	std::vector<std::string> sourceUris = {};
+	std::string sourceSnapshot = "";
 };
 
 } // namespace MessageContracts

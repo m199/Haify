@@ -2,6 +2,21 @@
 #define MESSAGES_H
 
 enum {
+	MSG_PLAYLIST_COVER_RESULT = 'pCvR',
+	MSG_PLAYLIST_SNAPSHOT_RESULT = 'pRmM',
+	MSG_PLAYLIST_CLEAR_RESULT = 'pClR',
+	MSG_PLAYLIST_ADD_RESULT = 'pAdR',
+	MSG_PLAYLIST_REORDER_RESULT = 'pMvR',
+	MSG_PLAYLIST_REMOVAL_RESULT = 'rTrR',
+	MSG_PLAYLIST_APPLY_SEARCH = 'aEps',
+	MSG_PLAYLIST_RETRY_SEARCH = 'rEps',
+	MSG_PLAYLIST_METADATA_RESULT = 'pMdr',
+	MSG_PLAYLIST_TITLE_UPDATE = 'uTtl',
+	MSG_PLAYLIST_COVER_UPDATE = 'uCov',
+	MSG_PLAYLIST_TRACK_PAGE = 'pLdt',
+	MSG_PLAYLIST_EPISODE_PAGE = 'pEpL',
+	MSG_PLAYLIST_PODCAST_HEAD_PAGE = 'pEpR',
+	MSG_PLAYLIST_PAGE_FAILED = 'pLdF',
 	MSG_DISCOVER_LIBRARY_WRITE_RESULT = 'dLwR',
 	MSG_DISCOVER_PLAYLIST_MUTATION_RESULT = 'dPmR',
 	MSG_DISCOVER_PLAYLIST_CREATE_RESULT = 'plCr',
@@ -16,6 +31,7 @@ enum {
 	MSG_DISCOVER_CACHE_SAVE = 'dCsv',
 	MSG_DISCOVER_CACHE_LOADED = 'dCch',
 	MSG_DRAG_ITEM = 'drag',
+	MSG_PLAYLIST_DROP = 'drpT',
 	MSG_DISCOVER_DROP = 'dDrp',
 	MSG_PLAY_URI = 'play',
 	MSG_QUEUE_ITEM = 'addQ',
@@ -133,6 +149,9 @@ inline constexpr char AlbumUri[] = "albumUri";
 inline constexpr char ItemType[] = "itemType";
 inline constexpr char SourcePlaylist[] = "sourcePlaylist";
 inline constexpr char SourceIndex[] = "sourceIndex";
+inline constexpr char SourceIndices[] = "sourceIndices";
+inline constexpr char SourceUris[] = "sourceUris";
+inline constexpr char SourceSnapshot[] = "sourceSnapshot";
 inline constexpr char DropIntent[] = "dropIntent";
 inline constexpr char ContextUri[] = "context_uri";
 inline constexpr char DeviceId[] = "device_id";

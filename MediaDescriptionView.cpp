@@ -1,11 +1,13 @@
 #include "MediaDescriptionView.h"
 
 #include <Application.h>
+#include <Cursor.h>
 #include <InterfaceDefs.h>
 #include <Message.h>
 #include <Rect.h>
 #include <Region.h>
 #include <Roster.h>
+#include <TypeConstants.h>
 #include <Window.h>
 
 namespace {
@@ -89,10 +91,31 @@ MediaDescriptionView::MouseUp(BPoint where)
 	if (fPendingLink && selectionStart == selectionEnd
 			&& StayedNear(fPendingLinkPoint, where) && be_roster) {
 		const char* argv[] = {fPendingLinkUrl.c_str(), nullptr};
-		be_roster->Launch("text/html", 1, argv);
+		const char* type = MediaDescriptionLinkIsEmail(fPendingLinkUrl)
+			? B_URL_MAILTO : "text/html";
+		be_roster->Launch(type, 1, argv);
 	}
 	fPendingLink = false;
 	fPendingLinkUrl.clear();
+}
+
+
+void
+MediaDescriptionView::MouseMoved(BPoint where, uint32 transit,
+	const BMessage* dragMessage)
+{
+	BTextView::MouseMoved(where, transit, dragMessage);
+	if ((transit != B_ENTERED_VIEW && transit != B_INSIDE_VIEW)
+			|| dragMessage || !Window() || !Window()->IsActive())
+		return;
+
+	BMessage* message = Window()->CurrentMessage();
+	int32 buttons = message ? message->GetInt32("buttons", 0) : 0;
+	bool link = buttons == 0 && _LinkAt(where) != nullptr;
+	// BTextView manages its own cursor; apply our hover cursor afterwards and
+	// restore the text cursor explicitly when moving off a link within the view.
+	BCursor cursor(link ? B_CURSOR_ID_FOLLOW_LINK : B_CURSOR_ID_I_BEAM);
+	SetViewCursor(&cursor);
 }
 
 

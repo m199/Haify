@@ -391,6 +391,40 @@ AppendDecodedEntity(const std::string& entity, StyledText& output,
 
 
 bool
+ConsumeEntity(const std::string& description, size_t& index,
+	StyledText& output, const StyleState& style)
+{
+	if (description[index] != '&')
+		return false;
+	size_t close = description.find(';', index + 1);
+	if (close == std::string::npos || close - index > 16)
+		return false;
+	std::string entity = description.substr(index + 1, close - index - 1);
+	if (!AppendDecodedEntity(entity, output, style))
+		return false;
+	index = close;
+	return true;
+}
+
+
+std::string
+DecodeLinkTarget(const std::string& attribute)
+{
+	StyledText output;
+	StyleState style;
+	// Decode HTML entities once, without parsing tags or URI percent escapes.
+	for (size_t index = 0; index < attribute.size(); index++) {
+		if (!ConsumeEntity(attribute, index, output, style))
+			output.text += attribute[index];
+	}
+	std::string url = TrimAscii(output.text);
+	if (MediaDescriptionLinkIsEmail(url))
+		url.replace(0, 7, "mailto:");
+	return url;
+}
+
+
+bool
 IsHeadingTag(const std::string& lower)
 {
 	return lower.size() == 2 && lower[0] == 'h' && lower[1] >= '1'
@@ -405,7 +439,7 @@ ApplyLinkTag(const std::string& tag, StyledText& output, StyleState& style,
 	style.underline = !closing;
 	style.link = !closing;
 	if (!closing) {
-		std::string href = TagAttribute(tag, "href");
+		std::string href = DecodeLinkTarget(TagAttribute(tag, "href"));
 		if (!href.empty())
 			openLinks.push_back({(int32)output.text.size(), href});
 		return;
@@ -493,23 +527,6 @@ ConsumeTag(const std::string& description, size_t& index, StyledText& output,
 }
 
 
-bool
-ConsumeEntity(const std::string& description, size_t& index,
-	StyledText& output, const StyleState& style)
-{
-	if (description[index] != '&')
-		return false;
-	size_t close = description.find(';', index + 1);
-	if (close == std::string::npos || close - index > 16)
-		return false;
-	std::string entity = description.substr(index + 1, close - index - 1);
-	if (!AppendDecodedEntity(entity, output, style))
-		return false;
-	index = close;
-	return true;
-}
-
-
 void
 TrimStyledRuns(StyledText& output, size_t leading)
 {
@@ -588,6 +605,13 @@ std::vector<MediaDescriptionLink>
 MediaDescriptionLinks(const std::string& description)
 {
 	return ParseMediaDescription(description).links;
+}
+
+
+bool
+MediaDescriptionLinkIsEmail(const std::string& url)
+{
+	return LowercaseAscii(url.substr(0, 7)) == "mailto:";
 }
 
 

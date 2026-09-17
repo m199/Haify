@@ -16,6 +16,8 @@ public:
 	virtual void FrameResized(float width, float height) override;
 	virtual void MouseDown(BPoint where) override;
 	virtual void MouseUp(BPoint where) override;
+	virtual void MouseMoved(BPoint where, uint32 transit,
+		const BMessage* dragMessage) override;
 
 	void SetLinks(const std::vector<MediaDescriptionLink>& links);
 	void Reflow();

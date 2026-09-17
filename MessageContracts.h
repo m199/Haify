@@ -74,20 +74,72 @@ ValidDragSource(const DragItem& item, int32 intent)
 		&& intent >= 0 && intent <= 2;
 }
 
+inline int32
+DragSelectionCount(const BMessage& message)
+{
+	type_code indexType = 0, uriType = 0;
+	int32 indexCount = 0, uriCount = 0;
+	status_t indices = message.GetInfo(MessageFields::SourceIndices, &indexType, &indexCount);
+	status_t uris = message.GetInfo(MessageFields::SourceUris, &uriType, &uriCount);
+	if (indices == B_NAME_NOT_FOUND && uris == B_NAME_NOT_FOUND)
+		return 0;
+	const char* snapshot = nullptr;
+	if (indices != B_OK || uris != B_OK || indexType != B_INT32_TYPE
+			|| uriType != B_STRING_TYPE || indexCount <= 0 || indexCount != uriCount
+			|| message.FindString(MessageFields::SourceSnapshot, &snapshot) != B_OK)
+		return -1;
+	return indexCount;
+}
+
+inline bool
+ReadDragSelection(const BMessage& message, DragItem& item)
+{
+	int32 count = DragSelectionCount(message);
+	if (count == 0)
+		return true;
+	if (count < 0 || item.intent != DropIntent::Reorder || item.sourcePlaylist.empty())
+		return false;
+	int32 previous = -1;
+	bool foundAnchor = false;
+	for (int32 i = 0; i < count; i++) {
+		int32 index = -1;
+		const char* uri = nullptr;
+		if (message.FindInt32(MessageFields::SourceIndices, i, &index) != B_OK
+				|| message.FindString(MessageFields::SourceUris, i, &uri) != B_OK
+				|| !uri || index <= previous || SpotifyItemIdForUri(uri).empty()
+				|| !SpotifyItemCanAddToPlaylist(SpotifyItemKindForUri(uri)))
+			return false;
+		if (index == item.sourceIndex)
+			foundAnchor = item.uri == uri;
+		item.sourceIndices.push_back(index);
+		item.sourceUris.emplace_back(uri);
+		previous = index;
+	}
+	return foundAnchor;
+}
+
+inline bool
+ReadDragFields(const BMessage& message, DragItem& item, std::string& type, int32& intent)
+{
+	return ReadItemUri(message, item.uri, true)
+		&& ReadString(message, MessageFields::ItemType, type)
+		&& ReadString(message, MessageFields::SourcePlaylist, item.sourcePlaylist)
+		&& ReadString(message, MessageFields::SourceSnapshot, item.sourceSnapshot)
+		&& ReadInt32(message, MessageFields::SourceIndex, item.sourceIndex)
+		&& ReadInt32(message, MessageFields::DropIntent, intent);
+}
+
 inline bool
 ReadDragItem(const BMessage& message, DragItem& result)
 {
-	if (message.what != MSG_DRAG_ITEM && message.what != MSG_DISCOVER_DROP
+	if (message.what != MSG_DRAG_ITEM && message.what != MSG_PLAYLIST_DROP
+			&& message.what != MSG_DISCOVER_DROP
 			&& message.what != MSG_DISCOVER_DRAG_HOVER)
 		return false;
 	DragItem item;
 	std::string type;
 	int32 intent = 0;
-	if (!ReadItemUri(message, item.uri, true)
-			|| !ReadString(message, MessageFields::ItemType, type)
-			|| !ReadString(message, MessageFields::SourcePlaylist, item.sourcePlaylist)
-			|| !ReadInt32(message, MessageFields::SourceIndex, item.sourceIndex)
-			|| !ReadInt32(message, MessageFields::DropIntent, intent))
+	if (!ReadDragFields(message, item, type, intent))
 		return false;
 	item.kind = SpotifyItemKindForUri(item.uri);
 	if (SpotifyItemIdForUri(item.uri).empty()
@@ -96,6 +148,8 @@ ReadDragItem(const BMessage& message, DragItem& result)
 	if (!ValidDragSource(item, intent))
 		return false;
 	item.intent = static_cast<DropIntent>(intent);
+	if (!ReadDragSelection(message, item))
+		return false;
 	result = item;
 	return true;
 }
@@ -115,6 +169,12 @@ MakeDragItem(const DragItem& item)
 	if (item.sourceIndex >= 0)
 		message.AddInt32(MessageFields::SourceIndex, item.sourceIndex);
 	message.AddInt32(MessageFields::DropIntent, static_cast<int32>(item.intent));
+	for (int32_t index : item.sourceIndices)
+		message.AddInt32(MessageFields::SourceIndices, index);
+	for (const std::string& uri : item.sourceUris)
+		message.AddString(MessageFields::SourceUris, uri.c_str());
+	if (!item.sourceIndices.empty())
+		message.AddString(MessageFields::SourceSnapshot, item.sourceSnapshot.c_str());
 	return message;
 }
 

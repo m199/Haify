@@ -909,14 +909,16 @@ PlayerWindow::_SyncAudiobookQueueForPlayback(
 }
 
 
-void
+bool
 PlayerWindow::_ApplyOptimisticPlay(BMessage* message)
 {
+	if (!ShouldPreviewPlaybackStart(fIsPlaying, fCurrentTrackUri))
+		return false;
 	const char* uri = message->GetString(MessageFields::Uri, "");
 	if (!uri || !uri[0])
 		uri = message->GetString(MessageFields::TrackUri, "");
 	if (!uri || !uri[0])
-		return;
+		return false;
 
 	std::string oldTrackUri = fCurrentTrackUri;
 	BMessage optimistic('pbst');
@@ -969,6 +971,7 @@ PlayerWindow::_ApplyOptimisticPlay(BMessage* message)
 	}
 
 	_ApplyPlaybackMessage(&optimistic);
+	return true;
 }
 
 
@@ -1056,13 +1059,15 @@ PlayerWindow::_PlayUriNow(BMessage* message)
 
 	SpotifyItemKind kind = SpotifyItemKindForUri(uriStr);
 	if (SpotifyItemIsPlayable(kind)) {
-		_ApplyOptimisticPlay(message);
+		bool previewApplied = _ApplyOptimisticPlay(message);
 		if (audiobookQueue)
 			fAudiobookNextUris = queueUris;
 		else
 			fAudiobookNextUris.clear();
 
-		if (kind == kSpotifyItemTrack) {
+		// This metadata callback publishes a preview too; it must obey the same
+		// start gate. Confirmed playback supplies metadata through polls/events.
+		if (previewApplied && kind == kSpotifyItemTrack) {
 			_RequestTrackMetadataUpdate(api, BMessenger(this),
 				SpotifyItemIdForUri(uriStr), fRepeatState, fShuffleOn,
 				fVolumePct);

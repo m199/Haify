@@ -17,6 +17,18 @@
 #include "playlist/PlaylistCacheFiles.h"
 #include "playlist/PlaylistCacheRows.h"
 #include "playlist/PlaylistContent.h"
+#include "playlist/PlaylistMetadataMessages.h"
+#include "playlist/PlaylistMetadataRequests.h"
+#include "playlist/PlaylistPageRequests.h"
+#include "playlist/PlaylistPageMessages.h"
+#include "playlist/PlaylistRemovalMessages.h"
+#include "playlist/PlaylistRemovalRequests.h"
+#include "playlist/PlaylistReorderMessages.h"
+#include "playlist/PlaylistReorderRequests.h"
+#include "playlist/PlaylistWriteMessages.h"
+#include "playlist/PlaylistWriteRequests.h"
+#include "playlist/PlaylistCoverMessages.h"
+#include "playlist/PlaylistCoverRequests.h"
 #include "playlist/PlaylistTrackRow.h"
 #include "playlist/PlaylistEpisodeRows.h"
 #include "playlist/PlaylistTrackListView.h"
@@ -41,7 +53,6 @@
 #include <MessageFilter.h>
 #include <ScrollBar.h>
 #include <Directory.h>
-#include <File.h>
 #include <FindDirectory.h>
 #include <Path.h>
 #include <ScrollView.h>
@@ -82,8 +93,6 @@ static const uint32 kMsgClearPlaylist = 'pClr';
 static const uint32 kMsgMovePlaylistItemUp = 'pMvU';
 static const uint32 kMsgMovePlaylistItemDown = 'pMvD';
 static const uint32 kMsgSaveCache = 'sCch';
-static const uint32 kMsgApplyEpisodeSearch = 'aEps';
-static const uint32 kMsgRetryEpisodeSearch = 'rEps';
 static const int32 kLikedSongsIconResource = 2015;
 static const int32 kSearchIconResource = 2016;
 
@@ -285,58 +294,6 @@ private:
 };
 
 
-static std::string
-Base64Encode(const std::vector<uint8>& bytes)
-{
-	static const char alphabet[] =
-		"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-	std::string result;
-	result.reserve(((bytes.size() + 2) / 3) * 4);
-	for (size_t i = 0; i < bytes.size(); i += 3) {
-		uint32 value = (uint32)bytes[i] << 16;
-		if (i + 1 < bytes.size()) value |= (uint32)bytes[i + 1] << 8;
-		if (i + 2 < bytes.size()) value |= bytes[i + 2];
-		result += alphabet[(value >> 18) & 0x3f];
-		result += alphabet[(value >> 12) & 0x3f];
-		result += i + 1 < bytes.size() ? alphabet[(value >> 6) & 0x3f] : '=';
-		result += i + 2 < bytes.size() ? alphabet[value & 0x3f] : '=';
-	}
-	return result;
-}
-
-
-static std::string
-JsonString(const nlohmann::json& object, const char* key,
-	const std::string& fallback = "")
-{
-	if (!object.is_object())
-		return fallback;
-	auto value = object.find(key);
-	if (value == object.end() || !value->is_string())
-		return fallback;
-	return value->get<std::string>();
-}
-
-static std::string
-JsonDescription(const nlohmann::json& object)
-{
-	return JsonString(object, "html_description",
-		JsonString(object, "description"));
-}
-
-static int
-JsonInt(const nlohmann::json& object, const char* key, int fallback = 0)
-{
-	if (!object.is_object())
-		return fallback;
-	auto value = object.find(key);
-	if (value == object.end()
-			|| (!value->is_number_integer() && !value->is_number_unsigned())) {
-		return fallback;
-	}
-	return value->get<int>();
-}
-
 static void
 SetCachedTrackInfo(BStringView* infoView, bool isPlaylist, int32 total,
 	int32 rowCount)
@@ -353,85 +310,6 @@ SetCachedTrackInfo(BStringView* infoView, bool isPlaylist, int32 total,
 	infoView->SetText(info);
 }
 
-static bool
-JsonBool(const nlohmann::json& object, const char* key, bool fallback = false)
-{
-	if (!object.is_object())
-		return fallback;
-	auto value = object.find(key);
-	if (value == object.end() || !value->is_boolean())
-		return fallback;
-	return value->get<bool>();
-}
-
-static std::string
-FirstImageUrl(const nlohmann::json& data)
-{
-	if (!data.contains("images") || !data["images"].is_array()
-			|| data["images"].empty()) {
-		return "";
-	}
-	return JsonString(data["images"][0], "url");
-}
-
-static void
-SendTitleMessage(const BMessenger& messenger, const nlohmann::json& data,
-	const char* fallbackTitle)
-{
-	BMessage titleMsg('uTtl');
-	titleMsg.AddString("title",
-		JsonString(data, "name", fallbackTitle).c_str());
-	messenger.SendMessage(&titleMsg);
-}
-
-static void
-SendCoverMessage(const BMessenger& messenger, const nlohmann::json& data)
-{
-	BMessage covMsg('uCov');
-	covMsg.AddString("url", FirstImageUrl(data).c_str());
-	messenger.SendMessage(&covMsg);
-}
-
-static void
-SendPlaylistMetadataMessage(const BMessenger& messenger,
-	const nlohmann::json& data)
-{
-	BMessage metaMsg('plMt');
-	metaMsg.AddString("title",
-		JsonString(data, "name", "Playlist").c_str());
-	metaMsg.AddString("snapshot_id",
-		JsonString(data, "snapshot_id").c_str());
-	metaMsg.AddString("description", JsonDescription(data).c_str());
-	metaMsg.AddBool("public", JsonBool(data, "public"));
-	if (data.contains("owner") && data["owner"].is_object()) {
-		std::string ownerId = JsonString(data["owner"], "account_id",
-			JsonString(data["owner"], "id"));
-		metaMsg.AddString("owner_id", ownerId.c_str());
-	}
-	if (data.contains("tracks") && data["tracks"].is_object())
-		metaMsg.AddInt32("total", (int32)JsonInt(data["tracks"], "total"));
-	else if (data.contains("items") && data["items"].is_object())
-		metaMsg.AddInt32("total", (int32)JsonInt(data["items"], "total"));
-	std::string url = FirstImageUrl(data);
-	if (!url.empty())
-		metaMsg.AddString("cover_url", url.c_str());
-	messenger.SendMessage(&metaMsg);
-}
-
-static void
-SendPlaylistUserMessage(const BMessenger& messenger,
-	const nlohmann::json& profile)
-{
-	if (!profile.is_object())
-		return;
-	BMessage user('plUs');
-	std::string legacyId = JsonString(profile, "id");
-	user.AddString("user_id", JsonString(profile, "account_id",
-		legacyId).c_str());
-	user.AddString("legacy_user_id", legacyId.c_str());
-	messenger.SendMessage(&user);
-}
-
 static void
 SendShowSubscriptionMessage(const BMessenger& messenger, bool ok,
 	const nlohmann::json& data)
@@ -444,146 +322,6 @@ SendShowSubscriptionMessage(const BMessenger& messenger, bool ok,
 		subMsg.AddBool("following", data[0].get<bool>());
 	messenger.SendMessage(&subMsg);
 }
-
-static nlohmann::json
-MutationBody(const nlohmann::json& response)
-{
-	if (!response.is_object() || !response.contains("body")
-			|| !response["body"].is_string())
-		return response;
-	try {
-		std::string body = response["body"].get<std::string>();
-		return body.empty() ? nlohmann::json::object()
-			: nlohmann::json::parse(body);
-	} catch (...) {
-		return nlohmann::json::object();
-	}
-}
-
-static std::string
-FormatTrackDuration(int ms)
-{
-	int seconds = ms / 1000;
-	int mins = seconds / 60;
-	seconds = seconds % 60;
-	char buf[16];
-	snprintf(buf, sizeof(buf), "%d:%02d", mins, seconds);
-	return std::string(buf);
-}
-
-static void
-AddTrackToMessage(BMessage* msg, const nlohmann::json& track, int32 number,
-	const std::string& fallbackAlbum, const std::string& fallbackAlbumUri)
-{
-	msg->AddInt32("number", number);
-	msg->AddString("title", JsonString(track, "name", "Unknown").c_str());
-
-	std::string artist = "Unknown";
-	std::string artistUri;
-	if (track.contains("artists") && track["artists"].is_array()
-			&& !track["artists"].empty()) {
-		artist = JsonString(track["artists"][0], "name", "Unknown");
-		artistUri = JsonString(track["artists"][0], "uri");
-	} else if (track.contains("show") && track["show"].is_object()) {
-		artist = JsonString(track["show"], "name", "Unknown");
-		artistUri = JsonString(track["show"], "uri");
-	}
-	msg->AddString("artist", artist.c_str());
-	msg->AddString("artistUri", artistUri.c_str());
-	msg->AddString("bpm", "");
-	msg->AddString("key", "");
-
-	std::string album = fallbackAlbum;
-	std::string albumUri = fallbackAlbumUri;
-	if (track.contains("album") && track["album"].is_object()) {
-		std::string fallback = fallbackAlbum.empty() ? "Unknown" : fallbackAlbum;
-		album = JsonString(track["album"], "name", fallback);
-		albumUri = JsonString(track["album"], "uri", fallbackAlbumUri);
-	} else if (track.contains("show") && track["show"].is_object()) {
-		album = JsonString(track["show"], "name", fallbackAlbum);
-		albumUri = JsonString(track["show"], "uri", fallbackAlbumUri);
-	}
-	msg->AddString("album", album.c_str());
-	msg->AddString("albumUri", albumUri.c_str());
-	msg->AddString("duration", FormatTrackDuration(
-		JsonInt(track, "duration_ms")).c_str());
-	msg->AddString("trackUri", JsonString(track, "uri").c_str());
-}
-
-static void
-AddEpisodeToMessage(BMessage* msg, const nlohmann::json& episode, int32 number)
-{
-	msg->AddInt32("number",       number);
-	msg->AddString("title", JsonString(episode, "name", "Unknown").c_str());
-	msg->AddString("description", JsonDescription(episode).c_str());
-	msg->AddString("date", JsonString(episode, "release_date").c_str());
-	msg->AddString("duration",
-		FormatTrackDuration(JsonInt(episode, "duration_ms")).c_str());
-	msg->AddString("trackUri", JsonString(episode, "uri").c_str());
-}
-
-static void
-AddUnavailableEpisodeToMessage(BMessage* msg, int32 number)
-{
-	msg->AddInt32("number",       number);
-	msg->AddString("title",       B_TRANSLATE("Unavailable episode"));
-	msg->AddString("description", "");
-	msg->AddString("date",        "");
-	msg->AddString("duration",    "");
-	msg->AddString("trackUri",    "");
-}
-
-
-static void
-SendPageLoadFailure(const BMessenger& messenger, int32 searchGeneration,
-	const nlohmann::json& data)
-{
-	BMessage failed('pLdF');
-	failed.AddInt32("search_generation", searchGeneration);
-	failed.AddInt32("status", SpotifyResponseStatus(data));
-	failed.AddInt32("retry_after", SpotifyResponseRetryAfter(data));
-	messenger.SendMessage(&failed);
-}
-
-
-static BMessage*
-CreateTrackPageMessage(int32 offset, const nlohmann::json& data)
-{
-	BMessage* msg = new BMessage('pLdt');
-	msg->AddBool("append", offset > 0);
-	msg->AddInt32("total", JsonInt(data, "total", -1));
-	int32 pageCount = (int32)data["items"].size();
-	msg->AddInt32("page_count", pageCount);
-	msg->AddInt32("next_offset", offset + pageCount);
-	return msg;
-}
-
-
-static BMessage*
-CreateEpisodePageMessage(int32 offset, const nlohmann::json& data)
-{
-	BMessage* msg = new BMessage('pEpL');
-	msg->AddInt32("append", offset > 0 ? 1 : 0);
-	msg->AddInt32("total", (int32)JsonInt(data, "total"));
-	int32 pageCount = (int32)data["items"].size();
-	msg->AddInt32("page_count", pageCount);
-	msg->AddInt32("next_offset", offset + pageCount);
-	return msg;
-}
-
-
-static const char*
-PlaylistWindowTitlePrefix(const std::string& uri)
-{
-	switch (SpotifyItemKindForUri(uri)) {
-		case kSpotifyItemPlaylist: return "Playlist: ";
-		case kSpotifyItemAlbum: return "Album: ";
-		case kSpotifyItemShow: return "Podcast: ";
-		case kSpotifyItemArtist: return "Artist: ";
-		default: return "";
-	}
-}
-
 
 PlaylistWindow::PlaylistWindow(const char* playlistName, const char* uri, const char* coverUrl)
 	: BWindow(BRect(200, 200,
@@ -598,7 +336,7 @@ PlaylistWindow::PlaylistWindow(const char* playlistName, const char* uri, const 
 		ResizeTo(s.playlistWindowW, s.playlistWindowH);
 	}
 
-	SetTitle((std::string(PlaylistWindowTitlePrefix(fUri))
+	SetTitle((std::string(ResolvePlaylistHeader(fUri).titlePrefix)
 		+ playlistName).c_str());
 
 	_InitMenu();
@@ -671,20 +409,18 @@ PlaylistWindow::_HandleTrackLibraryActionMessage(BMessage* message)
 		case 'remT':
 			_RemoveSelectedTracksFromPlaylist(message);
 			return true;
-		case 'rTrR':
+		case MSG_PLAYLIST_REMOVAL_RESULT:
 			_ApplyTrackRemovalResult(message);
 			return true;
-		case 'pMvR':
+		case MSG_PLAYLIST_REORDER_RESULT:
 			_ApplyTrackReorderResult(message);
 			return true;
-		case 'pClR':
-			_ApplyClearPlaylistResult(message);
+		case MSG_PLAYLIST_CLEAR_RESULT:
+		case MSG_PLAYLIST_ADD_RESULT:
+			_ApplyPlaylistWriteResult(message);
 			return true;
-		case 'pAdR':
-			_ApplyPlaylistAddResult(message);
-			return true;
-		case 'pRmM':
-			_ApplyPlaylistRemoveMarked(message);
+		case MSG_PLAYLIST_SNAPSHOT_RESULT:
+			_ApplyPlaylistSnapshot(message);
 			return true;
 		default:
 			return false;
@@ -696,7 +432,7 @@ bool
 PlaylistWindow::_HandleTrackDragActionMessage(BMessage* message)
 {
 	switch (message->what) {
-		case 'drpT':
+		case MSG_PLAYLIST_DROP:
 			_HandleTrackDrop(message);
 			return true;
 		case MSG_HAIFY_DRAG_ENDED:
@@ -726,19 +462,19 @@ PlaylistWindow::_HandleDataMessage(BMessage* message)
 		case kMsgSaveCache:
 			_SaveCacheNowFromMessage();
 			return true;
-		case 'pLdF':
+		case MSG_PLAYLIST_PAGE_FAILED:
 			_ApplyPageLoadFailure(message);
 			return true;
-		case 'pLdt':
+		case MSG_PLAYLIST_TRACK_PAGE:
 			_ApplyTrackPage(message);
 			return true;
-		case 'uTtl':
+		case MSG_PLAYLIST_TITLE_UPDATE:
 			_ApplyTitleUpdate(message);
 			return true;
 		case MSG_CURRENT_TRACK_UPDATE:
 			_ApplyPlayingTrackUpdate(message);
 			return true;
-		case 'uCov':
+		case MSG_PLAYLIST_COVER_UPDATE:
 			_ApplyCoverUpdate(message);
 			return true;
 		case kMsgToggleAlbumSaved:
@@ -769,11 +505,8 @@ PlaylistWindow::_HandlePlaylistEditMessage(BMessage* message)
 		case 'plRc':
 			_RenamePlaylist(message);
 			return true;
-		case 'plMt':
-			_ApplyPlaylistMetadata(message);
-			return true;
-		case 'plUs':
-			_ApplyPlaylistUserState(message);
+		case MSG_PLAYLIST_METADATA_RESULT:
+			_ApplyMetadataResult(message);
 			return true;
 		case kMsgEditPlaylist:
 			_ShowPlaylistDetailsDialog();
@@ -790,7 +523,7 @@ PlaylistWindow::_HandlePlaylistEditMessage(BMessage* message)
 		case kMsgPlaylistCoverSelected:
 			_UploadPlaylistCoverFromMessage(message);
 			return true;
-		case 'pCvR':
+		case MSG_PLAYLIST_COVER_RESULT:
 			_ApplyPlaylistCoverUploadResult(message);
 			return true;
 		case kMsgClearPlaylist:
@@ -840,10 +573,10 @@ bool
 PlaylistWindow::_HandlePodcastMessage(BMessage* message)
 {
 	switch (message->what) {
-		case 'pEpL':
+		case MSG_PLAYLIST_EPISODE_PAGE:
 			_ApplyEpisodePage(message);
 			return true;
-		case 'pEpR':
+		case MSG_PLAYLIST_PODCAST_HEAD_PAGE:
 			_ApplyPodcastHeadPage(message);
 			return true;
 		case 'subU':
@@ -855,10 +588,10 @@ PlaylistWindow::_HandlePodcastMessage(BMessage* message)
 		case 'srch':
 			_ScheduleEpisodeSearch();
 			return true;
-		case kMsgApplyEpisodeSearch:
+		case MSG_PLAYLIST_APPLY_SEARCH:
 			_ApplyEpisodeSearch(message);
 			return true;
-		case kMsgRetryEpisodeSearch:
+		case MSG_PLAYLIST_RETRY_SEARCH:
 			_RetryEpisodeSearch(message);
 			return true;
 		case 'epSl':
@@ -893,24 +626,31 @@ PlaylistWindow::_HandleAppForwardMessage(BMessage* message)
 
 
 void
-PlaylistWindow::_ApplyPlaylistRemoveMarked(BMessage* message)
+PlaylistWindow::_ApplyPlaylistSnapshot(BMessage* message)
 {
-	if (!message->GetBool("ok", false))
+	PlaylistMetadataResult result;
+	if (_PlaylistMutationPending() || !ReadPlaylistSnapshotMessage(*message, result)
+			|| !result.ok || result.request.id != _PlaylistId())
 		return;
 
-	fPlaylistSnapshotId = message->GetString("snapshot_id", "");
-	int32 total = message->GetInt32("total", -1);
+	fPlaylistSnapshotId = result.snapshotId;
+	fCachedPlaylistSnapshotId = result.snapshotId;
+	PlaylistPagePosition position = fPaging.Position();
+	int32 total = result.total;
 	if (total >= 0)
-		fPageTotal = total;
-	fPageHasMore = fPageOffset < fPageTotal;
+		position.total = total;
+	position.hasMore = position.offset < position.total;
+	fPaging.RestorePosition(position);
 	_UpdatePlaylistTrackInfo();
+	if (!fPlaylistSnapshotId.empty())
+		_SaveCache();
 }
 
 
 void
 PlaylistWindow::_ReloadDataIfIdle()
 {
-	if (!fTrackReorderPending && !fPlaylistClearPending)
+	if (!_PlaylistMutationPending())
 		_LoadData();
 }
 
@@ -940,7 +680,7 @@ PlaylistWindow::_ApplyTitleUpdate(BMessage* message)
 {
 	const char* title;
 	if (message->FindString("title", &title) == B_OK) {
-		SetTitle((std::string(PlaylistWindowTitlePrefix(fUri)) + title).c_str());
+		SetTitle((std::string(ResolvePlaylistHeader(fUri).titlePrefix) + title).c_str());
 		fPlaylistName->SetText(title);
 	}
 }
@@ -1007,8 +747,7 @@ void
 PlaylistWindow::_ApplyPlaylistDeleteFailed()
 {
 	fPlaylistDeletePending = false;
-	if (fPlaylistDeleteItem)
-		fPlaylistDeleteItem->SetEnabled(true);
+	_UpdatePlaylistMenuState();
 }
 
 
@@ -1067,8 +806,7 @@ PlaylistWindow::_RenamePlaylist(BMessage* message)
 		[self, sid, sname](bool ok, const nlohmann::json&) {
 		if (!ok)
 			return;
-		BMessage msg('uTtl');
-		msg.AddString("title", sname.c_str());
+		BMessage msg = MakePlaylistTitleMessage(sname);
 		self.SendMessage(&msg);
 
 		BMessage changed(MSG_PLAYLISTS_CHANGED);
@@ -1216,49 +954,41 @@ void
 PlaylistWindow::_RemoveSelectedTracksFromPlaylist(BMessage* message)
 {
 	const char* trackUri;
-	if (message->FindString("trackUri", &trackUri) != B_OK) {
-		DEBUG_PRINT("PlaylistWindow: 'remT' received but no trackUri found\n");
+	if (message->FindString("trackUri", &trackUri) != B_OK)
 		return;
-	}
-	DEBUG_PRINT("PlaylistWindow: received 'remT' for %s\n", trackUri);
-	if (SpotifyItemKindForUri(fUri) != kSpotifyItemPlaylist || !fPlaylistOwned) {
-		DEBUG_PRINT("PlaylistWindow: 'remT' failed because fUri is not a playlist: %s\n",
-			fUri.c_str());
+	App* app = dynamic_cast<App*>(be_app);
+	SpotifyApi* api = app ? app->GetApi() : nullptr;
+	if (!api || !fTrackList || fRemoval.Pending())
 		return;
-	}
-	App* app = (App*)be_app;
-	SpotifyApi* api = app->GetApi();
-	if (!api || fTrackRemovalPending || fTrackReorderPending
-			|| fPlaylistClearPending) {
-		return;
-	}
 
 	std::vector<std::pair<std::string, int>> items;
 	if (!_CollectPendingTrackRemovals(items))
 		return;
+	PlaylistRemovalContext context;
+	context.playlistId = _PlaylistId();
+	context.snapshotId = fPlaylistSnapshotId;
+	context.page = fPaging.Position();
+	context.rowCount = fTrackList->CountRows();
+	context.owned = fMetadata.IsOwned();
+	context.otherMutationPending = _PlaylistMutationPending();
+	PlaylistRemovalCommand command;
+	if (!fRemoval.Begin(context, items, _VisiblePlaylistUris(), command)) {
+		fPendingTrackRemovals.clear();
+		return;
+	}
 
-	std::vector<std::string> knownPlaylistUris = _KnownPlaylistUrisForRemoval();
+	// Old reads must not append rows to the optimistic list or enter its cache.
+	fPaging.RestorePosition(fPaging.Position());
+	_DeleteCache();
 	_RemovePendingTrackRows();
-	fTrackRemovalPending = true;
 	_UpdatePlaylistTrackInfo();
 	_UpdatePlaylistMenuState();
-
-	BMessenger self(this);
-	auto completion = [self](bool ok, const nlohmann::json& data) {
-		BMessage result('rTrR');
-		result.AddBool("ok", ok);
-		result.AddInt32("status", SpotifyResponseStatus(data));
-		result.AddBool("partial_update", JsonBool(data, "partial_update"));
-		self.SendMessage(&result);
-	};
-	std::string playlistId = SpotifyItemIdForUri(fUri);
-	if (!knownPlaylistUris.empty()) {
-		api->Playlists().RemovePlaylistItemsFromKnownSnapshot(
-			playlistId, items, fPlaylistSnapshotId, knownPlaylistUris,
-			completion);
-	} else {
-		api->Playlists().RemovePlaylistItemsAtPositions(
-			playlistId, items, fPlaylistSnapshotId, completion);
+	if (!PlaylistRemovalRequests::Send(api->Playlists(), command, BMessenger(this))) {
+		PlaylistRemovalResult failure;
+		failure.requestId = command.requestId;
+		failure.playlistId = command.playlistId;
+		BMessage result = MakePlaylistRemovalMessage(failure);
+		_ApplyTrackRemovalResult(&result);
 	}
 }
 
@@ -1278,21 +1008,16 @@ PlaylistWindow::_CollectPendingTrackRemovals(
 		if (listIndex < 0)
 			continue;
 		items.push_back({row->fTrackUri, row->fPlaylistPosition});
-		fPendingTrackRemovals.push_back({row, listIndex,
-			row->fPlaylistPosition, true});
+		fPendingTrackRemovals.push_back({row, listIndex, true});
 	}
 	return !items.empty() && !fPendingTrackRemovals.empty();
 }
 
 
 std::vector<std::string>
-PlaylistWindow::_KnownPlaylistUrisForRemoval() const
+PlaylistWindow::_VisiblePlaylistUris() const
 {
 	std::vector<std::string> uris;
-	if (!PlaylistHasCompleteSnapshot(fPlaylistSnapshotId, fPageTotal,
-			fTrackList->CountRows(), fPageOffset)) {
-		return uris;
-	}
 	for (int32 index = 0; index < fTrackList->CountRows(); index++) {
 		TrackRow* row = dynamic_cast<TrackRow*>(fTrackList->RowAt(index));
 		if (!row || row->fTrackUri.empty())
@@ -1325,12 +1050,11 @@ PlaylistWindow::_HandleTrackDrop(BMessage* message)
 	MessageContracts::DragItem item;
 	if (!MessageContracts::ReadDragItem(*message, item))
 		return;
-	bool mutationPending = fTrackRemovalPending || fTrackReorderPending
-		|| fPlaylistClearPending;
+	bool mutationPending = _PlaylistMutationPending();
 	PlaylistDropAction action = ResolvePlaylistDropAction(fUri, item,
-		fPlaylistOwned, mutationPending);
+		fMetadata.IsOwned(), mutationPending);
 	if (action == kPlaylistDropReorder) {
-		_HandleTrackReorderDrop(message, item.sourceIndex);
+		_HandleTrackReorderDrop(message, item);
 		return;
 	}
 	if (action == kPlaylistDropAddPlayableItem) {
@@ -1340,10 +1064,37 @@ PlaylistWindow::_HandleTrackDrop(BMessage* message)
 	DEBUG_PRINT("PlaylistWindow: Drop received without playable track uri\n");
 }
 
+bool
+PlaylistWindow::QuitRequested()
+{
+	// A group reorder advances on this looper; let it finish before closing.
+	if (fReorder.Pending()) {
+		fCloseAfterReorder = true;
+		return false;
+	}
+	return BWindow::QuitRequested();
+}
+
 
 void
-PlaylistWindow::_HandleTrackReorderDrop(BMessage* message, int32 sourceIndex)
+PlaylistWindow::_HandleTrackReorderDrop(BMessage* message,
+	const MessageContracts::DragItem& item)
 {
+	std::vector<int32_t> indices = item.sourceIndices;
+	if (indices.empty()) {
+		auto row = dynamic_cast<TrackRow*>(fTrackList->RowAt(item.sourceIndex));
+		if (!row || row->fTrackUri != item.uri)
+			return;
+		indices.push_back(item.sourceIndex);
+	} else {
+		if (item.sourceSnapshot != fPlaylistSnapshotId)
+			return;
+		for (size_t i = 0; i < indices.size(); i++) {
+			auto row = dynamic_cast<TrackRow*>(fTrackList->RowAt(indices[i]));
+			if (!row || row->fTrackUri != item.sourceUris[i])
+				return;
+		}
+	}
 	BPoint point = message->DropPoint();
 	if (BView* outline = fTrackList->ScrollView())
 		outline->ConvertFromScreen(&point);
@@ -1362,135 +1113,126 @@ PlaylistWindow::_HandleTrackReorderDrop(BMessage* message, int32 sourceIndex)
 			break;
 		}
 	}
-	_BeginTrackReorder(sourceIndex, 1, insertBefore);
+	_BeginTrackReorder(indices, insertBefore);
 }
 
 
 void
 PlaylistWindow::_AddDroppedPlayableItem(BMessage* message, const char* trackUri)
 {
-	DEBUG_PRINT("PlaylistWindow: Drop received for track %s on %s\n",
-		trackUri, fUri.c_str());
-	const char* title = message->GetString("title", "");
-	const char* artist = message->GetString("artist", "");
-	const char* album = message->GetString("album", "");
-	const char* duration = message->GetString("duration", "");
-	bool fullyLoaded = fPageOffset >= fPageTotal;
-	int32 playlistPosition = std::max(fPageTotal,
-		(int32)fTrackList->CountRows());
-	int32 nextNum = playlistPosition + 1;
-	TrackRow* row = new TrackRow(trackUri, playlistPosition);
-	row->SetField(new TrackIntegerField(nextNum), 0);
-	row->SetField(new TrackStringField(title), 1);
-	row->SetField(new TrackStringField(artist), 2);
-	row->SetField(new TrackStringField(""), 3);
-	row->SetField(new TrackStringField(""), 4);
-	row->SetField(new TrackStringField(album), 5);
-	row->SetField(new TrackStringField(duration), 6);
-	row->SetPlaying(!fCurrentPlayingTrackUri.empty()
-		&& row->fTrackUri == fCurrentPlayingTrackUri);
-	fTrackList->AddRow(row);
-	fPageTotal = playlistPosition + 1;
-
-	App* app = (App*)be_app;
-	SpotifyApi* api = app->GetApi();
-	if (!api)
+	App* app = dynamic_cast<App*>(be_app);
+	if (!app || !app->GetApi() || !fTrackList || !trackUri)
 		return;
-
-	DEBUG_PRINT("PlaylistWindow: Adding track to playlist\n");
-	BMessenger self(this);
-	api->Playlists().AddTrackToPlaylist(_PlaylistId(), trackUri,
-		[self, row, fullyLoaded](bool ok, const nlohmann::json& data) {
-		BMessage result('pAdR');
-		result.AddBool("ok", ok);
-		result.AddBool("fully_loaded", fullyLoaded);
-		result.AddPointer("row", row);
-		nlohmann::json body = MutationBody(data);
-		result.AddString("snapshot_id",
-			JsonString(body, "snapshot_id").c_str());
-		self.SendMessage(&result);
-	});
+	PlaylistWriteCommand command;
+	if (!fAdd.Begin(_PlaylistWriteContext(), trackUri, command))
+		return;
+	if (command.appendVisible) {
+		TrackRow* row = new TrackRow(trackUri, command.appendPosition);
+		row->SetField(new TrackIntegerField(command.appendPosition + 1), 0);
+		row->SetField(new TrackStringField(message->GetString(MessageFields::Title, "")), 1);
+		row->SetField(new TrackStringField(message->GetString(MessageFields::Artist, "")), 2);
+		row->SetField(new TrackStringField(""), 3);
+		row->SetField(new TrackStringField(""), 4);
+		row->SetField(new TrackStringField(message->GetString(MessageFields::Album, "")), 5);
+		row->SetField(new TrackStringField(message->GetString(MessageFields::Duration, "")), 6);
+		row->SetPlaying(!fCurrentPlayingTrackUri.empty()
+			&& row->fTrackUri == fCurrentPlayingTrackUri);
+		fTrackList->AddRow(row);
+		fPendingPlaylistAdd = row;
+	}
+	fPaging.RestorePosition(command.optimisticPage);
 	_DeleteCache();
+	_UpdatePlaylistTrackInfo();
+	_UpdatePlaylistMenuState();
+	_SendPlaylistWrite(command);
 }
 
 
 void
 PlaylistWindow::_ApplyPageLoadFailure(BMessage* message)
 {
-	fPageLoading = false;
-	int32 searchGeneration = message->GetInt32("search_generation", -1);
-	if (fEpisodeSearchPaging && searchGeneration >= 0
-			&& searchGeneration == fEpisodeSearchGeneration) {
-		int32 status = message->GetInt32("status", -1);
-		int32 retryAfter = message->GetInt32("retry_after", -1);
-		bool temporary = status < 0 || status == 408 || status == 425
-			|| status == 429 || status >= 500;
-		if (temporary && fEpisodeSearchRetryCount < 3) {
-			fEpisodeSearchRetryCount++;
-			fEpisodeSearchWaitingRetry = true;
-			bigtime_t delay = status == 429 && retryAfter > 0
-				? (bigtime_t)retryAfter * 1000000LL : 2000000LL;
-			delete fEpisodeSearchRetryRunner;
-			BMessage retry(kMsgRetryEpisodeSearch);
-			retry.AddInt32("search_generation", fEpisodeSearchGeneration);
-			fEpisodeSearchRetryRunner = new BMessageRunner(BMessenger(this),
-				&retry, delay, 1);
-		} else {
-			fEpisodeSearchPaging = false;
-			fEpisodeSearchWaitingRetry = false;
-			fEpisodeSearchFailed = true;
-		}
+	PlaylistPageResult result;
+	if (!ReadPlaylistPageHeader(*message, result))
+		return;
+	PlaylistPageUpdate update = fPaging.FinishPage(result);
+	if (!update.accepted)
+		return;
+	if (update.retryDelay > 0) {
+		delete fEpisodeSearchRetryRunner;
+		BMessage retry = MakePlaylistSearchMessage(true, fPaging.SearchGeneration());
+		fEpisodeSearchRetryRunner = new BMessageRunner(BMessenger(this),
+			&retry, update.retryDelay, 1);
+	}
+	if (result.request.source == PlaylistPageSource::Podcast)
 		_UpdateEpisodeInfo();
-	} else if (fEpisodeSearchPaging && !fEpisodeSearchFilter.empty()) {
+	if (update.continueLoading)
 		_CheckLazyLoad();
+}
+
+
+void
+PlaylistWindow::_ApplyMetadataResult(BMessage* message)
+{
+	PlaylistMetadataResult result;
+	if (!ReadPlaylistMetadataMessage(*message, result))
+		return;
+	if (!result.ok) {
+		DEBUG_PRINT("Playlist metadata read failed: status=%ld, valid=%d\n",
+			(long)result.status, result.responseValid);
+		return;
+	}
+	fMetadata.Apply(result);
+	switch (result.request.kind) {
+		case PlaylistMetadataKind::Playlist:
+			_ApplyPlaylistMetadata(result);
+			break;
+		case PlaylistMetadataKind::CurrentUser:
+			_UpdatePlaylistMenuState();
+			break;
+		case PlaylistMetadataKind::Album:
+		case PlaylistMetadataKind::Podcast: {
+			BMessage title = MakePlaylistTitleMessage(result.title);
+			_ApplyTitleUpdate(&title);
+			SetCoverUrl(result.coverUrl);
+			break;
+		}
+		default: break;
 	}
 }
 
 
 void
-PlaylistWindow::_ApplyPlaylistMetadata(BMessage* message)
+PlaylistWindow::_ApplyPlaylistMetadata(const PlaylistMetadataResult& result)
 {
-	const char* title = message->GetString("title", "");
+	const char* title = result.title.c_str();
 	if (title && title[0]) {
 		SetTitle((std::string("Playlist: ") + title).c_str());
 		fPlaylistName->SetText(title);
 	}
 
-	const char* coverUrl = message->GetString("cover_url", "");
+	const char* coverUrl = result.coverUrl.c_str();
 	if (coverUrl && coverUrl[0]) {
-		BMessage cover('uCov');
-		cover.AddString("url", coverUrl);
+		BMessage cover = MakePlaylistCoverMessage(coverUrl);
 		PostMessage(&cover);
 	}
 
-	std::string snapshot = message->GetString("snapshot_id", "");
-	fPlaylistDescription = message->GetString("description", "");
-	fPlaylistOwnerId = message->GetString("owner_id", "");
-	fPlaylistPublic = message->GetBool("public", false);
-	fPlaylistOwned = !fCurrentUserId.empty()
-		&& (fCurrentUserId == fPlaylistOwnerId
-			|| fCurrentUserLegacyId == fPlaylistOwnerId);
+	const std::string& snapshot = result.snapshotId;
 	_UpdatePlaylistMenuState();
-	int32 total = message->GetInt32("total", -1);
+	if (_PlaylistMutationPending())
+		return;
+	int32 total = result.total;
 	fPlaylistSnapshotId = snapshot;
 
 	if (ShouldReloadPlaylistRowsForSnapshot(fCachedPlaylistSnapshotId,
 			snapshot)) {
 		_DeleteCache();
 		fCachedPlaylistSnapshotId.clear();
-		fPageLoading = false;
-		fPageOffset = 0;
-		fPageTotal = total >= 0 ? total : 0;
-		fPageHasMore = total != 0;
+		fPaging.Restart(total);
 		_LoadNextPage();
 		return;
 	}
 
-	PlaylistMetadataPageState pageState = ResolvePlaylistMetadataPageState(
-		total, fPageTotal, fTrackList ? fTrackList->CountRows() : 0,
-		fPageOffset);
-	fPageTotal = pageState.total;
-	fPageHasMore = pageState.hasMore;
+	fPaging.ReconcileMetadata(total, fTrackList ? fTrackList->CountRows() : 0);
 	if (fTrackList && fTrackList->CountRows() > 0)
 		_SaveCache();
 	_CheckLazyLoad();
@@ -1510,8 +1252,8 @@ PlaylistWindow::_ApplyPlaylistEditResult(BMessage* message)
 	}
 
 	std::string name = message->GetString("name", "");
-	fPlaylistDescription = message->GetString("description", "");
-	fPlaylistPublic = message->GetBool("public", false);
+	fMetadata.UpdateDetails(message->GetString("description", ""),
+		message->GetBool("public", false));
 	fPlaylistName->SetText(name.c_str());
 	SetTitle((std::string("Playlist: ") + name).c_str());
 	std::string id = _PlaylistId();
@@ -1609,8 +1351,10 @@ PlaylistWindow::_ApplySubscriptionState(BMessage* message)
 void
 PlaylistWindow::_ApplyTrackPage(BMessage* message)
 {
-	fPageLoading = false;
-	bool append = message->GetBool("append", false);
+	PlaylistPageResult result;
+	if (!ReadPlaylistPageHeader(*message, result) || !fPaging.FinishPage(result).applied)
+		return;
+	bool append = result.request.offset > 0;
 	BScrollBar* scrollBar = TrackVerticalScrollBar(fTrackList);
 	float scrollValue = scrollBar ? scrollBar->Value() : 0.0f;
 	if (!append)
@@ -1618,14 +1362,6 @@ PlaylistWindow::_ApplyTrackPage(BMessage* message)
 
 	_AddTrackPageRows(message);
 
-	int32 total = message->GetInt32("total", -1);
-	if (total >= 0)
-		fPageTotal = total;
-	fPageOffset = message->GetInt32("next_offset",
-		(int32)fTrackList->CountRows());
-	int32 pageCount = message->GetInt32("page_count", 0);
-	fPageHasMore = pageCount > 0
-		&& (fPageTotal <= 0 || fPageOffset < fPageTotal);
 	_UpdatePlaylistTrackInfo();
 	if (append && scrollBar)
 		scrollBar->SetValue(scrollValue);
@@ -1697,15 +1433,20 @@ PlaylistWindow::_PlayContextUri()
 void
 PlaylistWindow::_ApplyTrackRemovalResult(BMessage* message)
 {
-	bool ok = message->GetBool("ok", false);
-	bool needsReload = !ok && (message->GetInt32("status", -1) == 409
-		|| message->GetBool("partial_update", false));
-	_FinishTrackRemoval(ok);
-	if (ok) {
+	PlaylistRemovalResult result;
+	if (!ReadPlaylistRemovalMessage(*message, result))
+		return;
+	PlaylistRemovalUpdate update = fRemoval.Complete(result, fPaging.Position(),
+		fTrackList ? fTrackList->CountRows() : 0);
+	if (update.action == PlaylistRemovalAction::Ignore)
+		return;
+	_FinishTrackRemoval(update);
+	if (update.action == PlaylistRemovalAction::Commit) {
 		_RefreshPlaylistSnapshot();
-	} else if (needsReload) {
+	} else if (update.action == PlaylistRemovalAction::Reload) {
 		PostMessage('pSnC');
 	} else {
+		_SaveCache();
 		BAlert* alert = new BAlert("", B_TRANSLATE(
 			"Spotify could not remove the selected songs."),
 			B_TRANSLATE("OK"), nullptr, nullptr, B_WIDTH_AS_USUAL,
@@ -1718,14 +1459,29 @@ PlaylistWindow::_ApplyTrackRemovalResult(BMessage* message)
 void
 PlaylistWindow::_ApplyTrackReorderResult(BMessage* message)
 {
-	bool ok = message->GetBool("ok", false);
-	bool conflict = !ok && message->GetInt32("status", -1) == 409;
-	_FinishTrackReorder(ok, message->GetString("snapshot_id", ""));
-	if (ok) {
-		if (fPlaylistSnapshotId.empty())
+	PlaylistReorderResult result;
+	if (!ReadPlaylistReorderMessage(*message, result))
+		return;
+	auto update = fReorder.Complete(result);
+	if (update.action == PlaylistReorderAction::Ignore)
+		return;
+	if (update.action == PlaylistReorderAction::Continue) {
+		_SendTrackReorder(update.next);
+		return;
+	}
+	_FinishTrackReorder(update);
+	if (update.action == PlaylistReorderAction::Commit) {
+		if (update.refreshSnapshot)
 			_RefreshPlaylistSnapshot();
-	} else if (conflict) {
-		PostMessage('pSnC');
+	} else if (update.action == PlaylistReorderAction::Reload) {
+		if (update.partialUpdate) {
+			BAlert* alert = new BAlert("", B_TRANSLATE(
+				"Only part of the selection could be moved. Haify will reload the playlist's current order."),
+				B_TRANSLATE("OK"), nullptr, nullptr, B_WIDTH_AS_USUAL, B_WARNING_ALERT);
+			alert->Go();
+			PostMessage('lddt');
+		} else
+			PostMessage('pSnC');
 	} else {
 		BAlert* alert = new BAlert("", B_TRANSLATE(
 			"Spotify could not move the selected songs."),
@@ -1737,72 +1493,52 @@ PlaylistWindow::_ApplyTrackReorderResult(BMessage* message)
 
 
 void
-PlaylistWindow::_ApplyClearPlaylistResult(BMessage* message)
+PlaylistWindow::_ApplyPlaylistWriteResult(BMessage* message)
 {
-	bool ok = message->GetBool("ok", false);
-	_FinishClearPlaylist(ok, message->GetString("snapshot_id", ""));
-	if (!ok) {
-		BAlert* alert = new BAlert("", B_TRANSLATE(
-			"Spotify could not clear the playlist."),
-			B_TRANSLATE("OK"), nullptr, nullptr, B_WIDTH_AS_USUAL,
-			B_WARNING_ALERT);
-		alert->Go();
-	}
-}
-
-
-void
-PlaylistWindow::_ApplyPlaylistAddResult(BMessage* message)
-{
-	BRow* pendingRow = nullptr;
-	if (message->FindPointer("row", (void**)&pendingRow) != B_OK
-			|| !pendingRow)
+	PlaylistWriteResult result;
+	if (!ReadPlaylistWriteMessage(*message, result))
 		return;
-	bool fullyLoaded = message->GetBool("fully_loaded", false);
-	if (message->GetBool("ok", false)) {
-		fPlaylistSnapshotId = message->GetString("snapshot_id", "");
-		fCachedPlaylistSnapshotId = fPlaylistSnapshotId;
-		if (fullyLoaded)
-			fPageOffset++;
-		_DeleteCache();
-		if (!fPlaylistSnapshotId.empty())
-			_SaveCache();
-		else
-			_RefreshPlaylistSnapshot();
-	} else {
-		bool stillVisible = fTrackList->IndexOf(pendingRow) >= 0;
-		if (stillVisible) {
-			fTrackList->RemoveRow(pendingRow);
-			delete pendingRow;
-			fPageTotal = std::max((int32)0, fPageTotal - 1);
+	PlaylistWriteUpdate update = result.kind == PlaylistWriteKind::Clear
+		? fClear.Complete(result) : fAdd.Complete(result);
+	if (update.action == PlaylistWriteAction::Ignore)
+		return;
+	bool committed = update.action == PlaylistWriteAction::Commit;
+	if (result.kind == PlaylistWriteKind::Clear)
+		_FinishClearPlaylist(committed);
+	else {
+		if (!committed && fPendingPlaylistAdd) {
+			fTrackList->RemoveRow(fPendingPlaylistAdd);
+			delete fPendingPlaylistAdd;
 		}
-		BAlert* alert = new BAlert("", B_TRANSLATE(
-			"Spotify could not add the song to the playlist."),
-			B_TRANSLATE("OK"), nullptr, nullptr, B_WIDTH_AS_USUAL,
-			B_WARNING_ALERT);
-		alert->Go();
+		fPendingPlaylistAdd = nullptr;
 	}
-	fPageHasMore = fPageOffset < fPageTotal;
+	fPaging.RestorePosition(update.page);
+	fPlaylistSnapshotId = update.snapshotId;
+	fCachedPlaylistSnapshotId = update.snapshotId;
+	_DeleteCache();
+	if (!update.snapshotId.empty())
+		_SaveCache();
+	if (update.refreshSnapshot)
+		_RefreshPlaylistSnapshot();
 	_UpdatePlaylistTrackInfo();
-}
-
-
-void
-PlaylistWindow::_ApplyPlaylistUserState(BMessage* message)
-{
-	fCurrentUserId = message->GetString("user_id", "");
-	fCurrentUserLegacyId = message->GetString("legacy_user_id", "");
-	fPlaylistOwned = !fCurrentUserId.empty()
-		&& (fCurrentUserId == fPlaylistOwnerId
-			|| fCurrentUserLegacyId == fPlaylistOwnerId);
 	_UpdatePlaylistMenuState();
+	if (update.action == PlaylistWriteAction::Reload)
+		PostMessage('pSnC');
+	else if (!committed) {
+		const char* text = result.kind == PlaylistWriteKind::Clear
+			? B_TRANSLATE("Spotify could not clear the playlist.")
+			: B_TRANSLATE("Spotify could not add the song to the playlist.");
+		(new BAlert("", text, B_TRANSLATE("OK"), nullptr, nullptr,
+			B_WIDTH_AS_USUAL, B_WARNING_ALERT))->Go();
+	}
+	_CheckLazyLoad();
 }
 
 
 void
 PlaylistWindow::_UpdatePlaylistDetails(BMessage* message)
 {
-	if (!fPlaylistOwned)
+	if (!fMetadata.IsOwned())
 		return;
 	std::string name = message->GetString("name", "");
 	std::string description = message->GetString("description", "");
@@ -1829,27 +1565,30 @@ PlaylistWindow::_UpdatePlaylistDetails(BMessage* message)
 void
 PlaylistWindow::_ApplyPlaylistCoverUploadResult(BMessage* message)
 {
-	if (message->GetBool("ok", false)) {
-		App* app = dynamic_cast<App*>(be_app);
-		SpotifyApi* api = app ? app->GetApi() : nullptr;
-		if (api) {
-			BMessenger self(this);
-			api->Playlists().GetPlaylistImages(_PlaylistId(),
-				[self](bool ok, const nlohmann::json& images) {
-				if (!ok || !images.is_array() || images.empty())
-					return;
-				BMessage cover('uCov');
-				cover.AddString("url", JsonString(images[0], "url").c_str());
-				self.SendMessage(&cover);
-			});
-		}
-	} else {
-		BAlert* alert = new BAlert("", B_TRANSLATE(
-			"Spotify could not upload the playlist cover."),
-			B_TRANSLATE("OK"), nullptr, nullptr, B_WIDTH_AS_USUAL,
-			B_WARNING_ALERT);
-		alert->Go();
+	PlaylistCoverResult result;
+	if (!ReadPlaylistCoverResultMessage(*message, result) || !fCover.Complete(result))
+		return;
+	_UpdatePlaylistMenuState();
+	if (result.error == PlaylistCoverError::None) {
+		SetCoverUrl(result.coverUrl);
+		_ReloadArtwork();
+		return;
 	}
+	const char* text = nullptr;
+	switch (result.error) {
+		case PlaylistCoverError::FileRead:
+			text = B_TRANSLATE("The selected cover file could not be read."); break;
+		case PlaylistCoverError::NotJpeg:
+			text = B_TRANSLATE("The selected file is not a JPEG."); break;
+		case PlaylistCoverError::TooLarge:
+			text = B_TRANSLATE("The Base64-encoded JPEG exceeds Spotify's 256 KB limit."); break;
+		case PlaylistCoverError::RefreshFailed:
+			text = B_TRANSLATE("The cover was uploaded, but its preview could not be refreshed. Please reopen the playlist."); break;
+		default:
+			text = B_TRANSLATE("Spotify could not upload the playlist cover."); break;
+	}
+	(new BAlert("", text, B_TRANSLATE("OK"), nullptr, nullptr,
+		B_WIDTH_AS_USUAL, B_WARNING_ALERT))->Go();
 }
 
 
@@ -1871,20 +1610,12 @@ PlaylistWindow::_NotifyPlaylistDeleted()
 void
 PlaylistWindow::_ApplyEpisodePage(BMessage* message)
 {
-	fPageLoading = false;
-	fEpisodeSearchRetryCount = 0;
-	fEpisodeSearchWaitingRetry = false;
-	fEpisodeSearchFailed = false;
-	int32 append = message->GetInt32("append", 0);
+	PlaylistPageResult result;
+	if (!ReadPlaylistPageHeader(*message, result) || !fPaging.FinishPage(result).applied)
+		return;
+	bool append = result.request.offset > 0;
 	BScrollBar* scrollBar = TrackVerticalScrollBar(fTrackList);
 	float scrollValue = scrollBar ? scrollBar->Value() : 0.0f;
-	fEpisodeTotal = message->GetInt32("total", 0);
-	fEpisodeOffset = message->GetInt32("next_offset", 0);
-	fPageTotal = fEpisodeTotal;
-	fPageOffset = fEpisodeOffset;
-	int32 pageCount = message->GetInt32("page_count", 0);
-	fPageHasMore = pageCount > 0
-		&& (fEpisodeTotal <= 0 || fEpisodeOffset < fEpisodeTotal);
 
 	if (!append)
 		fEpisodes.clear();
@@ -1892,13 +1623,11 @@ PlaylistWindow::_ApplyEpisodePage(BMessage* message)
 	_RenumberEpisodes();
 
 	if (append)
-		_AppendEpisodeRows(firstNewEpisode, fEpisodeSearchFilter);
+		_AppendEpisodeRows(firstNewEpisode, fPaging.Filter());
 	else
-		_RebuildEpisodeList(fEpisodeSearchFilter);
+		_RebuildEpisodeList(fPaging.Filter());
 	if (append && scrollBar)
 		scrollBar->SetValue(scrollValue);
-	if (!fPageHasMore)
-		fEpisodeSearchPaging = false;
 
 	_UpdateEpisodeInfo();
 
@@ -1918,27 +1647,19 @@ PlaylistWindow::_AppendEpisodePageItems(BMessage* message)
 void
 PlaylistWindow::_ApplyPodcastHeadPage(BMessage* message)
 {
-	bool ok = message->GetBool("ok", false);
-	if (!ok) {
-		fPodcastHeadRefreshing = false;
+	PlaylistPageResult result;
+	if (!ReadPlaylistPageHeader(*message, result) || !fPaging.FinishHeadPage(result))
+		return;
+	if (!result.ok || !fPaging.HeadRefreshing()) {
 		fPendingPodcastHeadEpisodes.clear();
 		return;
 	}
-
-	fEpisodeTotal = message->GetInt32("total", fEpisodeTotal);
-	int32 offset = message->GetInt32("offset", 0);
-	int32 pageCount = message->GetInt32("page_count", 0);
-	int32 nextOffset = message->GetInt32("next_offset", offset + pageCount);
-
 	bool reachedKnownEpisode = CollectMissingPlaylistHeadEpisodes(fEpisodes,
 		PlaylistEpisodesFromMessage(message), fPendingPodcastHeadEpisodes);
-
-	if (!reachedKnownEpisode && pageCount > 0
-			&& (fEpisodeTotal <= 0 || nextOffset < fEpisodeTotal)) {
-		_RefreshPodcastHead(nextOffset);
+	if (fPaging.ContinueHead(result, reachedKnownEpisode)) {
+		_RefreshPodcastHead(result.nextOffset);
 		return;
 	}
-
 	_FinishPodcastHeadRefresh();
 }
 
@@ -1988,17 +1709,12 @@ PlaylistWindow::_ScheduleEpisodeSearch()
 {
 	if (!fSearchBox)
 		return;
-	fEpisodeSearchGeneration++;
-	fEpisodeSearchPaging = false;
-	fEpisodeSearchWaitingRetry = false;
-	fEpisodeSearchFailed = false;
-	fEpisodeSearchRetryCount = 0;
+	int32 generation = fPaging.ScheduleSearch();
 	_UpdateEpisodeInfo();
 	delete fEpisodeSearchRetryRunner;
 	fEpisodeSearchRetryRunner = nullptr;
 	delete fEpisodeSearchRunner;
-	BMessage apply(kMsgApplyEpisodeSearch);
-	apply.AddInt32("search_generation", fEpisodeSearchGeneration);
+	BMessage apply = MakePlaylistSearchMessage(false, generation);
 	fEpisodeSearchRunner = new BMessageRunner(BMessenger(this), &apply,
 		200000LL, 1);
 }
@@ -2007,35 +1723,28 @@ PlaylistWindow::_ScheduleEpisodeSearch()
 void
 PlaylistWindow::_ApplyEpisodeSearch(BMessage* message)
 {
-	int32 searchGeneration = message->GetInt32("search_generation", -1);
-	if (searchGeneration != fEpisodeSearchGeneration)
+	int32 generation = 0;
+	if (!ReadPlaylistSearchGeneration(*message, generation) || !fSearchBox
+			|| !fPaging.ApplySearch(generation, fSearchBox->Text()))
 		return;
 	delete fEpisodeSearchRunner;
 	fEpisodeSearchRunner = nullptr;
-	if (fSearchBox) {
-		fEpisodeSearchFilter = fSearchBox->Text();
-		fEpisodeSearchPaging = !fEpisodeSearchFilter.empty() && fPageHasMore;
-		fEpisodeSearchFailed = false;
-		_RebuildEpisodeList(fEpisodeSearchFilter);
-		_UpdateEpisodeInfo();
-		_CheckLazyLoad();
-	}
+	_RebuildEpisodeList(fPaging.Filter());
+	_UpdateEpisodeInfo();
+	_CheckLazyLoad();
 }
 
 
 void
 PlaylistWindow::_RetryEpisodeSearch(BMessage* message)
 {
-	int32 searchGeneration = message->GetInt32("search_generation", -1);
-	if (searchGeneration != fEpisodeSearchGeneration)
+	int32 generation = 0;
+	if (!ReadPlaylistSearchGeneration(*message, generation) || !fPaging.RetrySearch(generation))
 		return;
 	delete fEpisodeSearchRetryRunner;
 	fEpisodeSearchRetryRunner = nullptr;
-	if (fEpisodeSearchPaging && !fEpisodeSearchFilter.empty()) {
-		fEpisodeSearchWaitingRetry = false;
-		_UpdateEpisodeInfo();
-		_LoadNextPage();
-	}
+	_UpdateEpisodeInfo();
+	_LoadNextPage();
 }
 
 
@@ -2118,7 +1827,8 @@ public:
 			if (message->WasDropped()) {
 				DEBUG_PRINT("DropFilter: forwarding dropped message to window\n");
 				BMessage dropMsg(*message);
-				dropMsg.what = 'drpT';
+				// The reposted drop must bypass this common filter.
+				dropMsg.what = MSG_PLAYLIST_DROP;
 				fWindow->PostMessage(&dropMsg);
 				return B_SKIP_MESSAGE;
 			}
@@ -2169,10 +1879,11 @@ private:
 void
 PlaylistWindow::_InitLayout(const char* playlistName)
 {
-	SpotifyItemKind kind = SpotifyItemKindForUri(fUri);
-	bool isPodcast = kind == kSpotifyItemShow;
-	bool isAlbum = kind == kSpotifyItemAlbum;
-	bool isLikedSongs = (fUri == "spotify:collection");
+	const auto header = ResolvePlaylistHeader(fUri);
+	SpotifyItemKind kind = header.kind;
+	bool isPodcast = header.isPodcast;
+	bool isAlbum = header.isAlbum;
+	bool isLikedSongs = header.isLikedSongs;
 	float artworkSize = MediaHeaderStyle::ArtworkSize();
 
 	ArtworkView* coverView = new ArtworkView("CoverView");
@@ -2212,12 +1923,11 @@ PlaylistWindow::_InitLayout(const char* playlistName)
 	_InitTrackList(kind);
 
 	if (isPodcast) {
-		const float lineHeight = UiScale::LineHeight();
-		const float podcastInfoWidth = std::max(
-			MediaHeaderStyle::ActionButtonMinWidth(),
-			MediaHeaderStyle::Scaled(170.0f));
-		const float podcastTitleHeight = lineHeight * 3.2f;
-		const float podcastSearchInfoHeight = lineHeight * 1.4f;
+		const auto metrics = ResolvePodcastHeaderMetrics(UiScale::LineHeight(),
+			MediaHeaderStyle::ActionButtonMinWidth(), MediaHeaderStyle::Scaled(170.0f));
+		const float podcastInfoWidth = metrics.infoWidth;
+		const float podcastTitleHeight = metrics.titleHeight;
+		const float podcastSearchInfoHeight = metrics.searchInfoHeight;
 		fPlaylistName->SetExplicitMinSize(BSize(
 			podcastInfoWidth, B_SIZE_UNSET));
 		fPlaylistName->SetExplicitPreferredSize(BSize(
@@ -2301,12 +2011,7 @@ PlaylistWindow::_InitLayout(const char* playlistName)
 		_InitDefaultLayout();
 	}
 
-	if (isPodcast)
-		SetSizeLimits(560, 100000, 300, 100000);
-	else if (isAlbum)
-		SetSizeLimits(420, 100000, 260, 100000);
-	else
-		SetSizeLimits(420, 100000, 260, 100000);
+	SetSizeLimits(header.minimumWidth, 100000, header.minimumHeight, 100000);
 }
 
 
@@ -2564,25 +2269,25 @@ PlaylistWindow::_ShowPlaylistContextMenu(BPoint screenWhere)
 	if (_PlaylistId().empty())
 		return;
 
+	const auto state = _PlaylistMenuState();
 	BPopUpMenu* menu = new BPopUpMenu("playlist", false, false);
 	BMenuItem* edit = new BMenuItem(B_TRANSLATE("Edit Details" B_UTF8_ELLIPSIS),
 		new BMessage(kMsgEditPlaylist));
-	edit->SetEnabled(fPlaylistOwned);
+	edit->SetEnabled(state.edit);
 	menu->AddItem(edit);
 	BMenuItem* cover = new BMenuItem(B_TRANSLATE("Change Cover" B_UTF8_ELLIPSIS),
 		new BMessage(kMsgChoosePlaylistCover));
-	cover->SetEnabled(fPlaylistOwned);
+	cover->SetEnabled(state.cover);
 	menu->AddItem(cover);
 	menu->AddSeparatorItem();
 	BMenuItem* clear = new BMenuItem(B_TRANSLATE("Clear Playlist"),
 		new BMessage(kMsgClearPlaylist));
-	clear->SetEnabled(fPlaylistOwned && fTrackList->CountRows() > 0
-		&& !fTrackRemovalPending && !fTrackReorderPending
-		&& !fPlaylistClearPending);
+	clear->SetEnabled(state.clear);
 	menu->AddItem(clear);
-	BMenuItem* remove = new BMenuItem(fPlaylistOwned
+	BMenuItem* remove = new BMenuItem(state.owned
 		? B_TRANSLATE("Delete Playlist") : B_TRANSLATE("Unfollow Playlist"),
 		new BMessage(kMsgDeletePlaylist));
+	remove->SetEnabled(state.remove);
 	menu->AddItem(remove);
 
 	BMenuItem* selected = menu->Go(screenWhere, false, true);
@@ -2594,16 +2299,24 @@ PlaylistWindow::_ShowPlaylistContextMenu(BPoint screenWhere)
 void
 PlaylistWindow::_UpdatePlaylistMenuState()
 {
-	if (fPlaylistEditItem) fPlaylistEditItem->SetEnabled(fPlaylistOwned);
-	if (fPlaylistCoverItem) fPlaylistCoverItem->SetEnabled(fPlaylistOwned);
-	if (fPlaylistClearItem)
-		fPlaylistClearItem->SetEnabled(fPlaylistOwned && fTrackList
-			&& fTrackList->CountRows() > 0 && !fTrackRemovalPending
-			&& !fTrackReorderPending && !fPlaylistClearPending);
-	if (fPlaylistDeleteItem)
-		fPlaylistDeleteItem->SetLabel(fPlaylistOwned
+	const auto state = _PlaylistMenuState();
+	if (fPlaylistEditItem) fPlaylistEditItem->SetEnabled(state.edit);
+	if (fPlaylistCoverItem) fPlaylistCoverItem->SetEnabled(state.cover);
+	if (fPlaylistClearItem) fPlaylistClearItem->SetEnabled(state.clear);
+	if (fPlaylistDeleteItem) {
+		fPlaylistDeleteItem->SetLabel(state.owned
 			? B_TRANSLATE("Delete Playlist") : B_TRANSLATE("Unfollow Playlist"));
+		fPlaylistDeleteItem->SetEnabled(state.remove);
+	}
 	_UpdateTrackDropMarkerMode();
+}
+
+PlaylistMenuState
+PlaylistWindow::_PlaylistMenuState() const
+{
+	return ResolvePlaylistMenuState(ResolvePlaylistContentTarget(fUri), fMetadata.IsOwned(),
+		fPaging.Position().total > 0 || (fTrackList && fTrackList->CountRows() > 0),
+		_PlaylistMutationPending(), fCover.Pending(), fPlaylistDeletePending);
 }
 
 
@@ -2612,20 +2325,19 @@ PlaylistWindow::_UpdateTrackDropMarkerMode()
 {
 	if (!fTrackList)
 		return;
-	bool mutationPending = fTrackRemovalPending || fTrackReorderPending
-		|| fPlaylistClearPending;
+	bool mutationPending = _PlaylistMutationPending();
 	fTrackList->SetDropFeedbackFlags(PlaylistCanAcceptDrop(fUri,
-		fPlaylistOwned, mutationPending) ? kDropFeedbackInsertMarker
+		fMetadata.IsOwned(), mutationPending) ? kDropFeedbackInsertMarker
 			: kDropFeedbackNone);
 }
 
 void
 PlaylistWindow::_ShowPlaylistDetailsDialog()
 {
-	if (!fPlaylistOwned || _PlaylistId().empty()) return;
+	if (!_PlaylistMenuState().edit) return;
 	PlaylistDetailsDialog* dialog = new PlaylistDetailsDialog(
-		fPlaylistName ? fPlaylistName->Text() : "", fPlaylistDescription,
-		fPlaylistPublic, BMessenger(this));
+		fPlaylistName ? fPlaylistName->Text() : "", fMetadata.Description(),
+		fMetadata.IsPublic(), BMessenger(this));
 	dialog->MoveTo(Frame().left + 40, Frame().top + 40);
 	dialog->Show();
 }
@@ -2633,7 +2345,7 @@ PlaylistWindow::_ShowPlaylistDetailsDialog()
 void
 PlaylistWindow::_ChoosePlaylistCover()
 {
-	if (!fPlaylistOwned || _PlaylistId().empty()) return;
+	if (!_PlaylistMenuState().cover) return;
 	if (!fPlaylistCoverPanel) {
 		fPlaylistCoverPanel = new BFilePanel(B_OPEN_PANEL,
 			new BMessenger(this), nullptr, B_FILE_NODE, false,
@@ -2645,192 +2357,137 @@ PlaylistWindow::_ChoosePlaylistCover()
 void
 PlaylistWindow::_UploadPlaylistCover(const entry_ref& ref)
 {
-	if (!fPlaylistOwned) return;
-	BFile file(&ref, B_READ_ONLY);
-	if (file.InitCheck() != B_OK) return;
-	off_t size = 0;
-	if (file.GetSize(&size) != B_OK || size < 4 || size > 256 * 1024) {
-		BAlert* alert = new BAlert("", B_TRANSLATE(
-			"Choose a JPEG whose encoded payload stays below 256 KB."),
-			B_TRANSLATE("OK"), nullptr, nullptr, B_WIDTH_AS_USUAL,
-			B_WARNING_ALERT);
-		alert->Go();
-		return;
-	}
-	std::vector<uint8> bytes((size_t)size);
-	if (file.Read(bytes.data(), size) != size || bytes[0] != 0xff
-			|| bytes[1] != 0xd8) {
-		BAlert* alert = new BAlert("", B_TRANSLATE("The selected file is not a JPEG."),
-			B_TRANSLATE("OK"), nullptr, nullptr, B_WIDTH_AS_USUAL,
-			B_WARNING_ALERT);
-		alert->Go();
-		return;
-	}
-	std::string encoded = Base64Encode(bytes);
-	if (encoded.size() > 256 * 1024) {
-		BAlert* alert = new BAlert("", B_TRANSLATE(
-			"The Base64-encoded JPEG exceeds Spotify's 256 KB limit."),
-			B_TRANSLATE("OK"), nullptr, nullptr, B_WIDTH_AS_USUAL,
-			B_WARNING_ALERT);
-		alert->Go();
-		return;
-	}
 	App* app = dynamic_cast<App*>(be_app);
 	SpotifyApi* api = app ? app->GetApi() : nullptr;
-	if (!api) return;
-	BMessenger self(this);
-	api->Playlists().UploadPlaylistImage(_PlaylistId(), encoded,
-		[self](bool ok, const nlohmann::json&) {
-			BMessage result('pCvR');
-			result.AddBool("ok", ok);
-			self.SendMessage(&result);
-		});
+	if (!api || !_PlaylistMenuState().cover)
+		return;
+	PlaylistCoverCommand command;
+	if (!fCover.Begin(_PlaylistId(), fMetadata.IsOwned(), command))
+		return;
+	_UpdatePlaylistMenuState();
+	if (!PlaylistCoverRequests::Send(api->Playlists(), command, ref, BMessenger(this))) {
+		PlaylistCoverResult failure;
+		failure.command = command;
+		BMessage message = MakePlaylistCoverResultMessage(failure);
+		_ApplyPlaylistCoverUploadResult(&message);
+	}
 }
+
 
 void
 PlaylistWindow::_ClearPlaylist()
 {
-	if (!fPlaylistOwned || fTrackRemovalPending || fTrackReorderPending
-			|| fPlaylistClearPending || _PlaylistId().empty()
-			|| !fTrackList || fTrackList->CountRows() == 0) return;
-	BAlert* alert = new BAlert("", B_TRANSLATE(
-		"Remove every item from this playlist?"), B_TRANSLATE("Cancel"),
-		B_TRANSLATE("Clear Playlist"), nullptr, B_WIDTH_AS_USUAL,
-		B_WARNING_ALERT);
-	if (alert->Go() != 1) return;
+	if (!_PlaylistMenuState().clear || !fTrackList)
+		return;
+	BAlert* alert = new BAlert("", B_TRANSLATE("Remove every item from this playlist?"),
+		B_TRANSLATE("Cancel"), B_TRANSLATE("Clear Playlist"), nullptr,
+		B_WIDTH_AS_USUAL, B_WARNING_ALERT);
+	if (alert->Go() != 1)
+		return;
 	App* app = dynamic_cast<App*>(be_app);
-	SpotifyApi* api = app ? app->GetApi() : nullptr;
-	if (!api) return;
-
-	fPendingPlaylistClear = PendingPlaylistClear();
-	fPendingPlaylistClear.pageOffset = fPageOffset;
-	fPendingPlaylistClear.pageTotal = fPageTotal;
-	fPendingPlaylistClear.pageHasMore = fPageHasMore;
-	fPendingPlaylistClear.snapshotId = fPlaylistSnapshotId;
+	if (!app || !app->GetApi())
+		return;
+	PlaylistWriteCommand command;
+	if (!fClear.Begin(_PlaylistWriteContext(), command))
+		return;
 	for (int32 index = 0; index < fTrackList->CountRows(); index++) {
 		BRow* row = fTrackList->RowAt(index);
-		bool selected = false;
-		for (BRow* current = fTrackList->CurrentSelection(); current;
-				current = fTrackList->CurrentSelection(current)) {
-			if (current == row) {
-				selected = true;
-				break;
-			}
-		}
 		fPendingPlaylistClear.rows.push_back(row);
-		fPendingPlaylistClear.selected.push_back(selected);
+		fPendingPlaylistClear.selected.push_back(_IsRowSelected(row));
 	}
 	for (auto row = fPendingPlaylistClear.rows.rbegin();
 			row != fPendingPlaylistClear.rows.rend(); ++row)
 		fTrackList->RemoveRow(*row);
-	fPlaylistClearPending = true;
-	fPageOffset = 0;
-	fPageTotal = 0;
-	fPageHasMore = false;
+	fPaging.RestorePosition(command.optimisticPage);
+	_DeleteCache();
 	_UpdatePlaylistTrackInfo();
 	_UpdatePlaylistMenuState();
-	BMessenger self(this);
-	api->Playlists().ReplacePlaylistItems(_PlaylistId(), {},
-		[self](bool ok, const nlohmann::json& data) {
-			BMessage result('pClR');
-			result.AddBool("ok", ok);
-			nlohmann::json body = MutationBody(data);
-			result.AddString("snapshot_id",
-				JsonString(body, "snapshot_id").c_str());
-			self.SendMessage(&result);
-		});
+	_SendPlaylistWrite(command);
 }
 
 void
-PlaylistWindow::_FinishClearPlaylist(bool success,
-	const std::string& snapshotId)
+PlaylistWindow::_FinishClearPlaylist(bool success)
 {
-	if (!fPlaylistClearPending)
-		return;
-	if (success) {
-		for (BRow* row : fPendingPlaylistClear.rows)
+	for (size_t index = 0; index < fPendingPlaylistClear.rows.size(); index++) {
+		BRow* row = fPendingPlaylistClear.rows[index];
+		if (success)
 			delete row;
-		fPlaylistSnapshotId = snapshotId;
-		fCachedPlaylistSnapshotId = snapshotId;
-		_DeleteCache();
-		if (!snapshotId.empty())
-			_SaveCache();
-		else
-			_RefreshPlaylistSnapshot();
-	} else {
-		fPageOffset = fPendingPlaylistClear.pageOffset;
-		fPageTotal = fPendingPlaylistClear.pageTotal;
-		fPageHasMore = fPendingPlaylistClear.pageHasMore;
-		fPlaylistSnapshotId = fPendingPlaylistClear.snapshotId;
-		for (int32 index = 0;
-				index < (int32)fPendingPlaylistClear.rows.size(); index++) {
-			BRow* row = fPendingPlaylistClear.rows[index];
+		else {
 			fTrackList->AddRow(row);
 			if (fPendingPlaylistClear.selected[index])
 				fTrackList->AddToSelection(row);
 		}
 	}
-	fPendingPlaylistClear = PendingPlaylistClear();
-	fPlaylistClearPending = false;
-	_UpdatePlaylistTrackInfo();
-	_UpdatePlaylistMenuState();
+	fPendingPlaylistClear = {};
+}
+
+bool
+PlaylistWindow::_PlaylistMutationPending() const
+{
+	return fRemoval.Pending() || fReorder.Pending() || fClear.Pending() || fAdd.Pending()
+		|| fPlaylistDeletePending;
+}
+
+PlaylistWriteContext
+PlaylistWindow::_PlaylistWriteContext() const
+{
+	PlaylistWriteContext context;
+	context.playlistId = _PlaylistId();
+	context.snapshotId = fPlaylistSnapshotId;
+	context.page = fPaging.Position();
+	context.rowCount = fTrackList ? fTrackList->CountRows() : 0;
+	context.owned = fMetadata.IsOwned();
+	context.otherMutationPending = _PlaylistMutationPending();
+	return context;
 }
 
 void
-PlaylistWindow::_FinishTrackRemoval(bool success)
+PlaylistWindow::_SendPlaylistWrite(const PlaylistWriteCommand& command)
 {
-	if (!fTrackRemovalPending)
+	App* app = dynamic_cast<App*>(be_app);
+	SpotifyApi* api = app ? app->GetApi() : nullptr;
+	if (api && PlaylistWriteRequests::Send(api->Playlists(), command, BMessenger(this)))
 		return;
+	PlaylistWriteResult failure;
+	failure.kind = command.kind;
+	failure.requestId = command.requestId;
+	failure.playlistId = command.playlistId;
+	BMessage message = MakePlaylistWriteMessage(failure);
+	_ApplyPlaylistWriteResult(&message);
+}
 
-	if (success)
-		_ApplyFinishedTrackRemoval();
+
+void
+PlaylistWindow::_FinishTrackRemoval(const PlaylistRemovalUpdate& update)
+{
+	if (update.action == PlaylistRemovalAction::Commit)
+		_ApplyFinishedTrackRemoval(update);
 	else
 		_RollbackFinishedTrackRemoval();
 
 	fPendingTrackRemovals.clear();
-	fTrackRemovalPending = false;
 	_UpdatePlaylistTrackInfo();
 	_UpdatePlaylistMenuState();
-	if (success)
+	if (update.action == PlaylistRemovalAction::Commit)
 		_CheckLazyLoad();
 }
 
 
 void
-PlaylistWindow::_ApplyFinishedTrackRemoval()
+PlaylistWindow::_ApplyFinishedTrackRemoval(const PlaylistRemovalUpdate& update)
 {
-	std::vector<int32> removedPositions = _RemovedPlaylistPositions();
-
 	for (const PendingTrackRemoval& pending : fPendingTrackRemovals)
 		delete pending.row;
-
 	for (int32 i = 0; fTrackList && i < fTrackList->CountRows(); i++) {
 		TrackRow* row = dynamic_cast<TrackRow*>(fTrackList->RowAt(i));
 		if (!row || row->fPlaylistPosition < 0)
 			continue;
-		int32 shift = (int32)std::count_if(removedPositions.begin(),
-			removedPositions.end(), [row](int32 removedPosition) {
-				return removedPosition < row->fPlaylistPosition;
-			});
-		row->fPlaylistPosition -= shift;
-		if (BIntegerField* number = dynamic_cast<BIntegerField*>(
-				row->GetField(0)))
+		row->fPlaylistPosition = update.PositionAfterRemoval(row->fPlaylistPosition);
+		if (BIntegerField* number = dynamic_cast<BIntegerField*>(row->GetField(0)))
 			number->SetValue(row->fPlaylistPosition + 1);
 		fTrackList->UpdateRow(row);
 	}
-
-	int32 removedBeforeOffset = (int32)std::count_if(
-		removedPositions.begin(), removedPositions.end(),
-		[this](int32 removedPosition) {
-			return removedPosition < fPageOffset;
-		});
-	fPageOffset = std::max((int32)0, fPageOffset - removedBeforeOffset);
-	if (fPageTotal > 0)
-		fPageTotal = std::max((int32)0,
-			fPageTotal - (int32)removedPositions.size());
-	else if (fTrackList)
-		fPageTotal = fTrackList->CountRows();
-	fPageHasMore = fPageOffset < fPageTotal;
+	fPaging.RestorePosition(update.page);
 	fPlaylistSnapshotId.clear();
 	fCachedPlaylistSnapshotId.clear();
 	_DeleteCache();
@@ -2852,75 +2509,37 @@ PlaylistWindow::_RollbackFinishedTrackRemoval()
 }
 
 
-std::vector<int32>
-PlaylistWindow::_RemovedPlaylistPositions() const
-{
-	std::vector<int32> removedPositions;
-	for (const PendingTrackRemoval& pending : fPendingTrackRemovals)
-		removedPositions.push_back(pending.playlistPosition);
-	std::sort(removedPositions.begin(), removedPositions.end());
-	return removedPositions;
-}
-
-
 void
 PlaylistWindow::_RefreshPlaylistSnapshot()
 {
-	std::string playlistId = _PlaylistId();
 	App* app = dynamic_cast<App*>(be_app);
 	SpotifyApi* api = app ? app->GetApi() : nullptr;
-	if (playlistId.empty() || !api)
-		return;
-
-	api->Playlists().InvalidatePlaylist(playlistId);
-	BMessenger self(this);
-	api->Playlists().GetPlaylist(playlistId, [self](bool ok,
-			const nlohmann::json& data) {
-		BMessage metadata('pRmM');
-		metadata.AddBool("ok", ok);
-		if (ok) {
-			metadata.AddString("snapshot_id",
-				JsonString(data, "snapshot_id").c_str());
-			if (data.contains("tracks") && data["tracks"].is_object())
-				metadata.AddInt32("total", JsonInt(data["tracks"], "total", -1));
-			else if (data.contains("items") && data["items"].is_object())
-				metadata.AddInt32("total", JsonInt(data["items"], "total", -1));
-		}
-		self.SendMessage(&metadata);
-	});
+	if (api)
+		PlaylistMetadataRequests::RefreshSnapshot(*api, _PlaylistId(), BMessenger(this));
 }
 
 
 void
 PlaylistWindow::_UpdatePlaylistTrackInfo()
 {
-	if (!fPlaylistInfo || !fTrackList)
-		return;
-	char info[64];
-	if (fPageTotal > fTrackList->CountRows()) {
-		snprintf(info, sizeof(info), "Playlist \xC2\xB7 %ld/%ld Songs",
-			(long)fTrackList->CountRows(), (long)fPageTotal);
-	} else {
-		snprintf(info, sizeof(info), "Playlist \xC2\xB7 %ld Songs",
-			(long)fTrackList->CountRows());
-	}
-	fPlaylistInfo->SetText(info);
+	if (fPlaylistInfo && fTrackList)
+		SetCachedTrackInfo(fPlaylistInfo, true, fPaging.Position().total, fTrackList->CountRows());
 }
 
 
 void
-PlaylistWindow::_RenumberPlaylistRows()
+PlaylistWindow::_ApplyPlaylistPositions(const std::vector<int32_t>& positions)
 {
-	if (!fTrackList)
+	if (!fTrackList || positions.size() != static_cast<size_t>(fTrackList->CountRows()))
 		return;
 	for (int32 i = 0; i < fTrackList->CountRows(); i++) {
 		TrackRow* row = dynamic_cast<TrackRow*>(fTrackList->RowAt(i));
 		if (!row)
 			continue;
-		row->fPlaylistPosition = i;
+		row->fPlaylistPosition = positions[i];
 		if (BIntegerField* number = dynamic_cast<BIntegerField*>(
 				row->GetField(0))) {
-			number->SetValue(i + 1);
+			number->SetValue(positions[i] + 1);
 		}
 		fTrackList->UpdateRow(row);
 	}
@@ -2928,67 +2547,72 @@ PlaylistWindow::_RenumberPlaylistRows()
 
 
 void
-PlaylistWindow::_BeginTrackReorder(int32 sourceIndex, int32 rangeLength,
+PlaylistWindow::_BeginTrackReorder(const std::vector<int32_t>& indices,
 	int32 insertBefore)
 {
-	std::string playlistId = _PlaylistId();
-	if (!_CanBeginTrackReorder(playlistId, sourceIndex, rangeLength))
-		return;
-
-	PlaylistReorderPlan plan = ResolvePlaylistReorderPlan(sourceIndex,
-		rangeLength, insertBefore, fTrackList->CountRows());
-	if (!plan.shouldMove)
-		return;
-	insertBefore = plan.insertBefore;
-	int32 targetIndex = plan.targetIndex;
-
 	App* app = dynamic_cast<App*>(be_app);
 	SpotifyApi* api = app ? app->GetApi() : nullptr;
-	if (!api)
+	if (!api || !fTrackList)
+		return;
+	PlaylistReorderContext context;
+	context.playlistId = _PlaylistId();
+	context.snapshotId = fPlaylistSnapshotId;
+	context.rowCount = fTrackList->CountRows();
+	context.owned = fMetadata.IsOwned();
+	context.pageLoading = fPaging.Loading();
+	context.otherMutationPending = _PlaylistMutationPending();
+	context.loadedEnd = fPaging.Position().offset;
+	context.total = fPaging.Position().total;
+	for (int32 i = 0; i < fTrackList->CountRows(); i++) {
+		auto row = dynamic_cast<TrackRow*>(fTrackList->RowAt(i));
+		if (!row)
+			return;
+		context.visiblePositions.push_back(row->fPlaylistPosition);
+	}
+	PlaylistReorderCommand command;
+	if (!fReorder.Begin(context, indices, insertBefore, command))
 		return;
 
-	if (!_BuildPendingTrackReorder(sourceIndex, rangeLength, targetIndex))
+	if (_BuildPendingTrackReorder(command.selectedIndices)) {
+		fPaging.RestorePosition(fPaging.Position());
+		_DeleteCache();
+		std::vector<int32_t> targets;
+		for (size_t i = 0; i < command.selectedIndices.size(); i++)
+			targets.push_back(command.selectionTarget + static_cast<int32_t>(i));
+		_ApplyPendingTrackReorder(targets);
+		_ApplyPlaylistPositions(command.visiblePositions);
+		_UpdatePlaylistMenuState();
+		_SendTrackReorder(command);
 		return;
-	_ApplyPendingTrackReorder();
-	fTrackReorderPending = true;
-	_UpdatePlaylistMenuState();
-
-	BMessenger self(this);
-	api->Playlists().ReorderPlaylistItems(playlistId, sourceIndex, insertBefore,
-		rangeLength, fPlaylistSnapshotId,
-		[self](bool ok, const nlohmann::json& data) {
-			BMessage result('pMvR');
-			result.AddBool("ok", ok);
-			result.AddInt32("status", SpotifyResponseStatus(data));
-			nlohmann::json body = MutationBody(data);
-			result.AddString("snapshot_id",
-				JsonString(body, "snapshot_id").c_str());
-			self.SendMessage(&result);
-		});
+	}
+	PlaylistReorderResult failure;
+	failure.requestId = command.requestId;
+	failure.playlistId = command.playlistId;
+	BMessage result = MakePlaylistReorderMessage(failure);
+	_ApplyTrackReorderResult(&result);
 }
 
-
-bool
-PlaylistWindow::_CanBeginTrackReorder(const std::string& playlistId,
-	int32 sourceIndex, int32 rangeLength) const
+void
+PlaylistWindow::_SendTrackReorder(const PlaylistReorderCommand& command)
 {
-	return fPlaylistOwned && fTrackList && !fPageLoading
-		&& !fTrackRemovalPending && !fTrackReorderPending
-		&& !fPlaylistClearPending && !playlistId.empty()
-		&& sourceIndex >= 0 && rangeLength >= 1
-		&& sourceIndex + rangeLength <= fTrackList->CountRows();
+	App* app = dynamic_cast<App*>(be_app);
+	SpotifyApi* api = app ? app->GetApi() : nullptr;
+	if (api && PlaylistReorderRequests::Send(api->Playlists(), command, BMessenger(this)))
+		return;
+	PlaylistReorderResult failure;
+	failure.requestId = command.requestId;
+	failure.playlistId = command.playlistId;
+	BMessage message = MakePlaylistReorderMessage(failure);
+	_ApplyTrackReorderResult(&message);
 }
 
 
 bool
-PlaylistWindow::_BuildPendingTrackReorder(int32 sourceIndex,
-	int32 rangeLength, int32 targetIndex)
+PlaylistWindow::_BuildPendingTrackReorder(const std::vector<int32_t>& indices)
 {
 	fPendingTrackReorder = PendingTrackReorder();
-	fPendingTrackReorder.sourceIndex = sourceIndex;
-	fPendingTrackReorder.targetIndex = targetIndex;
-	for (int32 offset = 0; offset < rangeLength; offset++) {
-		BRow* row = fTrackList->RowAt(sourceIndex + offset);
+	for (int32_t index : indices) {
+		BRow* row = fTrackList->RowAt(index);
 		if (!row) {
 			fPendingTrackReorder = PendingTrackReorder();
 			return false;
@@ -3013,52 +2637,51 @@ PlaylistWindow::_IsRowSelected(BRow* row) const
 
 
 void
-PlaylistWindow::_ApplyPendingTrackReorder()
+PlaylistWindow::_ApplyPendingTrackReorder(const std::vector<int32_t>& indices)
 {
+	if (fPendingTrackReorder.rows.empty())
+		return;
 	for (auto row = fPendingTrackReorder.rows.rbegin();
 			row != fPendingTrackReorder.rows.rend(); ++row) {
 		fTrackList->RemoveRow(*row);
 	}
 	for (int32 i = 0; i < (int32)fPendingTrackReorder.rows.size(); i++) {
 		fTrackList->AddRow(fPendingTrackReorder.rows[i],
-			fPendingTrackReorder.targetIndex + i);
+			indices[i]);
 		if (fPendingTrackReorder.selected[i])
 			fTrackList->AddToSelection(fPendingTrackReorder.rows[i]);
 	}
-	_RenumberPlaylistRows();
 }
 
 
 void
-PlaylistWindow::_FinishTrackReorder(bool success,
-	const std::string& snapshotId)
+PlaylistWindow::_FinishTrackReorder(const PlaylistReorderUpdate& update)
 {
-	if (!fTrackReorderPending || !fTrackList)
-		return;
-	if (!success) {
-		for (auto row = fPendingTrackReorder.rows.rbegin();
-				row != fPendingTrackReorder.rows.rend(); ++row) {
-			fTrackList->RemoveRow(*row);
-		}
-		for (int32 i = 0; i < (int32)fPendingTrackReorder.rows.size(); i++) {
-			fTrackList->AddRow(fPendingTrackReorder.rows[i],
-				fPendingTrackReorder.sourceIndex + i);
-			if (fPendingTrackReorder.selected[i])
-				fTrackList->AddToSelection(fPendingTrackReorder.rows[i]);
-		}
-	}
-	_RenumberPlaylistRows();
-	if (success) {
-		fPlaylistSnapshotId = snapshotId;
-		fCachedPlaylistSnapshotId = snapshotId;
+	if (update.action == PlaylistReorderAction::Commit) {
+		_ApplyPlaylistPositions(update.visiblePositions);
+		fPlaylistSnapshotId = update.snapshotId;
+		fCachedPlaylistSnapshotId = update.snapshotId;
 		_DeleteCache();
-		if (!snapshotId.empty())
+		if (!update.snapshotId.empty())
 			_SaveCache();
+	} else {
+		_ApplyPendingTrackReorder(update.restoreIndices);
+		_ApplyPlaylistPositions(update.visiblePositions);
+		if (update.action == PlaylistReorderAction::Rollback)
+			_SaveCache();
+		else {
+			fPlaylistSnapshotId.clear();
+			fCachedPlaylistSnapshotId.clear();
+			_DeleteCache();
+		}
 	}
 	fPendingTrackReorder = PendingTrackReorder();
-	fTrackReorderPending = false;
 	_UpdatePlaylistMenuState();
-	if (success)
+	if (fCloseAfterReorder) {
+		PostMessage(B_QUIT_REQUESTED);
+		return;
+	}
+	if (update.action == PlaylistReorderAction::Commit)
 		_CheckLazyLoad();
 }
 
@@ -3068,28 +2691,26 @@ PlaylistWindow::_MoveSelectedItem(int32 delta)
 {
 	if (!_CanMoveSelectedItems(delta))
 		return;
-	int32 source = fTrackList->CountRows();
+	int32 first = fTrackList->CountRows();
 	int32 last = -1;
-	int32 selectedCount = 0;
-	if (!_SelectedRowSpan(source, last, selectedCount))
+	int32 count = 0;
+	if (!_SelectedRowSpan(first, last, count))
 		return;
-	if (last - source + 1 != selectedCount) {
+	auto step = ResolvePlaylistReorderStep(first, last, count,
+		fTrackList->CountRows(), delta);
+	if (step.noncontiguous) {
 		_ShowContiguousSelectionAlert();
 		return;
 	}
-	if ((delta < 0 && source == 0)
-			|| (delta > 0 && last + 1 >= fTrackList->CountRows()))
-		return;
-	int32 insertBefore = delta > 0 ? last + 2 : source - 1;
-	_BeginTrackReorder(source, selectedCount, insertBefore);
+	if (step.shouldMove)
+		_BeginTrackReorder(fTrackList->SelectedRowIndices(), step.insertBefore);
 }
 
 
 bool
 PlaylistWindow::_CanMoveSelectedItems(int32 delta) const
 {
-	return fPlaylistOwned && fTrackList && !fTrackRemovalPending
-		&& !fTrackReorderPending && !fPlaylistClearPending && delta != 0;
+	return fMetadata.IsOwned() && fTrackList && !_PlaylistMutationPending() && delta != 0;
 }
 
 
@@ -3125,17 +2746,17 @@ PlaylistWindow::_ShowContiguousSelectionAlert() const
 void
 PlaylistWindow::_DeletePlaylist()
 {
-	if (fPlaylistDeletePending)
+	if (!_PlaylistMenuState().remove)
 		return;
 
 	std::string playlistId = _PlaylistId();
 	if (playlistId.empty())
 		return;
 
-	const char* body = fPlaylistOwned
+	const char* body = fMetadata.IsOwned()
 		? B_TRANSLATE("Really delete this playlist? This cannot be undone.")
 		: B_TRANSLATE("Unfollow this playlist?");
-	const char* action = fPlaylistOwned
+	const char* action = fMetadata.IsOwned()
 		? B_TRANSLATE("Delete Playlist") : B_TRANSLATE("Unfollow Playlist");
 	BAlert* alert = new BAlert("", body,
 		B_TRANSLATE("Cancel"), action, nullptr,
@@ -3149,8 +2770,7 @@ PlaylistWindow::_DeletePlaylist()
 		return;
 
 	fPlaylistDeletePending = true;
-	if (fPlaylistDeleteItem)
-		fPlaylistDeleteItem->SetEnabled(false);
+	_UpdatePlaylistMenuState();
 
 	BMessenger self(this);
 	api->Playlists().UnfollowPlaylist(playlistId, [self](bool ok,
@@ -3250,6 +2870,8 @@ PlaylistWindow::_AddPodcastNowPlayingContext(BMessage& play) const
 void
 PlaylistWindow::_LoadData(bool ignoreEpisodeCache)
 {
+	if (_PlaylistMutationPending())
+		return;
 	App* app = (App*)be_app;
 	SpotifyApi* api = app->GetApi();
 	if (!api || fUri.empty()) return;
@@ -3278,23 +2900,13 @@ PlaylistWindow::_LoadData(bool ignoreEpisodeCache)
 void
 PlaylistWindow::_ResetLoadState()
 {
-	fPageLoading = false;
-	fPageHasMore = true;
-	fPageOffset = 0;
-	fPageTotal = 0;
+	fPaging.Reset(fSearchBox ? fSearchBox->Text() : "");
 	fPlaylistSnapshotId.clear();
 	fCachedPlaylistSnapshotId.clear();
-	fPodcastHeadRefreshing = false;
-	fEpisodeOffset = 0;
-	fEpisodeTotal = 0;
-	fEpisodeSearchFilter = fSearchBox ? fSearchBox->Text() : "";
-	fEpisodeSearchGeneration++;
-	fEpisodeSearchRetryCount = 0;
-	fEpisodeSearchPaging = !fEpisodeSearchFilter.empty();
-	fEpisodeSearchWaitingRetry = false;
-	fEpisodeSearchFailed = false;
 	delete fEpisodeSearchRetryRunner;
 	fEpisodeSearchRetryRunner = nullptr;
+	delete fEpisodeSearchRunner;
+	fEpisodeSearchRunner = nullptr;
 	fEpisodes.clear();
 	fPendingPodcastHeadEpisodes.clear();
 	if (fTrackList)
@@ -3321,16 +2933,10 @@ PlaylistWindow::_PreparePlaylistLoad(SpotifyApi& api,
 	BMessenger messenger(this);
 
 	api.Playlists().InvalidatePlaylist(playlistId);
-	api.Playlists().GetPlaylist(playlistId, [messenger](bool ok,
-			const nlohmann::json& data) {
-		if (!ok) return;
-		SendPlaylistMetadataMessage(messenger, data);
-	});
-	api.Profile().GetCurrentUserProfile([messenger](bool ok,
-		const nlohmann::json& profile) {
-		if (!ok || !profile.is_object()) return;
-		SendPlaylistUserMessage(messenger, profile);
-	});
+	PlaylistMetadataRequests::Load(api,
+		{PlaylistMetadataKind::Playlist, playlistId}, messenger);
+	PlaylistMetadataRequests::Load(api,
+		{PlaylistMetadataKind::CurrentUser, ""}, messenger);
 
 	return loadFirstPage;
 }
@@ -3340,13 +2946,8 @@ bool
 PlaylistWindow::_PrepareAlbumLoad(SpotifyApi& api, const std::string& albumId)
 {
 	BMessenger messenger(this);
-	api.Content().GetAlbum(albumId, [messenger](bool ok,
-			const nlohmann::json& albumData) {
-		if (ok) {
-			SendTitleMessage(messenger, albumData, "Album");
-			SendCoverMessage(messenger, albumData);
-		}
-	});
+	PlaylistMetadataRequests::Load(api,
+		{PlaylistMetadataKind::Album, albumId}, messenger);
 	return true;
 }
 
@@ -3365,17 +2966,13 @@ PlaylistWindow::_PrepareShowLoad(SpotifyApi& api, const std::string& showId,
 		SendShowSubscriptionMessage(messenger, ok, data);
 	});
 
-	api.Content().GetShow(showId, [messenger](bool ok,
-			const nlohmann::json& data) {
-		if (!ok) return;
-		SendTitleMessage(messenger, data, "Podcast");
-		SendCoverMessage(messenger, data);
-	});
+	PlaylistMetadataRequests::Load(api,
+		{PlaylistMetadataKind::Podcast, showId}, messenger);
 
 	if (ignoreEpisodeCache || !_LoadCache())
 		return true;
 
-	_RebuildEpisodeList(fEpisodeSearchFilter);
+	_RebuildEpisodeList(fPaging.Filter());
 	_UpdateEpisodeInfo();
 	if (!fCurrentPlayingTrackUri.empty())
 		SetPlayingTrack(fCurrentPlayingTrackUri.c_str());
@@ -3387,188 +2984,26 @@ PlaylistWindow::_PrepareShowLoad(SpotifyApi& api, const std::string& showId,
 void
 PlaylistWindow::_LoadNextPage()
 {
-	if (fPageLoading || !fPageHasMore)
+	if (_PlaylistMutationPending())
 		return;
-
 	App* app = (App*)be_app;
 	SpotifyApi* api = app->GetApi();
 	if (!api || fUri.empty())
 		return;
-
-	fPageLoading = true;
-	BMessenger messenger(this);
-	int32 offset = fPageOffset;
-	int32 limit = fPageBatchSize;
-	PlaylistContentTarget target = ResolvePlaylistContentTarget(fUri);
-	int32 episodeSearchGeneration = target.kind == kSpotifyItemShow
-		&& fEpisodeSearchPaging ? fEpisodeSearchGeneration : -1;
-
-	if (_LoadTargetPage(*api, messenger, target, offset, limit,
-			episodeSearchGeneration)) {
+	PlaylistPageRequest request = MakePlaylistPageRequest(
+		ResolvePlaylistContentTarget(fUri), fPaging.Position().offset, fPageBatchSize);
+	request.albumName = fPlaylistName ? fPlaylistName->Text() : "Album";
+	if (!fPaging.BeginPage(request))
 		return;
-	}
-
-	fPageLoading = false;
-	fPageHasMore = false;
-}
-
-
-bool
-PlaylistWindow::_LoadTargetPage(SpotifyApi& api, const BMessenger& messenger,
-	const PlaylistContentTarget& target, int32 offset, int32 limit,
-	int32 searchGeneration)
-{
-	if (target.isCollection) {
-		_LoadCollectionPage(api, messenger, offset, limit, searchGeneration);
-		return true;
-	}
-
-	if (target.kind == kSpotifyItemPlaylist) {
-		_LoadPlaylistPage(api, messenger, target.id, offset, limit,
-			searchGeneration);
-		return true;
-	}
-
-	if (target.kind == kSpotifyItemAlbum) {
-		_LoadAlbumPage(api, messenger, target.id, offset, limit,
-			searchGeneration);
-		return true;
-	}
-
-	if (target.kind == kSpotifyItemShow) {
-		_LoadShowPage(api, messenger, target.id, offset, limit,
-			searchGeneration);
-		return true;
-	}
-
-	return false;
-}
-
-
-void
-PlaylistWindow::_LoadCollectionPage(SpotifyApi& api,
-	const BMessenger& messenger, int32 offset, int32 limit,
-	int32 searchGeneration)
-{
-	api.Library().GetSavedTracks(offset, limit,
-		[messenger, offset, searchGeneration](bool ok,
-				const nlohmann::json& data) {
-		if (!ok || !data.contains("items")) {
-			SendPageLoadFailure(messenger, searchGeneration, data);
-			return;
-		}
-		BMessage* msg = CreateTrackPageMessage(offset, data);
-		int32 itemIndex = 0;
-		for (const auto& item : data["items"]) {
-			int32 number = offset + itemIndex + 1;
-			itemIndex++;
-			if (!item.contains("track") || !item["track"].is_object())
-				continue;
-			AddTrackToMessage(msg, item["track"], number, "", "");
-		}
-		messenger.SendMessage(msg);
-		delete msg;
-	});
-}
-
-
-void
-PlaylistWindow::_LoadPlaylistPage(SpotifyApi& api,
-	const BMessenger& messenger, const std::string& playlistId, int32 offset,
-	int32 limit, int32 searchGeneration)
-{
-	api.Playlists().GetPlaylistTracks(playlistId, offset, limit,
-		[messenger, offset, searchGeneration](bool ok,
-				const nlohmann::json& data) {
-		if (!ok || !data.contains("items")) {
-			SendPageLoadFailure(messenger, searchGeneration, data);
-			return;
-		}
-		BMessage* msg = CreateTrackPageMessage(offset, data);
-		int32 itemIndex = 0;
-		for (const auto& item : data["items"]) {
-			int32 number = offset + itemIndex + 1;
-			itemIndex++;
-			if (item.contains("item") && item["item"].is_object())
-				AddTrackToMessage(msg, item["item"], number, "", "");
-			else if (item.contains("track") && item["track"].is_object())
-				AddTrackToMessage(msg, item["track"], number, "", "");
-		}
-		messenger.SendMessage(msg);
-		delete msg;
-	});
-}
-
-
-void
-PlaylistWindow::_LoadAlbumPage(SpotifyApi& api,
-	const BMessenger& messenger, const std::string& albumId, int32 offset,
-	int32 limit, int32 searchGeneration)
-{
-	std::string albumName = fPlaylistName ? fPlaylistName->Text() : "Album";
-	api.Content().GetAlbumTracks(albumId, offset, limit,
-		[messenger, offset, albumId, albumName, searchGeneration](
-				bool ok, const nlohmann::json& data) {
-		if (!ok || !data.contains("items")) {
-			SendPageLoadFailure(messenger, searchGeneration, data);
-			return;
-		}
-		BMessage* msg = CreateTrackPageMessage(offset, data);
-		int32 itemIndex = 0;
-		for (const auto& track : data["items"]) {
-			int32 number = offset + itemIndex + 1;
-			itemIndex++;
-			if (track.is_object()) {
-				AddTrackToMessage(msg, track, number, albumName,
-					SpotifyUriForItemKind(kSpotifyItemAlbum, albumId));
-			}
-		}
-		messenger.SendMessage(msg);
-		delete msg;
-	});
-}
-
-
-void
-PlaylistWindow::_LoadShowPage(SpotifyApi& api,
-	const BMessenger& messenger, const std::string& showId, int32 offset,
-	int32 limit, int32 searchGeneration)
-{
-	api.Content().GetShowEpisodes(showId, offset, limit,
-		[messenger, offset, searchGeneration](bool ok,
-				const nlohmann::json& data) {
-		if (!ok || !data.contains("items")) {
-			SendPageLoadFailure(messenger, searchGeneration, data);
-			return;
-		}
-		BMessage* msg = CreateEpisodePageMessage(offset, data);
-		int32 itemIndex = 0;
-		for (const auto& ep : data["items"]) {
-			int32 number = offset + itemIndex + 1;
-			itemIndex++;
-			if (ep.is_object())
-				AddEpisodeToMessage(msg, ep, number);
-			else
-				AddUnavailableEpisodeToMessage(msg, number);
-		}
-		messenger.SendMessage(msg);
-		delete msg;
-	});
+	if (!PlaylistPageRequests::Load(*api, request, BMessenger(this)))
+		fPaging.DispatchFailed(request);
 }
 
 
 void
 PlaylistWindow::_CheckLazyLoad()
 {
-	if (!_CanLazyLoadPage())
-		return;
-	if (!fEpisodeSearchFilter.empty()) {
-		if (fEpisodeSearchPaging && !fEpisodeSearchWaitingRetry)
-			_LoadNextPage();
-		return;
-	}
-
-	if (_ShouldLoadNextPageForScroll())
+	if (_CanLazyLoadPage() && fPaging.ShouldLoad(_ShouldLoadNextPageForScroll()))
 		_LoadNextPage();
 }
 
@@ -3576,9 +3011,7 @@ PlaylistWindow::_CheckLazyLoad()
 bool
 PlaylistWindow::_CanLazyLoadPage() const
 {
-	return fTrackList && !fPageLoading && !fPodcastHeadRefreshing
-		&& !fTrackRemovalPending && !fTrackReorderPending
-		&& !fPlaylistClearPending && fPageHasMore;
+	return fTrackList && fPaging.CanLoad() && !_PlaylistMutationPending();
 }
 
 
@@ -3635,10 +3068,10 @@ PlaylistWindow::_UpdateEpisodeInfo()
 		return;
 
 	char info[64];
-	if (fEpisodeTotal > (int32)fEpisodes.size())
+	if (fPaging.Position().total > (int32)fEpisodes.size())
 		snprintf(info, sizeof(info),
 			B_TRANSLATE("Podcast \xC2\xB7 %d/%d Episodes"),
-			(int)fEpisodes.size(), (int)fEpisodeTotal);
+			(int)fEpisodes.size(), (int)fPaging.Position().total);
 	else
 		snprintf(info, sizeof(info),
 			B_TRANSLATE("Podcast \xC2\xB7 %d Episodes"),
@@ -3647,32 +3080,32 @@ PlaylistWindow::_UpdateEpisodeInfo()
 
 	if (!fPodcastSearchInfo)
 		return;
-	if (fEpisodeSearchFilter.empty()) {
+	if (fPaging.Filter().empty()) {
 		fPodcastSearchInfo->SetText("");
 		return;
 	}
 
 	char searchInfo[96];
 	int32 matches = fTrackList ? fTrackList->CountRows() : 0;
-	if (fEpisodeSearchWaitingRetry) {
+	if (fPaging.WaitingRetry()) {
 		snprintf(searchInfo, sizeof(searchInfo), B_TRANSLATE(
 			"%d matches - retrying search..."), (int)matches);
-	} else if (fEpisodeSearchPaging && fEpisodeTotal > 0) {
+	} else if (fPaging.Searching() && fPaging.Position().total > 0) {
 		snprintf(searchInfo, sizeof(searchInfo), B_TRANSLATE(
 			"%d matches - searching: %d/%d"), (int)matches,
-			(int)fEpisodeOffset, (int)fEpisodeTotal);
-	} else if (fEpisodeSearchPaging) {
+			(int)fPaging.Position().offset, (int)fPaging.Position().total);
+	} else if (fPaging.Searching()) {
 		snprintf(searchInfo, sizeof(searchInfo), B_TRANSLATE(
 			"%d matches - searching: %d"), (int)matches,
-			(int)fEpisodeOffset);
-	} else if (fEpisodeSearchFailed && fEpisodeTotal > 0) {
+			(int)fPaging.Position().offset);
+	} else if (fPaging.SearchFailed() && fPaging.Position().total > 0) {
 		snprintf(searchInfo, sizeof(searchInfo), B_TRANSLATE(
 			"%d matches - stopped: %d/%d"), (int)matches,
-			(int)fEpisodeOffset, (int)fEpisodeTotal);
+			(int)fPaging.Position().offset, (int)fPaging.Position().total);
 	} else {
 		snprintf(searchInfo, sizeof(searchInfo), B_TRANSLATE(
 			"%d matches - searched: %d"), (int)matches,
-			(int)fEpisodeOffset);
+			(int)fPaging.Position().offset);
 	}
 	fPodcastSearchInfo->SetText(searchInfo);
 }
@@ -3689,70 +3122,41 @@ PlaylistWindow::_RefreshPodcastHead(int32 offset)
 {
 	if (SpotifyItemKindForUri(fUri) != kSpotifyItemShow || fEpisodes.empty())
 		return;
-
 	App* app = (App*)be_app;
 	SpotifyApi* api = app->GetApi();
 	if (!api)
 		return;
-
+	PlaylistPageRequest request = MakePlaylistPageRequest(
+		ResolvePlaylistContentTarget(fUri), offset, fPageBatchSize);
+	request.headRefresh = true;
+	if (!fPaging.BeginHead(request))
+		return;
 	if (offset == 0) {
-		if (fPodcastHeadRefreshing)
-			return;
 		fPendingPodcastHeadEpisodes.clear();
 		api->Content().InvalidateShowEpisodes(SpotifyItemIdForUri(fUri));
 	}
-
-	fPodcastHeadRefreshing = true;
-	std::string id = SpotifyItemIdForUri(fUri);
-	BMessenger messenger(this);
-	int32 limit = fPageBatchSize;
-
-	api->Content().GetShowEpisodes(id, offset, limit,
-		[messenger, offset](bool ok, const nlohmann::json& data) {
-		BMessage* msg = new BMessage('pEpR');
-		msg->AddBool("ok", ok);
-		msg->AddInt32("offset", offset);
-		if (ok && data.contains("items")) {
-			msg->AddInt32("total", (int32)JsonInt(data, "total"));
-			int32 pageCount = (int32)data["items"].size();
-			msg->AddInt32("page_count", pageCount);
-			msg->AddInt32("next_offset", offset + pageCount);
-			int32 itemIndex = 0;
-			for (const auto& ep : data["items"]) {
-				int32 number = offset + itemIndex + 1;
-				itemIndex++;
-				if (ep.is_object())
-					AddEpisodeToMessage(msg, ep, number);
-				else
-					AddUnavailableEpisodeToMessage(msg, number);
-			}
-		}
-		messenger.SendMessage(msg);
-		delete msg;
-	});
+	if (!PlaylistPageRequests::Load(*api, request, BMessenger(this))) {
+		fPaging.DispatchFailed(request);
+		fPendingPodcastHeadEpisodes.clear();
+	}
 }
+
 
 void
 PlaylistWindow::_FinishPodcastHeadRefresh()
 {
-	fPodcastHeadRefreshing = false;
-
 	if (!fPendingPodcastHeadEpisodes.empty()) {
 		fEpisodes.insert(fEpisodes.begin(), fPendingPodcastHeadEpisodes.begin(),
 			fPendingPodcastHeadEpisodes.end());
 		fPendingPodcastHeadEpisodes.clear();
 		_RenumberEpisodes();
-		_RebuildEpisodeList(fEpisodeSearchFilter);
+		_RebuildEpisodeList(fPaging.Filter());
 		_SaveCache();
 	} else {
 		fPendingPodcastHeadEpisodes.clear();
 	}
 
-	if (fEpisodeOffset < (int32)fEpisodes.size())
-		fEpisodeOffset = (int32)fEpisodes.size();
-	fPageOffset = fEpisodeOffset;
-	fPageTotal = fEpisodeTotal;
-	fPageHasMore = fEpisodeTotal <= 0 || fEpisodeOffset < fEpisodeTotal;
+	fPaging.FinishHeadRefresh((int32)fEpisodes.size());
 	_UpdateEpisodeInfo();
 	_CheckLazyLoad();
 }
@@ -3791,16 +3195,11 @@ PlaylistWindow::_LoadTrackCache()
 
 		if (fTrackList)
 			fTrackList->Clear();
-		fPageTotal = document.total;
-		fPageOffset = document.nextOffset;
-
 		AddCachedTrackRows(document.tracks, fTrackList, fCurrentPlayingTrackUri);
-		CachedPageState pageState = ResolveCachedTrackPageState(fPageOffset,
-			fPageTotal, fTrackList->CountRows());
-		fPageOffset = pageState.offset;
-		fPageTotal = pageState.total;
-		fPageHasMore = pageState.hasMore;
-		SetCachedTrackInfo(fPlaylistInfo, isPlaylist, fPageTotal,
+		CachedPageState pageState = ResolveCachedTrackPageState(document.nextOffset,
+			document.total, fTrackList->CountRows());
+		fPaging.RestorePosition({pageState.offset, pageState.total, pageState.hasMore});
+		SetCachedTrackInfo(fPlaylistInfo, isPlaylist, fPaging.Position().total,
 			fTrackList->CountRows());
 
 		return fTrackList->CountRows() > 0;
@@ -3820,7 +3219,6 @@ PlaylistWindow::_LoadShowCache()
 		if (!PlaylistCacheFiles::ReadShowDocumentForUri(fUri, document)) {
 			return false;
 		}
-		fEpisodeTotal = document.total;
 		fEpisodes.clear();
 		for (const PlaylistCacheDocument::Episode& cached
 				: document.episodes) {
@@ -3828,17 +3226,13 @@ PlaylistWindow::_LoadShowCache()
 		}
 		_RenumberEpisodes();
 		CachedPageState pageState = ResolveCachedEpisodePageState(
-			document.nextOffset, fEpisodeTotal, (int32)fEpisodes.size(),
+			document.nextOffset, document.total, (int32)fEpisodes.size(),
 			document.hasNextOffset);
 		if (!pageState.valid) {
 			fEpisodes.clear();
 			return false;
 		}
-		fEpisodeOffset = pageState.offset;
-		fPageOffset = fEpisodeOffset;
-		fEpisodeTotal = pageState.total;
-		fPageTotal = pageState.total;
-		fPageHasMore = pageState.hasMore;
+		fPaging.RestorePosition({pageState.offset, pageState.total, pageState.hasMore});
 		return !fEpisodes.empty();
 	} catch (...) {
 		fEpisodes.clear();
@@ -3872,7 +3266,7 @@ PlaylistWindow::_WriteCacheNow()
 bool
 PlaylistWindow::_WriteTrackCache()
 {
-	if (!fTrackList)
+	if (!fTrackList || _PlaylistMutationPending())
 		return false;
 	bool isPlaylist = PlaylistCacheFiles::UriUsesPlaylistTrackCache(fUri);
 	if (isPlaylist && fPlaylistSnapshotId.empty())
@@ -3885,8 +3279,8 @@ PlaylistWindow::_WriteTrackCache()
 			tracks.push_back(CachedTrackFromRow(row, i));
 	}
 
-	return PlaylistCacheFiles::WriteTrackDocumentForUri(fUri, fPageTotal,
-		fPageOffset, fPlaylistSnapshotId, tracks);
+	return PlaylistCacheFiles::WriteTrackDocumentForUri(fUri, fPaging.Position().total,
+		fPaging.Position().offset, fPlaylistSnapshotId, tracks);
 }
 
 
@@ -3897,9 +3291,9 @@ PlaylistWindow::_WriteShowCache()
 	for (const PlaylistEpisode& ep : fEpisodes)
 		episodes.push_back(CacheEpisodeFromPlaylistEpisode(ep));
 
-	PlaylistCacheFiles::WriteShowDocumentForUri(fUri, fEpisodeTotal,
-		fEpisodeOffset,
-		fEpisodeTotal <= 0 || fEpisodeOffset >= fEpisodeTotal, episodes);
+	PlaylistCacheFiles::WriteShowDocumentForUri(fUri, fPaging.Position().total,
+		fPaging.Position().offset,
+		fPaging.Position().total <= 0 || fPaging.Position().offset >= fPaging.Position().total, episodes);
 }
 
 void
@@ -3918,8 +3312,7 @@ PlaylistWindow::~PlaylistWindow()
 	delete fEpisodeSearchRetryRunner;
 	delete fCacheSaveRunner;
 	fCacheSaveRunner = nullptr;
-	if (!fTrackRemovalPending && !fTrackReorderPending
-			&& !fPlaylistClearPending)
+	if (!_PlaylistMutationPending())
 		_WriteCacheNow();
 	delete fLazyLoadRunner;
 	for (const PendingTrackRemoval& pending : fPendingTrackRemovals)
