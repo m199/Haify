@@ -47,6 +47,8 @@ enum {
 
 
 	MSG_OPEN_BROWSER	= 'opbr',
+	MSG_OPEN_SPOTIFY_URI = 'open',
+	MSG_SPOTIFY_SHOW_RESOLVED = 'sNvR',
 	MSG_OPEN_PLAYLIST	= 'oppl',
 	MSG_QUIT_APP		= 'qapp',
 	MSG_SHOW_PLAYER_WINDOW		= 'shpw',
@@ -78,6 +80,9 @@ enum {
 	MSG_TOGGLE_SHUFFLE			= 'tshf',
 	MSG_TOGGLE_REPEAT			= 'trep',
 	MSG_START_LIBRESPOT			= 'stLb',
+	MSG_LIBRESPOT_TRANSFER_POLL = 'tlbp',
+	MSG_LIBRESPOT_TRANSFER_RESULT = 'lbpt',
+	MSG_LIBRESPOT_REAP = 'rlbp',
 	MSG_TOGGLE_LIBRESPOT_RUNNING = 'tlbr',
 	MSG_TOGGLE_LIBRESPOT_AUTOSTART = 'tlba',
 	MSG_TOGGLE_MUTE			= 'tmte',
@@ -92,6 +97,7 @@ enum {
 	MSG_PLAYLISTS_CHANGED		= 'plCh',
 	MSG_LIBRARY_CHANGED			= 'lbCh',
 	MSG_SPOTIFY_CAPABILITIES_CHANGED = 'spCp',
+	MSG_SPOTIFY_ACCOUNT_RESULT = 'spAc',
 	MSG_DISCOVER_DRAG_HOVER		= 'dDhv',
 	MSG_DISCOVER_DRAG_EXIT		= 'dDhx',
 	MSG_DISCOVER_TAB_MOVED		= 'tRdr',
@@ -109,6 +115,7 @@ enum {
 
 // Wire names are compatibility contracts; see docs/message-contracts.md.
 namespace MessageFields {
+inline constexpr char PlaybackGeneration[] = "playback_generation";
 inline constexpr char ContextEpoch[] = "context_epoch";
 inline constexpr char CommandContext[] = "command_context";
 inline constexpr char WriteKind[] = "write_kind";

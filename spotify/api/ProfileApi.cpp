@@ -2,9 +2,16 @@
 
 #include <utility>
 
-ProfileApi::ProfileApi(GetHandler get)
-    : fGet(std::move(get))
+ProfileApi::ProfileApi(GetHandler get, CacheHandler eraseCache)
+    : fGet(std::move(get)), fEraseCache(std::move(eraseCache))
 {
+}
+
+void
+ProfileApi::RefreshCurrentUserProfile(JsonCallback callback)
+{
+    if (fEraseCache) fEraseCache("/me");
+    fGet("/me", callback);
 }
 
 void

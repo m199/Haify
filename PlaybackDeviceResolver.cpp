@@ -61,8 +61,8 @@ AddPlaybackDeviceChoicesFromJson(BMessage& message, const nlohmann::json& data,
 		message.AddString("name", name.c_str());
 		message.AddString("type",
 			device.value("type", std::string()).c_str());
-		message.AddBool("active", activeDeviceName.empty()
-			? device.value("is_active", false) : name == activeDeviceName);
+		message.AddBool("active", device.value("is_active", false)
+			&& (activeDeviceName.empty() || name == activeDeviceName));
 	}
 }
 

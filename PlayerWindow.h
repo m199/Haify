@@ -1,6 +1,9 @@
 #ifndef PLAYERWINDOW_H
 #define PLAYERWINDOW_H
 
+#include "playback/LibrespotEventState.h"
+#include "playback/LocalPlaybackPresentation.h"
+
 #include <Message.h>
 #include <Window.h>
 #include <map>
@@ -67,7 +70,7 @@ private:
 	void					_ApplyPlaybackMessage(BMessage* message);
 	PlaybackMessageData		_ReadPlaybackMessage(BMessage* message) const;
 	bool					_ShouldDeferPlaybackUpdate(
-								const PlaybackMessageData& update) const;
+								const PlaybackMessageData& update);
 	void					_ApplyPlaybackSeekGuard(
 								PlaybackMessageData& update,
 								bool trackChanged);
@@ -139,6 +142,7 @@ private:
 	void					_FillReplicantStateMessage(BMessage& message,
 								int32 progressMs) const;
 	void					_ReadLibrespotEvent();
+	void					_ClearPendingLibrespotTrack();
 	void					_ApplyLibrespotEvent(
 								const std::map<std::string, std::string>& fields);
 	void					_ApplyLibrespotTrackChanged(
@@ -181,6 +185,7 @@ private:
 	bool					fHasPendingPlaybackCommand = false;
 	bool					fPlaybackDevicePromptOpen = false;
 	int32					fLocalPlaybackDeviceAttempts = 0;
+	int64					fPreviousLocalPlaybackGeneration = 0;
 	bool					fHasPlaybackState = false;
 	bigtime_t				fStartupEmptyPlaybackRetryUntilUs = 0;
 	int32					fPlaybackPollFailures = 0;
@@ -214,8 +219,8 @@ private:
 	std::string				fCurrentDeviceType;
 	std::string				fCurrentTrackUri;
 	std::string				fQueueTrackUri;
-	std::string				fLastLibrespotTrackEventId;
-	std::string				fLastLibrespotPlaybackEventId;
+	LibrespotEventState		fLibrespotEvents;
+	LocalPlaybackPresentation fLocalPlaybackPresentation;
 	std::string				fOptimisticSourceTrackUri;
 	bigtime_t				fOptimisticUntilUs = 0;
 	bool					fAudiobookContextRequestPending = false;

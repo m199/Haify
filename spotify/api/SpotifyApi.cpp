@@ -89,6 +89,9 @@ SpotifyApi::SpotifyApi(const std::string& accessToken)
       fProfile(
         [this](const std::string& path, JsonCallback callback) {
             Get(path, callback);
+        },
+        [this](const std::string& path) {
+            _EraseCache(path);
         })
 {
 }

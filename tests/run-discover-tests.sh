@@ -1,5 +1,5 @@
 #!/bin/sh
-# Phase 3/4 regression tests on Haiku. Do not run before
+# Phase 3/4/5 regression tests on Haiku. Do not run before
 # build/test permission; this script compiles fixtures but never starts Haify.
 set -eu
 cd "$(dirname "$0")/.."
@@ -18,7 +18,7 @@ cxx="${CXX:-c++}"
 # Multi-character literals are the existing Haiku BMessage wire codes.
 "$cxx" -std=c++17 -Wall -Wextra -Werror -Wno-multichar -I. tests/DiscoverMessagesTest.cpp discover/DiscoverMessages.cpp -lbe -o "$test_output/discover-messages"
 "$test_output/discover-messages"
-"$cxx" -std=c++17 -Wall -Wextra -Werror -Wno-multichar -I. tests/MessageContractsTest.cpp -lbe -o "$test_output/message-contracts"
+"$cxx" -std=c++17 -Wall -Wextra -Werror -Wno-multichar -I. tests/MessageContractsTest.cpp PlaybackDeviceResolver.cpp -lbe -llocalestub -o "$test_output/message-contracts"
 "$test_output/message-contracts"
 "$cxx" -std=c++17 -Wall -Wextra -Werror -I. -Inetwork tests/SpotifyRequestClientTest.cpp spotify/api/SpotifyRequestClient.cpp -lbe -o "$test_output/request-client"
 "$test_output/request-client"
@@ -26,6 +26,34 @@ cxx="${CXX:-c++}"
 "$test_output/http-completion"
 "$cxx" -std=c++17 -Wall -Wextra -Werror -I. tests/PlaybackApiTest.cpp spotify/api/PlaybackApi.cpp spotify/api/SpotifyUrl.cpp -o "$test_output/playback-api"
 "$test_output/playback-api"
+# Phase 5a: start policy and asynchronous shuffle/play sequences, without a window.
+"$cxx" -std=c++17 -Wall -Wextra -Werror -I. tests/PlaybackStartControllerTest.cpp playback/PlaybackStartController.cpp spotify/api/PlaybackApi.cpp spotify/api/SpotifyUrl.cpp -o "$test_output/playback-start-controller"
+"$test_output/playback-start-controller"
+# Local startup: stale event files, track identity and transfer-before-play.
+"$cxx" -std=c++17 -Wall -Wextra -Werror -I. tests/LocalPlaybackStateTest.cpp playback/PlaybackStartController.cpp spotify/api/PlaybackApi.cpp spotify/api/SpotifyUrl.cpp -o "$test_output/local-playback-state"
+"$test_output/local-playback-state"
+# Phase 5b: discovery/idle/transfer ordering and strict native completion messages.
+"$cxx" -std=c++17 -Wall -Wextra -Werror -I. tests/LibrespotTransferControllerTest.cpp playback/LibrespotTransferController.cpp spotify/api/PlaybackApi.cpp spotify/api/SpotifyUrl.cpp -o "$test_output/librespot-transfer-controller"
+"$test_output/librespot-transfer-controller"
+"$cxx" -std=c++17 -Wall -Wextra -Werror -Wno-multichar -I. tests/LibrespotTransferMessagesTest.cpp playback/LibrespotTransferMessages.cpp playback/LibrespotTransferController.cpp spotify/api/PlaybackApi.cpp spotify/api/SpotifyUrl.cpp -lbe -o "$test_output/librespot-transfer-messages"
+"$test_output/librespot-transfer-messages"
+# Librespot option mapping without settings I/O or a process.
+"$cxx" -std=c++17 -Wall -Wextra -Werror -I. tests/LibrespotArgumentsTest.cpp playback/LibrespotArguments.cpp -o "$test_output/librespot-arguments"
+"$test_output/librespot-arguments"
+# Phase 5c: navigation decisions, owned probe results and native wire contracts.
+"$cxx" -std=c++17 -Wall -Wextra -Werror -I. tests/SpotifyNavigationTest.cpp navigation/SpotifyNavigation.cpp spotify/api/ContentApi.cpp spotify/api/SpotifyUrl.cpp -o "$test_output/spotify-navigation"
+"$test_output/spotify-navigation"
+"$cxx" -std=c++17 -Wall -Wextra -Werror -Wno-multichar -I. tests/SpotifyNavigationMessagesTest.cpp navigation/SpotifyNavigationMessages.cpp navigation/SpotifyNavigation.cpp spotify/api/ContentApi.cpp spotify/api/SpotifyUrl.cpp -lbe -o "$test_output/spotify-navigation-messages"
+"$test_output/spotify-navigation-messages"
+# Phase 5d: actual API/cache services with in-memory settings and forbidden network I/O.
+session_api_sources="spotify/api/SpotifyApi.cpp spotify/api/SpotifyRequestClient.cpp spotify/api/ArtistApi.cpp spotify/api/ContentApi.cpp spotify/api/LibraryApi.cpp spotify/api/PlaybackApi.cpp spotify/api/PlaylistApi.cpp spotify/api/ProfileApi.cpp spotify/api/SpotifyResponse.cpp spotify/api/SpotifyUrl.cpp"
+session_sources="spotify/session/SpotifyAccountSession.cpp spotify/session/SpotifyCredentialStore.cpp spotify/SpotifyCapabilities.cpp tests/SpotifySessionTestSupport.cpp"
+"$cxx" -std=c++17 -Wall -Wextra -Werror -I. -Isettings -Inetwork tests/SpotifyAccountSessionTest.cpp $session_sources $session_api_sources -lbe -o "$test_output/spotify-account-session"
+"$test_output/spotify-account-session"
+"$cxx" -std=c++17 -Wall -Wextra -Werror -I. -Isettings -Inetwork tests/SpotifyCapabilitiesTest.cpp $session_sources $session_api_sources -lbe -o "$test_output/spotify-capabilities"
+"$test_output/spotify-capabilities"
+"$cxx" -std=c++17 -Wall -Wextra -Werror -Wno-multichar -I. -Isettings -Inetwork tests/SpotifySessionMessagesTest.cpp spotify/session/SpotifySessionMessages.cpp $session_sources $session_api_sources -lbe -o "$test_output/spotify-session-messages"
+"$test_output/spotify-session-messages"
 # PlaylistApiTest supplies an unavailable cache path; real user files are never touched.
 "$cxx" -std=c++17 -Wall -Wextra -Werror -I. -Isettings tests/PlaylistApiTest.cpp spotify/api/PlaylistApi.cpp spotify/api/SpotifyUrl.cpp -lbe -o "$test_output/playlist-api"
 "$test_output/playlist-api"

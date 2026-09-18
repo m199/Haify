@@ -1,4 +1,6 @@
 #include "MessageContracts.h"
+#include "PlaybackDeviceResolver.h"
+#include <nlohmann/json.hpp>
 #include "NowPlayingFields.h"
 #include "UiLogic.h"
 
@@ -197,12 +199,56 @@ TestPlayCommand()
 	assert(result.uri == source.uri && result.contextUri == source.contextUri);
 	assert(result.deviceId == source.deviceId && result.startPositionMs == 1234);
 	assert(result.nextQueueUris == source.nextQueueUris);
+	assert(result.parentKind == "audiobook");
 	assert(std::string(forwarded.GetString(kNowPlayingParentKindField, "")) == "audiobook");
 	message.ReplaceInt32(MessageFields::StartPositionMs, -1);
 	assert(!ReadPlayCommand(message, result) && result.startPositionMs == 1234);
 	message.ReplaceInt32(MessageFields::StartPositionMs, 0);
 	message.AddString(MessageFields::NextQueueUri, "spotify:album:invalid");
 	assert(!ReadPlayCommand(message, result));
+}
+
+static void
+TestPlaybackProvenance()
+{
+	PlayCommand source{"spotify:episode:chapter", "spotify:audiobook:book", "d", 123,
+		{"spotify:episode:next"}, "audiobook", "spotify:audiobook:book"};
+	BMessage message = MakePlayCommand(source);
+	assert(SetPlaybackDevice(message, "selected"));
+	PlayCommand result;
+	assert(ReadPlayCommand(message, result));
+	assert(result.parentKind == source.parentKind && result.primaryOpenUri == source.primaryOpenUri);
+	assert(result.deviceId == "selected" && result.nextQueueUris == source.nextQueueUris);
+	for (const char* field : {kNowPlayingParentKindField, kNowPlayingPrimaryOpenUriField}) {
+		BMessage invalid(message);
+		invalid.AddString(field, "duplicate");
+		assert(!ReadPlayCommand(invalid, result) && result.deviceId == "selected");
+		invalid.RemoveName(field);
+		invalid.AddBool(field, true);
+		assert(!ReadPlayCommand(invalid, result) && result.uri == source.uri);
+	}
+	assert(ReadPlayCommand(MakePlayCommand({"spotify:track:one"}), result));
+	assert(result.parentKind.empty() && result.primaryOpenUri.empty());
+}
+
+static void
+TestLocalDeviceMustBeActive()
+{
+	nlohmann::json devices = {{"devices", {
+		{{"id", "local"}, {"name", "Haify"}, {"is_active", false}},
+		{{"id", "remote"}, {"name", "BARON"}, {"is_active", true}}
+	}}};
+	std::string selected = "unchanged";
+	BMessage waiting;
+	AddPlaybackDeviceChoicesFromJson(waiting, devices, "Haify");
+	assert(!FindActivePlaybackDeviceId(&waiting, selected) && selected == "unchanged");
+	BMessage remote;
+	AddPlaybackDeviceChoicesFromJson(remote, devices);
+	assert(FindActivePlaybackDeviceId(&remote, selected) && selected == "remote");
+	devices["devices"][0]["is_active"] = true;
+	BMessage ready;
+	AddPlaybackDeviceChoicesFromJson(ready, devices, "Haify");
+	assert(FindActivePlaybackDeviceId(&ready, selected) && selected == "local");
 }
 
 static void
@@ -305,6 +351,8 @@ main()
 	TestDropIntent();
 	TestDiscoverTarget();
 	TestPlayCommand();
+	TestPlaybackProvenance();
+	TestLocalDeviceMustBeActive();
 	TestPlaybackDeviceReplacement();
 	TestLegacyPlayAndQueue();
 	TestCurrentTrack();

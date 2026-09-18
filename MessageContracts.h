@@ -2,6 +2,8 @@
 
 #include "Messages.h"
 #include "DragItem.h"
+#include "NowPlayingFields.h"
+#include "playback/PlaybackCommand.h"
 #include "spotify/SpotifyUri.h"
 
 #include <Message.h>
@@ -199,20 +201,7 @@ ReadDiscoverDropTarget(const BMessage& message, DiscoverDropTarget& result)
 	return true;
 }
 
-struct PlayCommand {
-	std::string uri;
-	std::string contextUri = "";
-	std::string deviceId = "";
-	int32 startPositionMs = 0;
-	std::vector<std::string> nextQueueUris = {};
-};
-
-inline bool
-ValidPlaybackUri(const std::string& uri)
-{
-	return !SpotifyItemIdForUri(uri).empty()
-		|| uri == "spotify:collection" || uri == "spotify:saved-episodes";
-}
+using PlayCommand = PlaybackCommand;
 
 inline bool
 ReadQueueUris(const BMessage& message, std::vector<std::string>& uris)
@@ -241,13 +230,17 @@ ReadPlayCommand(const BMessage& message, PlayCommand& result)
 	if (message.what != MSG_PLAY_URI)
 		return false;
 	PlayCommand command;
+	int32 positionMs = 0;
 	if (!ReadItemUri(message, command.uri)
 			|| !ReadString(message, MessageFields::ContextUri, command.contextUri)
 			|| !ReadString(message, MessageFields::DeviceId, command.deviceId)
-			|| !ReadInt32(message, MessageFields::StartPositionMs, command.startPositionMs)
+			|| !ReadInt32(message, MessageFields::StartPositionMs, positionMs)
+			|| !ReadString(message, kNowPlayingParentKindField, command.parentKind)
+			|| !ReadString(message, kNowPlayingPrimaryOpenUriField, command.primaryOpenUri)
 			|| !ReadQueueUris(message, command.nextQueueUris))
 		return false;
-	if (command.startPositionMs < 0 || !ValidPlaybackUri(command.uri))
+	command.startPositionMs = positionMs;
+	if (!ValidPlaybackCommand(command))
 		return false;
 	result = command;
 	return true;
@@ -266,6 +259,10 @@ MakePlayCommand(const PlayCommand& command)
 		message.AddInt32(MessageFields::StartPositionMs, command.startPositionMs);
 	for (const std::string& uri : command.nextQueueUris)
 		message.AddString(MessageFields::NextQueueUri, uri.c_str());
+	if (!command.parentKind.empty())
+		message.AddString(kNowPlayingParentKindField, command.parentKind.c_str());
+	if (!command.primaryOpenUri.empty())
+		message.AddString(kNowPlayingPrimaryOpenUriField, command.primaryOpenUri.c_str());
 	return message;
 }
 

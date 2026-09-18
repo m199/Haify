@@ -12,7 +12,9 @@ IsMarketBlocked(const nlohmann::json& item)
             || !item["restrictions"].is_object()) {
         return false;
     }
-    return item["restrictions"].value("reason", "") == "market";
+    const auto& restrictions = item["restrictions"];
+    auto reason = restrictions.find("reason");
+    return reason != restrictions.end() && reason->is_string() && *reason == "market";
 }
 
 static bool
@@ -50,7 +52,8 @@ SearchAudiobooksAvailable(const nlohmann::json& searchData)
     }
 
     const auto& books = searchData["audiobooks"];
-    bool available = books.value("total", 0) > 0
+    bool available = (books.contains("total") && books["total"].is_number_integer()
+            && books["total"] > 0)
         || (books.contains("items") && books["items"].is_array()
             && !books["items"].empty());
     if (books.contains("items") && AllItemsMarketBlocked(books["items"]))
@@ -65,8 +68,12 @@ SpotifyCapabilities::SpotifyCapabilities(SpotifyApi* api)
 
 void SpotifyCapabilities::SetApi(SpotifyApi* api)
 {
-    BAutolock lock(&fLock);
-    fApi = api;
+    {
+        BAutolock lock(&fLock);
+        if (fApi == api) return;
+        fApi = api;
+    }
+    Reset();
 }
 
 void SpotifyCapabilities::Reset()
@@ -75,6 +82,7 @@ void SpotifyCapabilities::Reset()
     {
         BAutolock lock(&fLock);
         fAudiobookState = kAudiobookUnknown;
+        ++fProbeGeneration;
         fAudiobookWasAvailable = false;
         fAudiobookProbeInFlight = false;
         fLastAudiobookCheck = 0;
@@ -89,8 +97,18 @@ void SpotifyCapabilities::SetAudiobookMode(AudiobookMode mode)
 {
     if (mode < kAudiobookAuto || mode > kAudiobookDisabled)
         mode = kAudiobookAuto;
-    BAutolock lock(&fLock);
-    fAudiobookMode = mode;
+    std::vector<AudiobookCapabilityCallback> waiters;
+    {
+        BAutolock lock(&fLock);
+        if (fAudiobookMode == mode) return;
+        fAudiobookMode = mode;
+        ++fProbeGeneration;
+        fAudiobookProbeInFlight = false;
+        waiters.swap(fAudiobookWaiters);
+    }
+    for (const auto& callback : waiters) {
+        if (callback) callback(kAudiobookUnknown);
+    }
 }
 
 AudiobookMode SpotifyCapabilities::AudiobookModeSetting() const
@@ -143,64 +161,65 @@ void SpotifyCapabilities::ProbeAudiobooks(
     AudiobookCapabilityCallback callback, bool force)
 {
     SpotifyApi* api = nullptr;
-    AudiobookCapabilityState current;
+    AudiobookCapabilityState immediate = kAudiobookUnknown;
+    uint64_t generation;
     {
         BAutolock lock(&fLock);
         if (callback)
             fAudiobookWaiters.push_back(callback);
-        if (fAudiobookMode == kAudiobookDisabled) {
-            lock.Unlock();
-            _FinishAudiobookProbe(kAudiobookUnavailable);
+        if (fAudiobookProbeInFlight && fAudiobookMode != kAudiobookDisabled)
             return;
-        }
-        if (fAudiobookProbeInFlight)
-            return;
-        current = fAudiobookState;
-        if (!force && current != kAudiobookUnknown
-                && current != kAudiobookTemporaryError) {
-            lock.Unlock();
-            _FinishAudiobookProbe(current);
-            return;
-        }
-        api = fApi;
-        if (!api) {
-            lock.Unlock();
-            _FinishAudiobookProbe(kAudiobookTemporaryError);
-            return;
-        }
+        generation = ++fProbeGeneration;
         fAudiobookProbeInFlight = true;
+        api = fApi;
+        if (fAudiobookMode == kAudiobookDisabled)
+            immediate = kAudiobookUnavailable;
+        else if (!force && fAudiobookState != kAudiobookUnknown
+                && fAudiobookState != kAudiobookTemporaryError)
+            immediate = fAudiobookState;
+        else if (!api)
+            immediate = kAudiobookTemporaryError;
     }
+    if (immediate != kAudiobookUnknown)
+        _FinishAudiobookProbe(immediate, generation);
+    else
+        _StartAudiobookProbe(api, generation);
+}
 
+void SpotifyCapabilities::_StartAudiobookProbe(SpotifyApi* api, uint64_t generation)
+{
     api->Library().GetSavedAudiobooks(0, 1,
-        [this, api](bool ok, const nlohmann::json& data) {
+        [this, api, generation](bool ok, const nlohmann::json& data) {
+            if (!_ProbeIsCurrent(generation)) return;
             if (!ok) {
-                _FinishAudiobookProbe(_FailureState(data));
+                _FinishAudiobookProbe(_FailureState(data), generation);
                 return;
             }
             AudiobookCapabilityState savedState;
             if (SavedAudiobooksProbeState(data, savedState)) {
-                _FinishAudiobookProbe(savedState);
+                _FinishAudiobookProbe(savedState, generation);
                 return;
             }
             api->Content().Search("a", "audiobook",
-                [this](bool searchOk, const nlohmann::json& searchData) {
+                [this, generation](bool searchOk, const nlohmann::json& searchData) {
                     if (!searchOk) {
-                        _FinishAudiobookProbe(_FailureState(searchData));
+                        _FinishAudiobookProbe(_FailureState(searchData), generation);
                         return;
                     }
                     bool available = SearchAudiobooksAvailable(searchData);
                     _FinishAudiobookProbe(available
-                        ? kAudiobookAvailable : kAudiobookUnavailable);
+                        ? kAudiobookAvailable : kAudiobookUnavailable, generation);
                 });
         });
 }
 
 void SpotifyCapabilities::_FinishAudiobookProbe(
-    AudiobookCapabilityState state)
+    AudiobookCapabilityState state, uint64_t generation)
 {
     std::vector<AudiobookCapabilityCallback> waiters;
     {
         BAutolock lock(&fLock);
+        if (generation != fProbeGeneration || !fAudiobookProbeInFlight) return;
         fAudiobookState = state;
         if (state == kAudiobookAvailable)
             fAudiobookWasAvailable = true;
@@ -214,4 +233,22 @@ void SpotifyCapabilities::_FinishAudiobookProbe(
     for (const auto& callback : waiters) {
         if (callback) callback(state);
     }
+}
+
+bool SpotifyCapabilities::_ProbeIsCurrent(uint64_t generation) const
+{
+    BAutolock lock(&fLock);
+    return generation == fProbeGeneration && fAudiobookProbeInFlight;
+}
+
+void SpotifyCapabilities::RefreshForSession(bool authenticated, AudiobookMode mode,
+    AudiobookCapabilityCallback callback, bool force)
+{
+    SetAudiobookMode(mode);
+    if (!authenticated) {
+        Reset();
+        if (callback) callback(kAudiobookUnknown);
+        return;
+    }
+    ProbeAudiobooks(callback, force);
 }

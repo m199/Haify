@@ -1,15 +1,32 @@
 #include "SpotifyResponse.h"
 
+#include <limits>
+
+namespace {
+int ResponseInteger(const nlohmann::json& data, const char* field)
+{
+    if (!data.is_object()) return -1;
+    auto value = data.find(field);
+    if (value == data.end() || !value->is_number_integer()) return -1;
+    if (value->is_number_unsigned()) {
+        auto number = value->get<uint64_t>();
+        return number <= uint64_t(std::numeric_limits<int>::max()) ? static_cast<int>(number) : -1;
+    }
+    auto number = value->get<int64_t>();
+    return number >= 0 && number <= std::numeric_limits<int>::max() ? static_cast<int>(number) : -1;
+}
+}
+
 int
 SpotifyResponseStatus(const nlohmann::json& data)
 {
-    return data.is_object() ? data.value("status", -1) : -1;
+    return ResponseInteger(data, "status");
 }
 
 int
 SpotifyResponseRetryAfter(const nlohmann::json& data)
 {
-    return data.is_object() ? data.value("retry_after", -1) : -1;
+    return ResponseInteger(data, "retry_after");
 }
 
 std::string

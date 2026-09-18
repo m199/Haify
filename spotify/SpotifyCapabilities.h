@@ -3,6 +3,7 @@
 #include <Locker.h>
 
 #include <functional>
+#include <cstdint>
 #include <nlohmann/json.hpp>
 #include <time.h>
 #include <vector>
@@ -38,9 +39,13 @@ public:
 
     void ProbeAudiobooks(AudiobookCapabilityCallback callback = nullptr,
                          bool force = false);
+    void RefreshForSession(bool authenticated, AudiobookMode mode,
+                           AudiobookCapabilityCallback callback, bool force = false);
 
 private:
-    void _FinishAudiobookProbe(AudiobookCapabilityState state);
+    void _StartAudiobookProbe(SpotifyApi* api, uint64_t generation);
+    bool _ProbeIsCurrent(uint64_t generation) const;
+    void _FinishAudiobookProbe(AudiobookCapabilityState state, uint64_t generation);
     static AudiobookCapabilityState _FailureState(
         const nlohmann::json& data);
 
@@ -50,6 +55,7 @@ private:
     AudiobookCapabilityState fAudiobookState = kAudiobookUnknown;
     bool fAudiobookWasAvailable = false;
     bool fAudiobookProbeInFlight = false;
+    uint64_t fProbeGeneration = 0;
     time_t fLastAudiobookCheck = 0;
     std::vector<AudiobookCapabilityCallback> fAudiobookWaiters;
 };

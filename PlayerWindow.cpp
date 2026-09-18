@@ -13,6 +13,8 @@
 #include "HaifyDebug.h"
 #include "Config.h"
 #include "UiLogic.h"
+#include "playback/PlaybackStartController.h"
+#include "playback/PlaybackStartPolicy.h"
 #include "spotify/SpotifyUri.h"
 #include "spotify/api/SpotifyApi.h"
 #include "spotify/api/SpotifyResponse.h"
@@ -56,7 +58,6 @@ static const bigtime_t kSeekGuard = 5000000LL;
 static const bigtime_t kVolumeGuard = 5000000LL;
 static const int32 kSeekProgressToleranceMs = 2000;
 static const int32 kQueuePrefetchRemainingMs = 30000;
-static const size_t kMaxPlaybackUriBatch = 100;
 static const uint32 kMsgVerifyPoll = 'vpol';
 static const uint32 kMsgPlaybackTick = 'ptik';
 static const uint32 kMsgPlaybackPollResult = 'pbrs';
@@ -221,85 +222,15 @@ _FillPlaybackPollMessage(BMessage& message, bool ok,
 }
 
 
-static bool
-_MessageTargetsAudiobookQueue(BMessage* message)
-{
-	return message->GetString(kNowPlayingParentKindField, "")
-			== std::string("audiobook")
-		|| SpotifyItemKindForUri(message->GetString(
-			kNowPlayingPrimaryOpenUriField, "")) == kSpotifyItemAudiobook;
-}
-
-
-static std::vector<std::string>
-_PlaybackUriBatch(const std::string& firstUri,
-	const std::vector<std::string>& queueUris)
-{
-	std::vector<std::string> playUris;
-	playUris.reserve(std::min(queueUris.size() + 1, kMaxPlaybackUriBatch));
-	playUris.push_back(firstUri);
-	for (const std::string& nextUri : queueUris) {
-		if (playUris.size() >= kMaxPlaybackUriBatch)
-			break;
-		playUris.push_back(nextUri);
-	}
-	return playUris;
-}
-
-
 static void
-_PlayPlayableUri(SpotifyApi* api, const std::string& uri,
-	const std::string& contextUri, const std::vector<std::string>& queueUris,
-	bool audiobookQueue, int32 startPositionMs, const std::string& deviceId,
-	JsonCallback callback)
+_ReportPlaybackStart(const PlaybackStartResult& result)
 {
-	if (!audiobookQueue && !queueUris.empty()) {
-		api->Playback().PlayUris(_PlaybackUriBatch(uri, queueUris), callback,
-			deviceId);
-		return;
-	}
-	api->Playback().PlayTrack(uri, contextUri, callback, startPositionMs,
-		deviceId);
-}
-
-
-static bool
-_ShouldRestoreShuffleForStart(const std::string& uri,
-	const std::string& contextUri, bool audiobookQueue, bool shuffleOn)
-{
-	if (!shuffleOn || audiobookQueue)
-		return false;
-	return SpotifyItemKindForUri(uri) == kSpotifyItemTrack
-		&& SpotifyItemKindForUri(contextUri) == kSpotifyItemPlaylist;
-}
-
-
-static void
-_StartPlayableUri(SpotifyApi* api, const std::string& uri,
-	const std::string& contextUri, const std::vector<std::string>& queueUris,
-	bool audiobookQueue, int32 startPositionMs, const std::string& deviceId,
-	bool shuffleOn)
-{
-	if (!_ShouldRestoreShuffleForStart(uri, contextUri, audiobookQueue,
-			shuffleOn)) {
-		_PlayPlayableUri(api, uri, contextUri, queueUris, audiobookQueue,
-			startPositionMs, deviceId, nullptr);
-		return;
-	}
-
-	api->Playback().SetShuffle(false,
-		[api, uri, contextUri, queueUris, audiobookQueue, startPositionMs,
-				deviceId](bool ok, const nlohmann::json&) {
-			if (!ok) {
-				api->Playback().PlayUris({uri}, nullptr, deviceId);
-				return;
-			}
-			_PlayPlayableUri(api, uri, contextUri, queueUris, audiobookQueue,
-				startPositionMs, deviceId,
-				[api, deviceId](bool, const nlohmann::json&) {
-					api->Playback().SetShuffle(true, nullptr, deviceId);
-				});
-		}, deviceId);
+	DEBUG_PRINT("Playback start uri=%s device=%s fallback=%d "
+		"shuffle_off=%d/%d play=%d/%d shuffle_restore=%d/%d\n",
+		result.uri.c_str(), result.deviceId.c_str(), result.usedSingleItemFallback,
+		result.disableShuffle.accepted, result.disableShuffle.status,
+		result.play.accepted, result.play.status,
+		result.restoreShuffle.accepted, result.restoreShuffle.status);
 }
 
 
@@ -609,8 +540,11 @@ PlayerWindow::_ReadPlaybackMessage(BMessage* message) const
 
 bool
 PlayerWindow::_ShouldDeferPlaybackUpdate(
-	const PlaybackMessageData& update) const
+	const PlaybackMessageData& update)
 {
+	if (fLocalPlaybackPresentation.Defer(update.trackUri, update.optimistic,
+			update.isPlaying, system_time()))
+		return true;
 	bool guardActive = system_time() < fOptimisticUntilUs;
 	return ShouldDeferOptimisticPlaybackPoll(update.optimistic, guardActive,
 		!update.trackUri.empty(), update.trackUri, fCurrentTrackUri,
@@ -832,6 +766,7 @@ PlayerWindow::_ApplyPlayerBarState(const PlaybackMessageData& update)
 void
 PlayerWindow::_ApplyTrackChangedState(const PlaybackMessageData& update)
 {
+	_ClearPendingLibrespotTrack();
 	if (!update.optimistic) {
 		fOptimisticSourceTrackUri.clear();
 		fOptimisticUntilUs = 0;
@@ -1051,17 +986,15 @@ PlayerWindow::_PlayUriNow(BMessage* message)
 	if (!MessageContracts::ReadPlayCommand(*message, command))
 		return;
 
+	fLocalPlaybackPresentation.Dispatched(command.uri, system_time());
 	const std::string& uriStr = command.uri;
-	const std::string& contextUri = command.contextUri;
-	const std::string& deviceId = command.deviceId;
-	const std::vector<std::string>& queueUris = command.nextQueueUris;
-	bool audiobookQueue = _MessageTargetsAudiobookQueue(message);
 
 	SpotifyItemKind kind = SpotifyItemKindForUri(uriStr);
 	if (SpotifyItemIsPlayable(kind)) {
-		bool previewApplied = _ApplyOptimisticPlay(message);
-		if (audiobookQueue)
-			fAudiobookNextUris = queueUris;
+		bool previewApplied = !fLocalPlaybackPresentation.Active(system_time())
+			&& _ApplyOptimisticPlay(message);
+		if (PlaybackTargetsAudiobookQueue(command))
+			fAudiobookNextUris = command.nextQueueUris;
 		else
 			fAudiobookNextUris.clear();
 
@@ -1072,15 +1005,11 @@ PlayerWindow::_PlayUriNow(BMessage* message)
 				SpotifyItemIdForUri(uriStr), fRepeatState, fShuffleOn,
 				fVolumePct);
 		}
-
-		_StartPlayableUri(api, uriStr, contextUri, queueUris,
-			audiobookQueue, command.startPositionMs, deviceId, fShuffleOn);
-		_ScheduleVerifyPoll(kVerifyPollDelay);
-		return;
+	} else {
+		fAudiobookNextUris.clear();
 	}
 
-	fAudiobookNextUris.clear();
-	api->Playback().PlayContext(uriStr, nullptr, deviceId);
+	DispatchPlaybackStart(api->Playback(), command, fShuffleOn, _ReportPlaybackStart);
 	_ScheduleVerifyPoll(kVerifyPollDelay);
 }
 
@@ -1128,6 +1057,20 @@ PlayerWindow::_ApplyPlaybackDeviceChoices(BMessage* message)
 {
 	if (!fHasPendingPlaybackCommand)
 		return;
+	bool localRetry = message->GetBool("local_retry", false);
+	if (localRetry && fLocalPlaybackDeviceAttempts == 0)
+		return;
+	if (fLocalPlaybackDeviceAttempts > 0 && !localRetry)
+		return;
+	App* app = dynamic_cast<App*>(be_app);
+	if (localRetry && (!app
+			|| !app->IsLocalPlaybackReadyAfter(fPreviousLocalPlaybackGeneration))) {
+		DEBUG_PRINT("Local playback: waiting for transfer, attempt=%ld\n",
+			(long)fLocalPlaybackDeviceAttempts);
+		if (fLocalPlaybackDeviceAttempts >= kLocalPlaybackDeviceMaxAttempts)
+			_ShowPlaybackDevicePrompt(message);
+		return;
+	}
 
 	std::string deviceId;
 	if (FindActivePlaybackDeviceId(message, deviceId)) {
@@ -1135,7 +1078,7 @@ PlayerWindow::_ApplyPlaybackDeviceChoices(BMessage* message)
 		return;
 	}
 
-	if (message->GetBool("local_retry", false)
+	if (localRetry
 			&& fLocalPlaybackDeviceAttempts < kLocalPlaybackDeviceMaxAttempts) {
 		return;
 	}
@@ -1149,6 +1092,7 @@ PlayerWindow::_ShowPlaybackDevicePrompt(BMessage* message)
 {
 	if (fPlaybackDevicePromptOpen)
 		return;
+	fLocalPlaybackPresentation.Cancel();
 
 	App* app = dynamic_cast<App*>(be_app);
 	ShowPlaybackDevicePrompt(BMessenger(this),
@@ -1164,6 +1108,7 @@ PlayerWindow::_ApplyPlaybackDeviceSelection(BMessage* message)
 	MessageContracts::DevicePromptResult result;
 	if (!MessageContracts::ReadDevicePromptResult(*message, result))
 		return;
+	fLocalPlaybackPresentation.Cancel();
 	_ExecutePendingPlaybackCommand(result.deviceId);
 }
 
@@ -1172,9 +1117,16 @@ void
 PlayerWindow::_StartLocalPlaybackDevice()
 {
 	fPlaybackDevicePromptOpen = false;
+	MessageContracts::PlayCommand command;
+	if (MessageContracts::ReadPlayCommand(fPendingPlaybackCommand, command))
+		fLocalPlaybackPresentation.Begin(command.uri, system_time());
+	else
+		fLocalPlaybackPresentation.Cancel();
 	App* app = dynamic_cast<App*>(be_app);
-	if (app && !app->IsLibrespotRunning())
+	if (app) {
+		fPreviousLocalPlaybackGeneration = app->LocalPlaybackGeneration();
 		be_app->PostMessage(MSG_START_LIBRESPOT);
+	}
 	fLocalPlaybackDeviceAttempts = 0;
 	_RetryLocalPlaybackDevice();
 }
@@ -1223,9 +1175,12 @@ PlayerWindow::_ExecutePendingPlaybackCommand(const std::string& deviceId)
 	BMessage command(fPendingPlaybackCommand);
 	if (!MessageContracts::SetPlaybackDevice(command, deviceId))
 		return;
+	DEBUG_PRINT("Executing pending playback: uri=%s device=%s\n",
+		command.GetString(MessageFields::Uri, ""), deviceId.c_str());
 	fPendingPlaybackCommand.MakeEmpty();
 	fHasPendingPlaybackCommand = false;
 	fPlaybackDevicePromptOpen = false;
+	fLocalPlaybackDeviceAttempts = 0;
 	delete fLocalPlaybackDeviceTimer;
 	fLocalPlaybackDeviceTimer = nullptr;
 	fCurrentDeviceId = deviceId;
@@ -1252,10 +1207,23 @@ PlayerWindow::_ExecutePlaybackCommand(BMessage* message)
 
 
 void
+PlayerWindow::_ClearPendingLibrespotTrack()
+{
+	fPendingLibrespotTrack.MakeEmpty();
+	fHasPendingLibrespotTrack = false;
+}
+
+
+void
 PlayerWindow::_ReadLibrespotEvent()
 {
-	auto readEventFile = [this](const std::string& path,
-			std::string& lastEventId) {
+	App* app = dynamic_cast<App*>(be_app);
+	int64 session = app ? app->LibrespotEventSession() : 0;
+	if (fLibrespotEvents.SetSession(session))
+		_ClearPendingLibrespotTrack();
+	if (session <= 0)
+		return;
+	auto readEventFile = [this](const std::string& path, bool track) {
 		std::ifstream file(path);
 		if (!file.is_open())
 			return;
@@ -1269,19 +1237,17 @@ PlayerWindow::_ReadLibrespotEvent()
 			fields[line.substr(0, pos)] = line.substr(pos + 1);
 		}
 
-		auto it = fields.find("event_id");
-		if (it == fields.end() || it->second.empty()
-				|| it->second == lastEventId) {
+		if (!fLibrespotEvents.Accept(fields[LibrespotEventFields::SessionId],
+				fields["event_id"], track)) {
 			return;
 		}
 
-		lastEventId = it->second;
 		_ApplyLibrespotEvent(fields);
 	};
 
 	std::string statePath = SettingsController::LibrespotEventStatePath();
-	readEventFile(statePath, fLastLibrespotTrackEventId);
-	readEventFile(statePath + ".playback", fLastLibrespotPlaybackEventId);
+	readEventFile(statePath, true);
+	readEventFile(statePath + ".playback", false);
 }
 
 
@@ -1335,6 +1301,11 @@ PlayerWindow::_ApplyLibrespotTrackChanged(
 	const std::map<std::string, std::string>& fields)
 {
 	std::string trackUri = LibrespotField(fields, "uri");
+	if (!fLibrespotEvents.RememberTrack(trackUri, LibrespotField(fields, "track_id"))) {
+		_ClearPendingLibrespotTrack();
+		_SchedulePlaybackPoll(0);
+		return;
+	}
 	int32 durationMs = (int32)strtol(
 		LibrespotField(fields, "duration_ms").c_str(), nullptr, 10);
 	int32 reportedProgressMs = (int32)strtol(
@@ -1367,8 +1338,7 @@ PlayerWindow::_ApplyLibrespotTrackChanged(
 		_SchedulePlaybackPoll(0);
 		return;
 	}
-	fPendingLibrespotTrack.MakeEmpty();
-	fHasPendingLibrespotTrack = false;
+	_ClearPendingLibrespotTrack();
 	_ApplyPlaybackMessage(&msg);
 }
 
@@ -1377,22 +1347,32 @@ void
 PlayerWindow::_ApplyLibrespotPositionEvent(const std::string& event,
 	const std::map<std::string, std::string>& fields)
 {
+	std::string pendingUri = fHasPendingLibrespotTrack
+		? fPendingLibrespotTrack.GetString("track_uri", "") : "";
+	LibrespotPositionAction action = fLibrespotEvents.PositionAction(event == "playing",
+		LibrespotField(fields, "track_id"), fCurrentTrackUri, pendingUri);
+	if (action == LibrespotPositionAction::Refresh) {
+		// Never apply a position/playing event to another item's metadata.
+		_ClearPendingLibrespotTrack();
+		_SchedulePlaybackPoll(0);
+		return;
+	}
 	int32 positionMs = (int32)strtol(
 		LibrespotField(fields, "position_ms").c_str(), nullptr, 10);
-	if (event == "playing") {
-		fIsPlaying = true;
-		if (fHasPendingLibrespotTrack) {
-			BMessage pending(fPendingLibrespotTrack);
-			pending.ReplaceBool("is_playing", true);
-			pending.ReplaceInt32("progress_ms", positionMs);
-			fPendingLibrespotTrack.MakeEmpty();
-			fHasPendingLibrespotTrack = false;
-			_ApplyPlaybackMessage(&pending);
-			return;
-		}
-	} else if (event == "paused") {
-		fIsPlaying = false;
+	if (action == LibrespotPositionAction::ApplyPending) {
+		BMessage pending(fPendingLibrespotTrack);
+		pending.ReplaceBool("is_playing", true);
+		pending.ReplaceInt32("progress_ms", positionMs);
+		_ClearPendingLibrespotTrack();
+		_ApplyPlaybackMessage(&pending);
+		return;
 	}
+	bool playing = event == "playing" || (event != "paused" && fIsPlaying);
+	if (fLocalPlaybackPresentation.Defer(fCurrentTrackUri, false, playing, system_time())) {
+		_ScheduleVerifyPoll(kVerifyPollDelay);
+		return;
+	}
+	fIsPlaying = playing;
 	fProgressMs = positionMs;
 	fLastPlaybackSyncUs = system_time();
 	if (fPlayerBar) {
@@ -1714,6 +1694,7 @@ PlayerWindow::_TogglePlayPause()
 void
 PlayerWindow::_ResumePlayback(const std::string& deviceId)
 {
+	fLocalPlaybackPresentation.Cancel();
 	App* app = (App*)be_app;
 	SpotifyApi* api = app->GetApi();
 	if (!api)
@@ -1729,6 +1710,7 @@ PlayerWindow::_ResumePlayback(const std::string& deviceId)
 void
 PlayerWindow::_SkipNextTrack()
 {
+	fLocalPlaybackPresentation.Cancel();
 	if (_PlayNextAudiobookChapter())
 		return;
 
@@ -1760,17 +1742,17 @@ PlayerWindow::_PlayNextAudiobookChapter()
 	if (nextUri.empty())
 		return false;
 
-	BMessage play = MessageContracts::MakePlayCommand({nextUri.c_str()});
+	PlaybackCommand command{nextUri};
+	command.parentKind = "audiobook";
+	command.primaryOpenUri = fCurrentPrimaryOpenUri;
+	BMessage play = MessageContracts::MakePlayCommand(command);
 	play.AddString(MessageFields::Artist, fCurrentArtist.c_str());
 	play.AddString(kNowPlayingItemKindField, "chapter");
-	play.AddString(kNowPlayingPrimaryOpenUriField,
-		fCurrentPrimaryOpenUri.c_str());
 	play.AddString(kNowPlayingParentUriField, fCurrentParentUri.c_str());
-	play.AddString(kNowPlayingParentKindField, "audiobook");
 	play.AddString(kNowPlayingAudiobookIdField, fCurrentAudiobookId.c_str());
 	_ApplyOptimisticPlay(&play);
 
-	api->Playback().PlayTrack(nextUri, "", nullptr, 0, "");
+	DispatchPlaybackStart(api->Playback(), command, fShuffleOn, _ReportPlaybackStart);
 	_ScheduleVerifyPoll(kVerifyPollDelay);
 	return true;
 }
@@ -1779,6 +1761,7 @@ PlayerWindow::_PlayNextAudiobookChapter()
 void
 PlayerWindow::_SkipPreviousTrack()
 {
+	fLocalPlaybackPresentation.Cancel();
 	App* app = (App*)be_app;
 	SpotifyApi* api = app->GetApi();
 	if (!api)
@@ -2110,6 +2093,7 @@ PlayerWindow::_ApplyDeviceList(BMessage* message)
 void
 PlayerWindow::_TransferToDevice(BMessage* message)
 {
+	fLocalPlaybackPresentation.Cancel();
 	const char* id = nullptr;
 	if (message->FindString("id", &id) != B_OK || !id)
 		return;
@@ -2190,8 +2174,12 @@ PlayerWindow::_HandlePlaybackDeviceMessage(BMessage* message)
 				return true;
 			fPlaybackDevicePromptOpen = false;
 			if (result.cancelled) {
+				fLocalPlaybackPresentation.Cancel();
 				fPendingPlaybackCommand.MakeEmpty();
 				fHasPendingPlaybackCommand = false;
+				fLocalPlaybackDeviceAttempts = 0;
+				delete fLocalPlaybackDeviceTimer;
+				fLocalPlaybackDeviceTimer = nullptr;
 			}
 			return true;
 		}
