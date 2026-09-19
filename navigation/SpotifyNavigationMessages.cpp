@@ -1,5 +1,5 @@
 #include "SpotifyNavigationMessages.h"
-#include "MessageContracts.h"
+#include "messages/MessageContracts.h"
 
 #include <utility>
 

@@ -1,5 +1,5 @@
 #include "navigation/SpotifyNavigationMessages.h"
-#include "Messages.h"
+#include "messages/Messages.h"
 
 #include <cassert>
 #include <iostream>

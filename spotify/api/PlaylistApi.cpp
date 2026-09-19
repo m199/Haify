@@ -1,5 +1,5 @@
 #include "PlaylistApi.h"
-#include "HaifyDebug.h"
+#include "app/HaifyDebug.h"
 #include "SettingsController.h"
 #include "spotify/SpotifyPlaylistPolicy.h"
 #include "spotify/SpotifyUri.h"

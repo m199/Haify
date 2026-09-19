@@ -1,6 +1,6 @@
 #include "PlaylistEpisodeRows.h"
 
-#include "DescriptionTextFormatter.h"
+#include "ui/DescriptionTextFormatter.h"
 
 #include <ColumnTypes.h>
 #include <DateFormat.h>

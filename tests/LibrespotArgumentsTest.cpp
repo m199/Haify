@@ -1,6 +1,6 @@
 #include "playback/LibrespotArguments.h"
 #include "settings/SettingsController.h"
-#include "Config.h"
+#include "app/Config.h"
 
 #include <cassert>
 #include <iostream>

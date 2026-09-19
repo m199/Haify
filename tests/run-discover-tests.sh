@@ -1,11 +1,15 @@
 #!/bin/sh
-# Phase 3/4/5 regression tests on Haiku. Do not run before
+# Phase 3/4/5/6 regression tests on Haiku. Do not run before
 # build/test permission; this script compiles fixtures but never starts Haify.
 set -eu
 cd "$(dirname "$0")/.."
 test_output="${HAIFY_TEST_OUTPUT:-${TMPDIR:-/tmp}/haify-phase3-tests}"
 mkdir -p "$test_output"
 cxx="${CXX:-c++}"
+
+# Phase 6: version formatting uses native metadata types, no application or file I/O.
+"$cxx" -std=c++17 -Wall -Wextra -Werror -I. tests/AppVersionTest.cpp -o "$test_output/app-version"
+"$test_output/app-version"
 
 "$cxx" -std=c++17 -Wall -Wextra -Werror -I. tests/DiscoverTabPolicyTest.cpp -o "$test_output/tab-policy"
 "$test_output/tab-policy"
@@ -18,7 +22,7 @@ cxx="${CXX:-c++}"
 # Multi-character literals are the existing Haiku BMessage wire codes.
 "$cxx" -std=c++17 -Wall -Wextra -Werror -Wno-multichar -I. tests/DiscoverMessagesTest.cpp discover/DiscoverMessages.cpp -lbe -o "$test_output/discover-messages"
 "$test_output/discover-messages"
-"$cxx" -std=c++17 -Wall -Wextra -Werror -Wno-multichar -I. tests/MessageContractsTest.cpp PlaybackDeviceResolver.cpp -lbe -llocalestub -o "$test_output/message-contracts"
+"$cxx" -std=c++17 -Wall -Wextra -Werror -Wno-multichar -I. tests/MessageContractsTest.cpp playback/PlaybackDeviceResolver.cpp -lbe -llocalestub -o "$test_output/message-contracts"
 "$test_output/message-contracts"
 "$cxx" -std=c++17 -Wall -Wextra -Werror -I. -Inetwork tests/SpotifyRequestClientTest.cpp spotify/api/SpotifyRequestClient.cpp -lbe -o "$test_output/request-client"
 "$test_output/request-client"
@@ -71,7 +75,7 @@ session_sources="spotify/session/SpotifyAccountSession.cpp spotify/session/Spoti
 "$cxx" -std=c++17 -Wall -Wextra -Werror -I. tests/PlaylistPageStateTest.cpp playlist/PlaylistPageState.cpp playlist/PlaylistPageController.cpp playlist/PlaylistContent.cpp -o "$test_output/playlist-page-state"
 "$test_output/playlist-page-state"
 # Description parsing and link routing; no window, browser or mail app is opened.
-"$cxx" -std=c++17 -Wall -Wextra -Werror -I. tests/DescriptionTextFormatterTest.cpp DescriptionTextFormatter.cpp -lbe -o "$test_output/description-text-formatter"
+"$cxx" -std=c++17 -Wall -Wextra -Werror -I. tests/DescriptionTextFormatterTest.cpp ui/DescriptionTextFormatter.cpp -lbe -o "$test_output/description-text-formatter"
 "$test_output/description-text-formatter"
 # Phase 4d: removal state/dispatch and typed completion, without live writes.
 "$cxx" -std=c++17 -Wall -Wextra -Werror -I. tests/PlaylistRemovalControllerTest.cpp playlist/PlaylistRemovalController.cpp playlist/PlaylistPageState.cpp playlist/PlaylistPageController.cpp playlist/PlaylistContent.cpp -o "$test_output/playlist-removal-controller"

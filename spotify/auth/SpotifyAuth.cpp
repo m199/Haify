@@ -1,5 +1,5 @@
 #include "SpotifyAuth.h"
-#include "Config.h"
+#include "app/Config.h"
 #include "HttpClient.h"
 #include <nlohmann/json.hpp>
 

@@ -1,6 +1,6 @@
 #include "HttpClient.h"
 #include "HttpRequestCompletion.h"
-#include "HaifyDebug.h"
+#include "app/HaifyDebug.h"
 
 #include <DataIO.h>
 #include <HttpHeaders.h>

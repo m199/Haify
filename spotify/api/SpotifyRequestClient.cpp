@@ -1,6 +1,6 @@
 #include "SpotifyRequestClient.h"
-#include "Config.h"
-#include "HaifyDebug.h"
+#include "app/Config.h"
+#include "app/HaifyDebug.h"
 #include "HttpClient.h"
 
 #include <Autolock.h>

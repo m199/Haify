@@ -1,5 +1,5 @@
 #include "LibrespotArguments.h"
-#include "Config.h"
+#include "app/Config.h"
 #include "settings/SettingsController.h"
 
 #include <sstream>

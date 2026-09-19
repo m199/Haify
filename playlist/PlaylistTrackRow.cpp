@@ -1,6 +1,6 @@
 #include "PlaylistTrackRow.h"
 
-#include "DropMarkerStyle.h"
+#include "ui/drag/DropMarkerStyle.h"
 
 #include <Font.h>
 #include <InterfaceDefs.h>

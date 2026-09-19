@@ -1,8 +1,8 @@
-#include "MessageContracts.h"
-#include "PlaybackDeviceResolver.h"
+#include "messages/MessageContracts.h"
+#include "playback/PlaybackDeviceResolver.h"
 #include <nlohmann/json.hpp>
-#include "NowPlayingFields.h"
-#include "UiLogic.h"
+#include "playback/NowPlayingFields.h"
+#include "policy/UiLogic.h"
 
 #include <cassert>
 #include <cstdio>

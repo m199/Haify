@@ -1,6 +1,6 @@
 #include "JsonApiTestSupport.h"
 #include "spotify/api/PlaybackApi.h"
-#include "UiLogic.h"
+#include "policy/UiLogic.h"
 
 #include <cstdio>
 

@@ -4,7 +4,7 @@
 #include "DiscoverAsyncScope.h"
 #include "DiscoverPlaylistMutationController.h"
 #include "DiscoverLibraryWriteController.h"
-#include "Messages.h"
+#include "messages/Messages.h"
 
 #include <Message.h>
 

@@ -1,5 +1,5 @@
 #include "PlaylistCoverMessages.h"
-#include "Messages.h"
+#include "messages/Messages.h"
 #include <utility>
 
 static bool

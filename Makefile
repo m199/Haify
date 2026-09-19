@@ -1,15 +1,15 @@
 NAME = Haify
 TYPE = APP
 APP_MIME_SIG = application/x-vnd.Haify
-SRCS = App.cpp PlayerWindow.cpp NowPlayingItem.cpp NowPlayingItemMapper.cpp PlaylistWindow.cpp DiscoverWindow.cpp ArtistWindow.cpp EpisodeWindow.cpp AudiobookWindow.cpp QueueWindow.cpp SearchWindow.cpp SettingsWindow.cpp \
+SRCS = app/App.cpp ui/windows/PlayerWindow.cpp playback/NowPlayingItem.cpp playback/NowPlayingItemMapper.cpp ui/windows/PlaylistWindow.cpp ui/windows/DiscoverWindow.cpp ui/windows/ArtistWindow.cpp ui/windows/EpisodeWindow.cpp ui/windows/AudiobookWindow.cpp ui/windows/QueueWindow.cpp ui/windows/SearchWindow.cpp ui/windows/SettingsWindow.cpp \
 	playback/LibrespotArguments.cpp \
 	navigation/SpotifyNavigation.cpp navigation/SpotifyNavigationMessages.cpp \
 	spotify/session/SpotifyAccountSession.cpp spotify/session/SpotifyCredentialStore.cpp \
 	spotify/session/SpotifySessionMessages.cpp \
-	DeskbarReplicantView.cpp \
-	ArtworkReplicantView.cpp ArtworkWindow.cpp \
-	PlayerBarView.cpp PlaybackSeekBarView.cpp PlaybackDevicePromptWindow.cpp PlaybackDeviceResolver.cpp IconButtonView.cpp ClickableLabelView.cpp \
-	ArtworkView.cpp MediaDescriptionView.cpp DescriptionTextFormatter.cpp DiscoverListView.cpp TrackContextMenu.cpp TextInputDialog.cpp \
+	ui/replicants/DeskbarReplicantView.cpp \
+	ui/replicants/ArtworkReplicantView.cpp ui/windows/ArtworkWindow.cpp \
+	ui/views/PlayerBarView.cpp ui/views/PlaybackSeekBarView.cpp ui/dialogs/PlaybackDevicePromptWindow.cpp playback/PlaybackDeviceResolver.cpp ui/views/IconButtonView.cpp ui/views/ClickableLabelView.cpp \
+	ui/views/ArtworkView.cpp ui/views/MediaDescriptionView.cpp ui/DescriptionTextFormatter.cpp ui/views/DiscoverListView.cpp ui/menus/TrackContextMenu.cpp ui/dialogs/TextInputDialog.cpp \
 	network/HttpClient.cpp network/OAuthCallbackServer.cpp network/ImageCache.cpp \
 	playback/PlaybackStartController.cpp \
 	playback/LibrespotTransferController.cpp \
@@ -51,7 +51,7 @@ SRCS = App.cpp PlayerWindow.cpp NowPlayingItem.cpp NowPlayingItemMapper.cpp Play
 	discover/DiscoverPlaylistMutationController.cpp \
 	discover/DiscoverPlaylistRequests.cpp \
 	settings/SettingsController.cpp
-RDEFS = Haify.rdef
+RDEFS = resources/Haify.rdef
 RSRCS =
 LIBS = be translation tracker network netservices bnetapi shared localestub stdc++ columnlistview
 LOCALES = en de

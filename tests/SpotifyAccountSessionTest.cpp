@@ -4,7 +4,7 @@
 #include "spotify/session/SpotifyCredentialStore.h"
 #include "spotify/SpotifyCapabilities.h"
 #include "spotify/api/SpotifyResponse.h"
-#include "Config.h"
+#include "app/Config.h"
 
 #include <iostream>
 

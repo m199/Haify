@@ -1,7 +1,7 @@
 #include "SpotifyCredentialStore.h"
 #include "SpotifySessionPolicy.h"
 #include "spotify/api/SpotifyApi.h"
-#include "Config.h"
+#include "app/Config.h"
 
 SpotifyCredentialResult
 StoreSpotifyCredentials(SpotifyApi& api, const TokenResult& token)

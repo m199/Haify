@@ -1,5 +1,5 @@
 #include "PlaylistMetadataMessages.h"
-#include "Messages.h"
+#include "messages/Messages.h"
 
 #include <utility>
 

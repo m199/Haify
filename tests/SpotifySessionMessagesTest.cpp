@@ -1,6 +1,6 @@
 #include "SpotifySessionTestSupport.h"
 #include "spotify/session/SpotifySessionMessages.h"
-#include "MessageContracts.h"
+#include "messages/MessageContracts.h"
 #include "spotify/SpotifyCapabilities.h"
 
 #include <iostream>

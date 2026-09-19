@@ -1,12 +1,12 @@
 #include "PlaylistTrackListView.h"
 
-#include "DropMarkerStyle.h"
-#include "HaifyDragState.h"
-#include "HaifyDebug.h"
-#include "Messages.h"
-#include "MessageContracts.h"
+#include "ui/drag/DropMarkerStyle.h"
+#include "ui/drag/HaifyDragState.h"
+#include "app/HaifyDebug.h"
+#include "messages/Messages.h"
+#include "messages/MessageContracts.h"
 #include "PlaylistTrackRow.h"
-#include "PlaylistWindow.h"
+#include "ui/windows/PlaylistWindow.h"
 #include "spotify/SpotifyUri.h"
 
 #include <Application.h>

@@ -1,5 +1,5 @@
 #include "JsonApiTestSupport.h"
-#include "HaifyDebug.h"
+#include "app/HaifyDebug.h"
 #include "settings/SettingsController.h"
 #include "spotify/api/PlaylistApi.h"
 

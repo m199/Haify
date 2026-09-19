@@ -1,4 +1,4 @@
-#include "HaifyDebug.h"
+#include "app/HaifyDebug.h"
 #include "spotify/api/SpotifyRequestClient.h"
 #include "network/HttpClient.h"
 

@@ -1,5 +1,5 @@
 #include "PlaylistRemovalMessages.h"
-#include "Messages.h"
+#include "messages/Messages.h"
 
 BMessage
 MakePlaylistRemovalMessage(const PlaylistRemovalResult& result)

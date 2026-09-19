@@ -1,5 +1,5 @@
 #include "SettingsController.h"
-#include "Config.h"
+#include "app/Config.h"
 
 #include <Directory.h>
 #include <Autolock.h>

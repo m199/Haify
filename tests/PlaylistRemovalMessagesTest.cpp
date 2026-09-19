@@ -1,5 +1,5 @@
 #include "playlist/PlaylistRemovalMessages.h"
-#include "Messages.h"
+#include "messages/Messages.h"
 
 #include <cassert>
 #include <cstdio>

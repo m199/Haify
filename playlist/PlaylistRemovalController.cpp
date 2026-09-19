@@ -1,6 +1,6 @@
 #include "PlaylistRemovalController.h"
 #include "PlaylistMutationResponse.h"
-#include "UiLogic.h"
+#include "policy/UiLogic.h"
 
 #include <algorithm>
 #include <limits>

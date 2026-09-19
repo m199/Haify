@@ -1,7 +1,7 @@
 #pragma once
 
-#include "DropMarkerController.h"
-#include "DragItem.h"
+#include "ui/drag/DropMarkerController.h"
+#include "messages/DragItem.h"
 
 #include <ColumnListView.h>
 #include <InterfaceDefs.h>
