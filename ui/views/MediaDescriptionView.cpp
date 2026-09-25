@@ -1,5 +1,7 @@
 #include "ui/views/MediaDescriptionView.h"
+#include "ui/MediaWindowScale.h"
 
+#include <AppDefs.h>
 #include <Application.h>
 #include <Cursor.h>
 #include <InterfaceDefs.h>
@@ -63,6 +65,24 @@ MediaDescriptionView::FrameResized(float width, float height)
 		_ResetToTop();
 		fResetOnNextResize = false;
 	}
+}
+
+
+void
+MediaDescriptionView::MessageReceived(BMessage* message)
+{
+	if (message->what == B_FONTS_UPDATED) {
+		MediaWindowScale::ApplyTextSize(this);
+		// Existing link offsets and selection stay valid; an in-progress click
+		// cannot be completed against coordinates from the previous font size.
+		fPendingLink = false;
+		fPendingLinkUrl.clear();
+		fResetOnNextResize = false;
+		_UpdateTextRect();
+		Invalidate();
+		return;
+	}
+	BTextView::MessageReceived(message);
 }
 
 

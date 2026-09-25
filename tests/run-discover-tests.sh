@@ -102,3 +102,13 @@ session_sources="spotify/session/SpotifyAccountSession.cpp spotify/session/Spoti
 # Server coordinates remain correct when unavailable items are omitted from UI.
 "$cxx" -std=c++17 -Wall -Wextra -Werror -I. tests/PlaylistReorderPositionsTest.cpp playlist/PlaylistReorderController.cpp -o "$test_output/playlist-reorder-positions"
 "$test_output/playlist-reorder-positions"
+# Phase 7a: font scaling and shared player geometry, without a Haiku runtime.
+"$cxx" -std=c++17 -Wall -Wextra -Werror -I. tests/UiMetricsTest.cpp -o "$test_output/ui-metrics"
+"$test_output/ui-metrics"
+# Phase 7d: native text style/selection preservation; requires Haiku app_server.
+"$cxx" -std=c++17 -Wall -Wextra -Werror -I. tests/MediaWindowScaleTest.cpp -lbe -o "$test_output/media-window-scale"
+"$test_output/media-window-scale"
+# Phase 7e: ColumnListView row identity/rollback, requires Haiku app_server.
+# The fixture supplies SettingsController::Load() with in-memory defaults.
+"$cxx" -std=c++17 -Wall -Wextra -Werror -Wno-multichar -I. -I/boot/system/develop/headers/private/interface tests/ListRowScaleTest.cpp ui/views/FontScaledListView.cpp ui/views/DiscoverListView.cpp playlist/PlaylistTrackRow.cpp -lbe -lcolumnlistview -o "$test_output/list-row-scale"
+"$test_output/list-row-scale"

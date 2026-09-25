@@ -51,6 +51,8 @@ public:
 	void					ShowContextMenu(BView* target, BPoint where, BPoint screenWhere);
 
 private:
+	void _RefreshFonts();
+	void _ApplyPodcastHeaderMetrics();
 	void					_InitMenu();
 	void					_InitLayout(const char* playlistName);
 	void					_InitTrackList(SpotifyItemKind kind);
@@ -204,6 +206,7 @@ private:
 	BMenuItem*				fPlaylistCoverItem	= nullptr;
 	BMenuItem*				fPlaylistClearItem	= nullptr;
 	BView*					fCoverView = nullptr;
+	BView* fAlbumHeaderInfo = nullptr;
 	BTextView*				fPlaylistName = nullptr;
 	BStringView*			fPlaylistInfo = nullptr;
 	TrackListView*		    fTrackList = nullptr;

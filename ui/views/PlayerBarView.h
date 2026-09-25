@@ -10,6 +10,7 @@
 class BBitmap;
 class BButton;
 class BDragger;
+class BGroupLayout;
 class BMessageRunner;
 class BSlider;
 class BView;
@@ -57,6 +58,9 @@ public:
 
 private:
     void    _BuildUI();
+    void    _ApplyLayoutMetrics();
+    void    _RefreshFonts();
+    void    _ApplyReplicantSizeLimits();
     void    _ApplyTarget();
     void    _UpdatePlaybackPosition(bigtime_t pos, bigtime_t duration);
     void    _UpdateTimeLabels(bigtime_t pos, bigtime_t duration);
@@ -102,6 +106,9 @@ private:
     VolumeIconView*         fVolumeLabel    = nullptr;
     PlaybackSeekBarView*    fSeekBar        = nullptr;
     BSlider*                fVolumeSlider   = nullptr;
+    // Borrowed from the view's layout tree; updated without rebuilding controls.
+    BGroupLayout*           fTrackInfoLayout = nullptr;
+    BGroupLayout*           fAddTrackLayout = nullptr;
 
     BBitmap*                fIcoPlay          = nullptr;
     BBitmap*                fIcoPause         = nullptr;

@@ -7,6 +7,7 @@ SRCS = app/App.cpp ui/windows/PlayerWindow.cpp playback/NowPlayingItem.cpp playb
 	spotify/session/SpotifyAccountSession.cpp spotify/session/SpotifyCredentialStore.cpp \
 	spotify/session/SpotifySessionMessages.cpp \
 	ui/replicants/DeskbarReplicantView.cpp \
+	ui/views/FontScaledListView.cpp \
 	ui/replicants/ArtworkReplicantView.cpp ui/windows/ArtworkWindow.cpp \
 	ui/views/PlayerBarView.cpp ui/views/PlaybackSeekBarView.cpp ui/dialogs/PlaybackDevicePromptWindow.cpp playback/PlaybackDeviceResolver.cpp ui/views/IconButtonView.cpp ui/views/ClickableLabelView.cpp \
 	ui/views/ArtworkView.cpp ui/views/MediaDescriptionView.cpp ui/DescriptionTextFormatter.cpp ui/views/DiscoverListView.cpp ui/menus/TrackContextMenu.cpp ui/dialogs/TextInputDialog.cpp \

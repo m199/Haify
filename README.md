@@ -28,6 +28,8 @@ feature directories. See [project structure](docs/project-structure.md).
 From the repository root, `python3 tools/check-project-layout.py` checks source,
 include and test paths without compiling. Regression tests and the build still
 run from the root; see the [release checklist](docs/release-checklist.md).
+After updating to the reorganized source layout, run `make clean` before `make`
+to discard dependency files that still refer to the old header locations.
 
 ## Using Haify
 

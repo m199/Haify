@@ -215,7 +215,7 @@ private:
 TrackListView::TrackListView(const char* name, uint32 flags,
 	border_style border, bool showHorizontalScrollbar)
 	:
-	BColumnListView(name, flags, border, showHorizontalScrollbar),
+	FontScaledListView(name, flags, border, showHorizontalScrollbar),
 	fDropMarker(this, [](BRow* row, int32 position, bool target) {
 		TrackRow* trackRow = dynamic_cast<TrackRow*>(row);
 		(void)target;
@@ -234,7 +234,7 @@ TrackListView::~TrackListView()
 void
 TrackListView::AttachedToWindow()
 {
-	BColumnListView::AttachedToWindow();
+	FontScaledListView::AttachedToWindow();
 	if (BView* outline = ScrollView()) {
 		outline->AddFilter(new MouseDownFilter(this));
 		outline->AddFilter(new MouseUpFilter(this));
@@ -274,6 +274,11 @@ TrackListView::MouseDown(BPoint point)
 void
 TrackListView::MessageReceived(BMessage* message)
 {
+	if (message->what == B_FONTS_UPDATED) {
+		ClearDropMarker();
+		fDeferredGroupClick = false;
+		fPreserveGroupOnMouseDown = false;
+	}
 	if (message->what == kMsgDropMarkerCleanup) {
 		_ClearDropMarkerIfDragEnded();
 		return;
@@ -301,7 +306,7 @@ TrackListView::MessageReceived(BMessage* message)
 		Window()->PostMessage(message);
 		return;
 	}
-	BColumnListView::MessageReceived(message);
+	FontScaledListView::MessageReceived(message);
 }
 
 
@@ -499,6 +504,8 @@ TrackListView::Draw(BRect update)
 void
 TrackListView::SelectionChanged()
 {
+	if (IsResizingRows())
+		return;
 	if (fPreserveGroupOnMouseDown) {
 		fPreserveGroupOnMouseDown = false;
 		// Native MouseDown just selected the grabbed row. Restore the rest before

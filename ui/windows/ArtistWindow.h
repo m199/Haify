@@ -7,6 +7,7 @@ class BColumnListView;
 class BMessageRunner;
 class BStringView;
 class BButton;
+class BGroupLayout;
 class ArtworkView;
 
 class ArtistWindow : public BWindow {
@@ -18,6 +19,7 @@ public:
 	void					ShowTrackContextMenu(BPoint local, BPoint screen);
 
 private:
+	void _RefreshFonts();
 	void					_LoadData();
 	void					_LoadTopTracks(bool resetRetryCount);
 	void					_LoadArtwork(const std::string& url);
@@ -53,6 +55,8 @@ private:
 	BStringView*			fNameView		= nullptr;
 	BStringView*			fFollowersView	= nullptr;
 	BStringView*			fTracksLabel	= nullptr;
+	BStringView* fAlbumsLabel = nullptr;
+	BGroupLayout* fFollowerLayout = nullptr; // Owned by the layout tree.
 	BButton*				fFollowButton	= nullptr;
 	BMessageRunner*			fTopTracksRetryRunner = nullptr;
 	bool					fFollowing		= false;

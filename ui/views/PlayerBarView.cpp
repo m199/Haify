@@ -7,6 +7,11 @@
 #include "spotify/SpotifyUri.h"
 #include "policy/UiLogic.h"
 #include "ui/UiScale.h"
+#include "ui/PlayerControlMetrics.h"
+#include "ui/ReplicantHandleMetrics.h"
+#include <AppDefs.h>
+#include <GridLayout.h>
+#include <GroupLayout.h>
 #include <Message.h>
 #include <MessageRunner.h>
 #include <Dragger.h>
@@ -20,9 +25,6 @@
 static const uint32 kMsgTick        = 'tik!';
 static const uint32 kMsgRefreshReplicantColor = 'rrcl';
 static const char* kNoTrackText     = "Waiting for track information...";
-static const float kMinimumPlayerBarHeight = 62.0f;
-static const float kDraggerRightInset = 8.0f;
-static const float kDraggerBottomInset = 3.0f;
 static const rgb_color kBlack       = { 0, 0, 0, 255 };
 static const rgb_color kWhite       = { 255, 255, 255, 255 };
 
@@ -112,79 +114,11 @@ _ColorsEqual(rgb_color first, rgb_color second)
 }
 
 
-static float
-_FontLineHeight()
+static PlayerBarMetrics
+_CurrentPlayerMetrics(float scale)
 {
-    return UiScale::LineHeight();
-}
-
-
-static float
-_FontScale()
-{
-    return UiScale::FontScale();
-}
-
-
-static float
-_ControlHeight(float scale)
-{
-    return std::max(20.0f * scale, _FontLineHeight() + 8.0f);
-}
-
-
-static float
-_ButtonSide(float scale)
-{
-    return std::max(24.0f * scale, _ControlHeight(scale) + 2.0f);
-}
-
-
-static float
-_IconSize(float scale)
-{
-    return std::max(18.0f * scale, _ControlHeight(scale) - 8.0f);
-}
-
-
-static float
-_TimeLabelWidth(float scale)
-{
-    return std::max(36.0f * scale,
-        std::ceil(be_plain_font->StringWidth("00:00") + 8.0f));
-}
-
-
-static float
-_SliderTopInset(float scale)
-{
-    return std::max(4.0f * scale, std::ceil(_FontLineHeight() * 0.22f));
-}
-
-
-static float
-_PlayerBarHeight(float scale)
-{
-    float inset = std::max(5.0f * scale,
-        std::ceil(_FontLineHeight() * 0.28f));
-    float rowSpacing = std::max(3.0f * scale,
-        std::ceil(_FontLineHeight() * 0.18f));
-    return std::max(kMinimumPlayerBarHeight * scale,
-        _ControlHeight(scale) * 2.0f + rowSpacing + inset * 2.0f + 4.0f);
-}
-
-
-static float
-_OuterInset(float scale)
-{
-    return std::max(5.0f * scale, std::ceil(_FontLineHeight() * 0.28f));
-}
-
-
-static float
-_RowSpacing(float scale)
-{
-    return std::max(3.0f * scale, std::ceil(_FontLineHeight() * 0.18f));
+    return ResolvePlayerBarMetrics(scale, UiScale::LineHeight(),
+        be_plain_font->StringWidth("00:00"));
 }
 
 
@@ -714,6 +648,16 @@ _LoadVectorIcon(int32 resId, float size)
 }
 
 static void
+_ReplaceVectorIcon(BBitmap*& icon, int32 resourceId, float size)
+{
+    BBitmap* replacement = _LoadVectorIcon(resourceId, size);
+    if (!replacement)
+        return;
+    delete icon;
+    icon = replacement;
+}
+
+static void
 _ApplyButtonIcon(BButton* button, BBitmap* icon)
 {
     if (button && icon && button->SetIcon(icon) == B_OK)
@@ -746,7 +690,7 @@ PlayerBarView::PlayerBarView()
             B_WILL_DRAW | B_FRAME_EVENTS | B_FULL_UPDATE_ON_RESIZE
                 | B_SUPPORTS_LAYOUT)
 {
-    fLayoutScale = _FontScale();
+    fLayoutScale = UiScale::FontScale();
     SetViewColor(ui_color(B_PANEL_BACKGROUND_COLOR));
     SetLowColor(ui_color(B_PANEL_BACKGROUND_COLOR));
     _BuildUI();
@@ -756,7 +700,7 @@ PlayerBarView::PlayerBarView()
 PlayerBarView::PlayerBarView(BMessage* archive)
     : BView(archive)
 {
-    fLayoutScale = _FontScale();
+    fLayoutScale = UiScale::FontScale();
     SetFlags(Flags() | B_WILL_DRAW | B_FRAME_EVENTS
         | B_FULL_UPDATE_ON_RESIZE | B_SUPPORTS_LAYOUT);
     SetViewColor(ui_color(B_PANEL_BACKGROUND_COLOR));
@@ -819,117 +763,58 @@ status_t PlayerBarView::Archive(BMessage* data, bool) const {
 }
 
 void PlayerBarView::_BuildUI() {
-    const float lineHeight = _ControlHeight(fLayoutScale);
-    const float buttonSide = _ButtonSide(fLayoutScale);
-    const float iconSize = _IconSize(fLayoutScale);
-    const float timeWidth = _TimeLabelWidth(fLayoutScale);
-    const float fontScale = _FontScale();
-    BFont uiFont(*be_plain_font);
-    if (fLayoutScale > fontScale)
-        uiFont.SetSize(uiFont.Size() * (fLayoutScale / fontScale));
-
     fTrackInfoView = new TrackInfoView();
-    fTrackInfoView->SetFont(&uiFont);
     fTrackInfoView->SetExplicitMinSize(BSize(0.0f, B_SIZE_UNSET));
     fTrackInfoView->SetExplicitAlignment(
         BAlignment(B_ALIGN_USE_FULL_WIDTH, B_ALIGN_VERTICAL_CENTER));
 
     fAddTrackButton = new BButton("addTrack", "+",
         new BMessage(MSG_SHOW_ADD_TRACK_MENU));
-    fAddTrackButton->SetFont(&uiFont);
-    fAddTrackButton->SetExplicitMinSize(BSize(buttonSide, lineHeight));
-    fAddTrackButton->SetExplicitPreferredSize(BSize(buttonSide, lineHeight));
-    fAddTrackButton->SetExplicitMaxSize(BSize(buttonSide, lineHeight));
     fAddTrackButton->SetExplicitAlignment(
         BAlignment(B_ALIGN_RIGHT, B_ALIGN_VERTICAL_CENTER));
     fAddTrackButton->SetEnabled(false);
 
     fShuffleButton = new BButton("shuffle", "S", new BMessage(MSG_TOGGLE_SHUFFLE));
-    fPrevButton   = new BButton("previous",  "<", new BMessage(MSG_PREV_TRACK));
+    fPrevButton   = new BButton("previous", "<", new BMessage(MSG_PREV_TRACK));
     fPlayButton   = new BButton("playPause", ">", new BMessage(MSG_PLAY_PAUSE));
-    fNextButton   = new BButton("next",      ">", new BMessage(MSG_NEXT_TRACK));
-    fRepeatButton = new BButton("repeat",    "R", new BMessage(MSG_TOGGLE_REPEAT));
-    BButton* transportButtons[] = {
-        fShuffleButton, fPrevButton, fPlayButton, fNextButton, fRepeatButton
-    };
-    for (BButton* button : transportButtons) {
-        button->SetFont(&uiFont);
-        button->SetExplicitMinSize(BSize(buttonSide, lineHeight));
-        button->SetExplicitPreferredSize(BSize(buttonSide, lineHeight));
-        button->SetExplicitMaxSize(BSize(buttonSide, lineHeight));
-    }
+    fNextButton   = new BButton("next", ">", new BMessage(MSG_NEXT_TRACK));
+    fRepeatButton = new BButton("repeat", "R", new BMessage(MSG_TOGGLE_REPEAT));
 
     fPositionView = new TimeLabelView("position", "0:00");
-    fPositionView->SetFont(&uiFont);
     fPositionView->SetAlignment(B_ALIGN_RIGHT);
-    fPositionView->SetExplicitMinSize(BSize(timeWidth, lineHeight));
-    fPositionView->SetExplicitMaxSize(BSize(timeWidth, lineHeight));
     fPositionView->SetExplicitAlignment(
         BAlignment(B_ALIGN_RIGHT, B_ALIGN_VERTICAL_CENTER));
-
     fDurationView = new TimeLabelView("duration", "0:00");
-    fDurationView->SetFont(&uiFont);
-    fDurationView->SetExplicitMinSize(BSize(timeWidth, lineHeight));
-    fDurationView->SetExplicitMaxSize(BSize(timeWidth, lineHeight));
     fDurationView->SetExplicitAlignment(
         BAlignment(B_ALIGN_LEFT, B_ALIGN_VERTICAL_CENTER));
 
     fSeekBar = new PlaybackSeekBarView("seekBar");
-    fSeekBar->SetLayoutScale(fLayoutScale);
-    fSeekBar->SetExplicitMinSize(BSize(120.0f * fLayoutScale, lineHeight));
-    fSeekBar->SetExplicitPreferredSize(BSize(240.0f * fLayoutScale,
-        lineHeight));
-    fSeekBar->SetExplicitMaxSize(BSize(B_SIZE_UNLIMITED, lineHeight));
     fSeekBar->SetExplicitAlignment(
         BAlignment(B_ALIGN_USE_FULL_WIDTH, B_ALIGN_VERTICAL_CENTER));
-
     fVolumeLabel = new VolumeIconView();
-    fVolumeLabel->SetExplicitMinSize(BSize(iconSize, lineHeight));
-    fVolumeLabel->SetExplicitMaxSize(BSize(iconSize, lineHeight));
     fVolumeLabel->SetExplicitAlignment(
         BAlignment(B_ALIGN_LEFT, B_ALIGN_VERTICAL_CENTER));
-
-    OffsetSlider* volumeSlider = new OffsetSlider("volume", "",
+    fVolumeSlider = new OffsetSlider("volume", "",
         new BMessage(MSG_SET_VOLUME), 0, 100, B_HORIZONTAL,
         B_TRIANGLE_THUMB);
-    volumeSlider->SetBarOffset(_SliderTopInset(fLayoutScale));
-    fVolumeSlider = volumeSlider;
-    fVolumeSlider->SetFont(&uiFont);
     fVolumeSlider->SetHashMarks(B_HASH_MARKS_NONE);
-    fVolumeSlider->SetBarThickness(std::max(4.0f,
-        std::floor(lineHeight * 0.20f)));
     fVolumeSlider->SetModificationMessage(new BMessage(MSG_SET_VOLUME));
-    fVolumeSlider->SetExplicitMinSize(BSize(std::max(90.0f * fLayoutScale,
-        lineHeight * 4.0f), lineHeight));
-    fVolumeSlider->SetExplicitPreferredSize(BSize(std::max(
-        110.0f * fLayoutScale, lineHeight * 5.0f), lineHeight));
-    fVolumeSlider->SetExplicitMaxSize(BSize(std::max(120.0f * fLayoutScale,
-        lineHeight * 5.5f), lineHeight));
     fVolumeSlider->SetExplicitAlignment(
         BAlignment(B_ALIGN_USE_FULL_WIDTH, B_ALIGN_VERTICAL_CENTER));
 
     fDragger = new BDragger(this);
-    float draggerSize = std::max(8.0f, 8.0f * fLayoutScale);
-    fDragger->SetExplicitMinSize(BSize(draggerSize, draggerSize));
-    fDragger->SetExplicitPreferredSize(BSize(draggerSize, draggerSize));
-    fDragger->SetExplicitMaxSize(BSize(draggerSize, draggerSize));
     fDragger->SetExplicitAlignment(
         BAlignment(B_ALIGN_RIGHT, B_ALIGN_BOTTOM));
 
-    const float trackInfoInset = 2.0f * fLayoutScale;
-
-    BLayoutBuilder::Grid<>(this, B_USE_SMALL_SPACING,
-            _RowSpacing(fLayoutScale))
-        .SetInsets(_OuterInset(fLayoutScale), _OuterInset(fLayoutScale),
-            _OuterInset(fLayoutScale), _OuterInset(fLayoutScale))
+    BLayoutBuilder::Grid<>(this, B_USE_SMALL_SPACING, 0)
         .AddGroup(B_HORIZONTAL, 0, 0, 0, 5)
-            .AddStrut(trackInfoInset)
+            .GetLayout(&fTrackInfoLayout)
             .Add(fTrackInfoView, 1.0f)
         .End()
         .AddGroup(B_HORIZONTAL, 0, 5, 0, 1)
+            .GetLayout(&fAddTrackLayout)
             .AddGlue()
             .Add(fAddTrackButton)
-            .AddStrut(6.0f * fLayoutScale)
         .End()
         .AddGroup(B_HORIZONTAL, 1.0f, 0, 1)
             .Add(fShuffleButton)
@@ -947,33 +832,121 @@ void PlayerBarView::_BuildUI() {
         .SetColumnWeight(2, 1.0f)
     .End();
 
-    const float playerBarHeight = _PlayerBarHeight(fLayoutScale);
-    SetExplicitMinSize(BSize(0.0f, playerBarHeight));
-    SetExplicitPreferredSize(BSize(B_SIZE_UNSET, playerBarHeight));
-    SetExplicitMaxSize(BSize(B_SIZE_UNLIMITED, playerBarHeight));
+    _ApplyLayoutMetrics();
+    _ApplySeekBarColors();
+}
 
-	_ApplySeekBarColors();
+void PlayerBarView::_ApplyLayoutMetrics()
+{
+    fLayoutScale = UiScale::FontScale();
+    const auto metrics = _CurrentPlayerMetrics(fLayoutScale);
+    BFont uiFont(*be_plain_font);
+    fTrackInfoView->SetFont(&uiFont);
+    fTrackInfoView->Invalidate();
+    BButton* buttons[] = {fAddTrackButton, fShuffleButton, fPrevButton,
+        fPlayButton, fNextButton, fRepeatButton};
+    for (BButton* button : buttons) {
+        button->SetFont(&uiFont);
+        BSize size(metrics.buttonWidth, metrics.controlHeight);
+        button->SetExplicitMinSize(size);
+        button->SetExplicitPreferredSize(size);
+        button->SetExplicitMaxSize(size);
+    }
+    TimeLabelView* labels[] = {fPositionView, fDurationView};
+    for (TimeLabelView* label : labels) {
+        label->SetFont(&uiFont);
+        BSize size(metrics.timeWidth, metrics.controlHeight);
+        label->SetExplicitMinSize(size);
+        label->SetExplicitMaxSize(size);
+        label->Invalidate();
+    }
+    fSeekBar->SetLayoutScale(fLayoutScale);
+    fSeekBar->SetExplicitMinSize(BSize(metrics.seekMinWidth,
+        metrics.controlHeight));
+    fSeekBar->SetExplicitPreferredSize(BSize(metrics.seekPreferredWidth,
+        metrics.controlHeight));
+    fSeekBar->SetExplicitMaxSize(BSize(B_SIZE_UNLIMITED, metrics.controlHeight));
+    fSeekBar->Invalidate();
+    fVolumeLabel->SetExplicitMinSize(BSize(metrics.iconSize, metrics.controlHeight));
+    fVolumeLabel->SetExplicitMaxSize(BSize(metrics.iconSize, metrics.controlHeight));
+    fVolumeSlider->SetFont(&uiFont);
+    static_cast<OffsetSlider*>(fVolumeSlider)->SetBarOffset(metrics.volumeTopInset);
+    fVolumeSlider->SetBarThickness(metrics.volumeThickness);
+    fVolumeSlider->SetExplicitMinSize(BSize(metrics.volumeMinWidth,
+        metrics.controlHeight));
+    fVolumeSlider->SetExplicitPreferredSize(BSize(metrics.volumePreferredWidth,
+        metrics.controlHeight));
+    fVolumeSlider->SetExplicitMaxSize(BSize(metrics.volumeMaxWidth,
+        metrics.controlHeight));
+    fVolumeSlider->Invalidate();
+    BSize draggerSize(metrics.draggerSize, metrics.draggerSize);
+    fDragger->SetExplicitMinSize(draggerSize);
+    fDragger->SetExplicitPreferredSize(draggerSize);
+    fDragger->SetExplicitMaxSize(draggerSize);
+
+    auto* grid = static_cast<BGridLayout*>(GetLayout());
+    grid->SetSpacing(B_USE_SMALL_SPACING, metrics.rowSpacing);
+    grid->SetInsets(metrics.outerInset, metrics.outerInset,
+        metrics.outerInset, metrics.outerInset);
+    fTrackInfoLayout->SetInsets(metrics.trackInfoInset, 0, 0, 0);
+    fAddTrackLayout->SetInsets(0, 0, metrics.addButtonInset, 0);
+    // The grid's minimum width must reach the host window at larger fonts.
+    SetExplicitMinSize(BSize(B_SIZE_UNSET, metrics.barHeight));
+    SetExplicitPreferredSize(BSize(B_SIZE_UNSET, metrics.barHeight));
+    SetExplicitMaxSize(BSize(B_SIZE_UNLIMITED, metrics.barHeight));
+    InvalidateLayout();
+}
+
+void PlayerBarView::_RefreshFonts()
+{
+    _ApplyLayoutMetrics();
+    _LoadButtonIcons();
+    _ApplyReplicantSizeLimits();
+    _LayoutDragger();
+    Invalidate();
+}
+
+void PlayerBarView::_ApplyReplicantSizeLimits()
+{
+    if (!fIsReplicant)
+        return;
+    const BSize minimum = MinSize();
+    const float width = std::max(Bounds().Width(), minimum.width - 1.0f);
+    const float height = minimum.height - 1.0f;
+    if (Bounds().Width() != width || Bounds().Height() != height)
+        ResizeTo(width, height);
 }
 
 void PlayerBarView::_LoadButtonIcons() {
-    const float iconSize = _IconSize(fLayoutScale);
-    fIcoPlay = _LoadVectorIcon(2001, iconSize);
-    fIcoPause = _LoadVectorIcon(2003, iconSize);
-    fIcoPrev = _LoadVectorIcon(2005, iconSize);
-    fIcoNext = _LoadVectorIcon(2006, iconSize);
-    fIcoShuffle = _LoadVectorIcon(2007, iconSize);
-    fIcoShuffleActive = _LoadVectorIcon(2008, iconSize);
-    fIcoRepeat = _LoadVectorIcon(2010, iconSize);
-    fIcoRepeatContext = _LoadVectorIcon(2011, iconSize);
-    fIcoRepeatTrack = _LoadVectorIcon(2012, iconSize);
-    fIcoVolumeMuted = _LoadVectorIcon(2013, iconSize);
-    fIcoVolume = _LoadVectorIcon(2014, iconSize);
+    const float iconSize = _CurrentPlayerMetrics(fLayoutScale).iconSize;
+    // VolumeIconView borrows its bitmap; buttons retain their own icon copies.
+    fVolumeLabel->SetIcon(nullptr);
+    _ReplaceVectorIcon(fIcoPlay, 2001, iconSize);
+    _ReplaceVectorIcon(fIcoPause, 2003, iconSize);
+    _ReplaceVectorIcon(fIcoPrev, 2005, iconSize);
+    _ReplaceVectorIcon(fIcoNext, 2006, iconSize);
+    _ReplaceVectorIcon(fIcoShuffle, 2007, iconSize);
+    _ReplaceVectorIcon(fIcoShuffleActive, 2008, iconSize);
+    _ReplaceVectorIcon(fIcoRepeat, 2010, iconSize);
+    _ReplaceVectorIcon(fIcoRepeatContext, 2011, iconSize);
+    _ReplaceVectorIcon(fIcoRepeatTrack, 2012, iconSize);
+    _ReplaceVectorIcon(fIcoVolumeMuted, 2013, iconSize);
+    _ReplaceVectorIcon(fIcoVolume, 2014, iconSize);
+    BButton* buttons[] = {fShuffleButton, fPrevButton, fPlayButton,
+        fNextButton, fRepeatButton};
+    for (BButton* button : buttons)
+        button->SetIcon(nullptr);
 
-    _ApplyButtonIcon(fShuffleButton, fIcoShuffle);
+    _ApplyButtonIcon(fShuffleButton, fShuffleOn ? fIcoShuffleActive : fIcoShuffle);
     _ApplyButtonIcon(fPrevButton, fIcoPrev);
-    _ApplyButtonIcon(fPlayButton, fIcoPlay);
+    _ApplyButtonIcon(fPlayButton, fIsPlaying ? fIcoPause : fIcoPlay);
     _ApplyButtonIcon(fNextButton, fIcoNext);
-    _ApplyButtonIcon(fRepeatButton, fIcoRepeat);
+    BBitmap* repeatIcon = fIcoRepeat;
+    if (fRepeatState == "track")
+        repeatIcon = fIcoRepeatTrack;
+    else if (fRepeatState == "context")
+        repeatIcon = fIcoRepeatContext;
+    _ApplyButtonIcon(fRepeatButton, repeatIcon);
     _UpdateVolumeIcon();
 }
 
@@ -990,19 +963,12 @@ void PlayerBarView::AttachedToWindow() {
     BView::AttachedToWindow();
 
     _LoadButtonIcons();
-    if (fIsPlaying)
-        _ApplyButtonIcon(fPlayButton, fIcoPause);
 
     app_info info;
     fIsReplicant = true;
     if (be_app && be_app->GetAppInfo(&info) == B_OK)
         fIsReplicant = strcmp(info.signature, HAIFY_MIME_SIG) != 0;
-    if (fIsReplicant
-            && Bounds().Height() + 1.0f < _PlayerBarHeight(fLayoutScale)) {
-        ResizeTo(Bounds().Width(), _PlayerBarHeight(fLayoutScale) - 1.0f);
-        InvalidateLayout();
-        _LayoutDragger();
-    }
+    _ApplyReplicantSizeLimits();
 
     if (fIsReplicant && _UpdateReplicantAvailability())
         _RegisterReplicant();
@@ -1305,15 +1271,12 @@ void PlayerBarView::_LayoutDragger()
 
     BRect bounds = Bounds();
     BRect frame = fDragger->Frame();
-    float rightInset = kDraggerRightInset * fLayoutScale;
-    float bottomInset = kDraggerBottomInset * fLayoutScale;
-    float x = bounds.right - frame.Width() - rightInset;
-    float y = bounds.bottom - frame.Height() - bottomInset;
-    if (x < bounds.left)
-        x = bounds.left;
-    if (y < bounds.top)
-        y = bounds.top;
-    fDragger->MoveTo(std::floor(x), std::floor(y));
+    const auto metrics = UiScale::ResolveReplicantHandleMetrics(fLayoutScale);
+    fDragger->MoveTo(
+        UiScale::ReplicantHandleOrigin(bounds.left, bounds.right,
+            frame.Width(), metrics.rightInset),
+        UiScale::ReplicantHandleOrigin(bounds.top, bounds.bottom,
+            frame.Height(), metrics.bottomInset));
 }
 
 void PlayerBarView::MouseDown(BPoint where) {
@@ -1638,6 +1601,10 @@ void PlayerBarView::_ForwardTransportCommand(BMessage* msg) {
 
 
 void PlayerBarView::MessageReceived(BMessage* msg) {
+    if (msg->what == B_FONTS_UPDATED) {
+        _RefreshFonts();
+        return;
+    }
     if (_HandleStateMessage(msg) || _HandleMenuMessage(msg)
             || _HandlePlaybackCommand(msg)) {
         return;

@@ -4,6 +4,8 @@
 #include "ui/views/ArtworkView.h"
 #include "ui/views/ClickableLabelView.h"
 #include "ui/MediaHeaderStyle.h"
+#include "ui/MediaWindowScale.h"
+#include <AppDefs.h>
 #include "messages/Messages.h"
 #include "messages/MessageContracts.h"
 #include "playback/NowPlayingFields.h"
@@ -125,12 +127,9 @@ EpisodeWindow::EpisodeWindow(const std::string& episodeId)
 {
     fArtwork = new ArtworkView("episodeArtwork");
     fArtwork->ShowLoading();
-    MediaHeaderStyle::ApplyArtworkSize(fArtwork, 140.0f);
+    MediaHeaderStyle::ApplyArtworkSize(fArtwork);
 
     fName = new BStringView("episodeName", B_TRANSLATE("Loading…"));
-    BFont titleFont(be_bold_font);
-    titleFont.SetSize(be_plain_font->Size() * 1.5f);
-    fName->SetFont(&titleFont);
     fName->SetExplicitMinSize(BSize(0, B_SIZE_UNSET));
     fName->SetExplicitMaxSize(BSize(B_SIZE_UNLIMITED, B_SIZE_UNSET));
     fName->SetExplicitAlignment(BAlignment(B_ALIGN_USE_FULL_WIDTH,
@@ -159,14 +158,12 @@ EpisodeWindow::EpisodeWindow(const std::string& episodeId)
     fDescription->MakeEditable(false);
     fDescription->MakeSelectable(true);
     fDescription->SetWordWrap(true);
-    fDescription->SetExplicitMinSize(BSize(0, 120));
     fDescription->SetExplicitMaxSize(BSize(B_SIZE_UNLIMITED,
         B_SIZE_UNLIMITED));
 
-    BScrollView* descriptionScroll = new BScrollView(
+    fDescriptionScroll = new BScrollView(
         "episodeDescriptionScroll", fDescription, 0, true, true);
-    descriptionScroll->SetExplicitMinSize(BSize(0, 160));
-    descriptionScroll->SetExplicitMaxSize(BSize(B_SIZE_UNLIMITED,
+    fDescriptionScroll->SetExplicitMaxSize(BSize(B_SIZE_UNLIMITED,
         B_SIZE_UNLIMITED));
 
     BLayoutBuilder::Group<>(this, B_VERTICAL, 0)
@@ -183,10 +180,11 @@ EpisodeWindow::EpisodeWindow(const std::string& episodeId)
                     .AddGlue()
                 .End()
             .End()
-            .Add(descriptionScroll, 1.0f)
+            .Add(fDescriptionScroll, 1.0f)
         .End()
     .End();
 
+    _RefreshFonts();
     _Load();
 }
 
@@ -327,6 +325,10 @@ void EpisodeWindow::_ToggleSaved()
 
 void EpisodeWindow::MessageReceived(BMessage* message)
 {
+    if (message->what == B_FONTS_UPDATED) {
+        _RefreshFonts();
+        return;
+    }
     switch (message->what) {
         case MSG_LIBRARY_CHANGED:
             _ApplyLibraryChanged(message);
@@ -360,4 +362,17 @@ void EpisodeWindow::MessageReceived(BMessage* message)
             BWindow::MessageReceived(message);
             break;
     }
+}
+
+void
+EpisodeWindow::_RefreshFonts()
+{
+    MediaHeaderStyle::ApplyArtworkSize(fArtwork);
+    MediaWindowScale::ApplyTitleFont(fName);
+    MediaWindowScale::ApplyPlainFont(fShow);
+    MediaWindowScale::ApplyPlainFont(fMenuBar);
+    MediaWindowScale::ApplyTextSize(fDescription);
+    fDescription->SetExplicitMinSize(BSize(0, UiScale::Scaled(120)));
+    fDescriptionScroll->SetExplicitMinSize(BSize(0, UiScale::Scaled(160)));
+    MediaWindowScale::ApplyWindowMinimum(this, 0, 0);
 }

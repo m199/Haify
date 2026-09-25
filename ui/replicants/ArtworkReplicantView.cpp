@@ -5,8 +5,11 @@
 #include "messages/Messages.h"
 #include "playback/NowPlayingFields.h"
 #include "settings/SettingsController.h"
+#include "ui/UiScale.h"
+#include "ui/ReplicantHandleMetrics.h"
 
 #include <algorithm>
+#include <AppDefs.h>
 #include <Application.h>
 #include <Archivable.h>
 #include <Bitmap.h>
@@ -30,7 +33,6 @@ static const uint32 kMsgReloadArtwork = 'rArt';
 static const uint32 kMsgRegisterRetry = 'rTry';
 static const float kDefaultArtworkSize = 220.0f;
 static const float kMinArtworkSize = 96.0f;
-static const float kDraggerSize = 8.0f;
 static const rgb_color kBlack = { 0, 0, 0, 255 };
 static const rgb_color kWhite = { 255, 255, 255, 255 };
 
@@ -106,7 +108,6 @@ ArtworkReplicantView::_Init(bool useDefaultSize)
     }
 
     fDragger = new BDragger(this);
-    fDragger->ResizeTo(kDraggerSize - 1.0f, kDraggerSize - 1.0f);
     AddChild(fDragger);
     _LayoutDragger();
     _ApplyBackground();
@@ -369,8 +370,18 @@ ArtworkReplicantView::_LayoutDragger()
         return;
 
     BRect bounds = Bounds();
-    fDragger->MoveTo(bounds.right - kDraggerSize + 1.0f,
-        bounds.bottom - kDraggerSize + 1.0f);
+    const auto metrics = UiScale::ResolveReplicantHandleMetrics(
+        UiScale::FontScale());
+    fDragger->SetExplicitMinSize(BSize(metrics.size, metrics.size));
+    fDragger->SetExplicitPreferredSize(BSize(metrics.size, metrics.size));
+    fDragger->SetExplicitMaxSize(BSize(metrics.size, metrics.size));
+    fDragger->ResizeTo(metrics.size - 1.0f, metrics.size - 1.0f);
+    BRect frame = fDragger->Frame();
+    fDragger->MoveTo(
+        UiScale::ReplicantHandleOrigin(bounds.left, bounds.right,
+            frame.Width(), metrics.rightInset),
+        UiScale::ReplicantHandleOrigin(bounds.top, bounds.bottom,
+            frame.Height(), metrics.bottomInset));
 }
 
 
@@ -561,6 +572,10 @@ ArtworkReplicantView::MessageReceived(BMessage* message)
 
         case MSG_REPLICANT_APPEARANCE_CHANGED:
             _ApplyAppearance(message);
+            break;
+
+        case B_FONTS_UPDATED:
+            _LayoutDragger();
             break;
 
         case B_COLORS_UPDATED:

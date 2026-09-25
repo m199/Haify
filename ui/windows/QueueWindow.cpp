@@ -1,4 +1,5 @@
 #include "ui/windows/QueueWindow.h"
+#include "ui/views/FontScaledListView.h"
 #include "ui/menus/TrackContextMenu.h"
 #include "app/App.h"
 #include "ui/drag/HaifyDragState.h"
@@ -183,10 +184,10 @@ public:
 
 
 
-class QueueListView : public BColumnListView {
+class QueueListView : public FontScaledListView {
 public:
 	QueueListView()
-		: BColumnListView("QueueList", 0, B_NO_BORDER, true) {}
+		: FontScaledListView("QueueList", 0, B_NO_BORDER, true) {}
 
 	class RightClickFilter : public BMessageFilter {
 	public:
@@ -225,7 +226,7 @@ public:
 	};
 
 	virtual void AttachedToWindow() {
-		BColumnListView::AttachedToWindow();
+		FontScaledListView::AttachedToWindow();
 		if (BView* outline = ScrollView())
 			outline->AddFilter(new RightClickFilter(this));
 		else
@@ -282,7 +283,7 @@ public:
 			}
 			return;
 		}
-		BColumnListView::MessageReceived(msg);
+		FontScaledListView::MessageReceived(msg);
 	}
 
 	virtual void ItemInvoked() {

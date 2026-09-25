@@ -2,8 +2,8 @@
 
 #include "ui/drag/DropMarkerController.h"
 #include "messages/DragItem.h"
+#include "ui/views/FontScaledListView.h"
 
-#include <ColumnListView.h>
 #include <InterfaceDefs.h>
 #include <Point.h>
 #include <SupportDefs.h>
@@ -14,7 +14,7 @@ class BMessage;
 class BMessageRunner;
 class BScrollBar;
 
-class TrackListView : public BColumnListView {
+class TrackListView : public FontScaledListView {
 public:
 	TrackListView(const char* name, uint32 flags, border_style border,
 		bool showHorizontalScrollbar);

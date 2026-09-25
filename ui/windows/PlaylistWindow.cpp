@@ -6,6 +6,8 @@
 #include "ui/menus/TrackContextMenu.h"
 #include "ui/dialogs/TextInputDialog.h"
 #include "ui/MediaHeaderStyle.h"
+#include "ui/MediaWindowScale.h"
+#include <AppDefs.h>
 #include "messages/Messages.h"
 #include "messages/MessageContracts.h"
 #include "playback/NowPlayingFields.h"
@@ -754,6 +756,10 @@ PlaylistWindow::_ApplyPlaylistDeleteFailed()
 void
 PlaylistWindow::MessageReceived(BMessage* message)
 {
+	if (message->what == B_FONTS_UPDATED) {
+		_RefreshFonts();
+		return;
+	}
 	if (_HandleTrackActionMessage(message) || _HandleDataMessage(message)
 			|| _HandlePlaylistEditMessage(message)
 			|| _HandlePlaylistMenuMessage(message)
@@ -1898,20 +1904,11 @@ PlaylistWindow::_InitLayout(const char* playlistName)
 
 	fPlaylistName = new BTextView("PlaylistName");
 	fPlaylistName->SetText(playlistName);
-	if (isAlbum) {
-		BFont titleFont(be_bold_font);
-		titleFont.SetSize(be_plain_font->Size()
-			* MediaHeaderStyle::kTitleScale);
-		fPlaylistName->SetFontAndColor(&titleFont);
-	} else {
-		fPlaylistName->SetFontAndColor(be_bold_font);
-	}
 	fPlaylistName->MakeEditable(false);
 	fPlaylistName->MakeSelectable(false);
 	fPlaylistName->SetWordWrap(true);
 	fPlaylistName->SetInsets(0, 0, 0, 0);
 	fPlaylistName->SetViewUIColor(B_PANEL_BACKGROUND_COLOR);
-	fPlaylistName->SetExplicitMaxSize(BSize(B_SIZE_UNLIMITED, 60));
 	fPlaylistName->SetExplicitAlignment(BAlignment(B_ALIGN_LEFT, B_ALIGN_TOP));
 
 	fPlaylistInfo = new BStringView("PlaylistInfo", "");
@@ -1923,36 +1920,12 @@ PlaylistWindow::_InitLayout(const char* playlistName)
 	_InitTrackList(kind);
 
 	if (isPodcast) {
-		const auto metrics = ResolvePodcastHeaderMetrics(UiScale::LineHeight(),
-			MediaHeaderStyle::ActionButtonMinWidth(), MediaHeaderStyle::Scaled(170.0f));
-		const float podcastInfoWidth = metrics.infoWidth;
-		const float podcastTitleHeight = metrics.titleHeight;
-		const float podcastSearchInfoHeight = metrics.searchInfoHeight;
-		fPlaylistName->SetExplicitMinSize(BSize(
-			podcastInfoWidth, B_SIZE_UNSET));
-		fPlaylistName->SetExplicitPreferredSize(BSize(
-			podcastInfoWidth, B_SIZE_UNSET));
-		fPlaylistName->SetExplicitMaxSize(BSize(podcastInfoWidth,
-			podcastTitleHeight));
-		fPlaylistInfo->SetExplicitMinSize(BSize(
-			podcastInfoWidth, B_SIZE_UNSET));
-		fPlaylistInfo->SetExplicitPreferredSize(BSize(
-			podcastInfoWidth, B_SIZE_UNSET));
-		fPlaylistInfo->SetExplicitMaxSize(BSize(
-			podcastInfoWidth, B_SIZE_UNSET));
-
 		fPodcastSearchInfo = new BTextView("PodcastSearchInfo");
 		fPodcastSearchInfo->MakeEditable(false);
 		fPodcastSearchInfo->MakeSelectable(false);
 		fPodcastSearchInfo->SetWordWrap(true);
 		fPodcastSearchInfo->SetInsets(0, 0, 0, 0);
 		fPodcastSearchInfo->SetViewUIColor(B_PANEL_BACKGROUND_COLOR);
-		fPodcastSearchInfo->SetExplicitMinSize(BSize(
-			podcastInfoWidth, podcastSearchInfoHeight));
-		fPodcastSearchInfo->SetExplicitPreferredSize(BSize(
-			podcastInfoWidth, podcastSearchInfoHeight));
-		fPodcastSearchInfo->SetExplicitMaxSize(BSize(
-			podcastInfoWidth, podcastSearchInfoHeight));
 		fPodcastSearchInfo->SetExplicitAlignment(BAlignment(
 			B_ALIGN_LEFT, B_ALIGN_TOP));
 
@@ -1963,8 +1936,6 @@ PlaylistWindow::_InitLayout(const char* playlistName)
 			B_ALIGN_VERTICAL_CENTER));
 		fSubscribeButton = new BButton("subBtn", B_TRANSLATE("Subscribe"),
 			new BMessage('subS'));
-		fSubscribeButton->SetExplicitMinSize(BSize(
-			MediaHeaderStyle::ActionButtonMinWidth(), B_SIZE_UNSET));
 		fSubscribeButton->SetExplicitAlignment(BAlignment(B_ALIGN_LEFT,
 			B_ALIGN_VERTICAL_CENTER));
 		fSubscribeButton->SetEnabled(false);
@@ -1972,10 +1943,6 @@ PlaylistWindow::_InitLayout(const char* playlistName)
 		fDescriptionView = new MediaDescriptionView("DescriptionView");
 		fDescriptionScroll = new BScrollView("DescScroll", fDescriptionView,
 			0, false, true, B_FANCY_BORDER);
-		fDescriptionScroll->SetExplicitMinSize(BSize(B_SIZE_UNSET,
-			MediaHeaderStyle::Scaled(72.0f)));
-		fDescriptionScroll->SetExplicitPreferredSize(BSize(B_SIZE_UNSET,
-			MediaHeaderStyle::Scaled(94.0f)));
 		fDescriptionScroll->SetExplicitMaxSize(
 			BSize(B_SIZE_UNLIMITED, B_SIZE_UNLIMITED));
 	}
@@ -1983,8 +1950,6 @@ PlaylistWindow::_InitLayout(const char* playlistName)
 		fAlbumSaveButton = new BButton("saveAlbum",
 			B_TRANSLATE("Add to Saved Albums"),
 			new BMessage(kMsgToggleAlbumSaved));
-		fAlbumSaveButton->SetExplicitMinSize(BSize(
-			MediaHeaderStyle::ActionButtonMinWidth(), B_SIZE_UNSET));
 		fAlbumSaveButton->SetExplicitAlignment(BAlignment(B_ALIGN_LEFT,
 			B_ALIGN_VERTICAL_CENTER));
 		fAlbumSaveButton->SetEnabled(false);
@@ -2011,7 +1976,7 @@ PlaylistWindow::_InitLayout(const char* playlistName)
 		_InitDefaultLayout();
 	}
 
-	SetSizeLimits(header.minimumWidth, 100000, header.minimumHeight, 100000);
+	_RefreshFonts();
 }
 
 
@@ -2021,6 +1986,12 @@ PlaylistWindow::_InitTrackList(SpotifyItemKind kind)
 	bool isPodcast = kind == kSpotifyItemShow;
 
 	fTrackList = new TrackListView("TrackList", 0, B_PLAIN_BORDER, true);
+	fTrackList->SetDetachedRowsProvider([this]() {
+		std::vector<BRow*> detached = fPendingPlaylistClear.rows;
+		for (const auto& pending : fPendingTrackRemovals)
+			detached.push_back(pending.row);
+		return detached;
+	});
 	_UpdateTrackDropMarkerMode();
 	fTrackList->SetSelectionMode(B_MULTIPLE_SELECTION_LIST);
 	fTrackList->SetExplicitMaxSize(BSize(B_SIZE_UNLIMITED, B_SIZE_UNLIMITED));
@@ -2071,6 +2042,7 @@ PlaylistWindow::_InitAlbumLayout(float artworkSize)
 		B_ALIGN_VERTICAL_CENTER));
 
 	BView* albumInfo = new BView("albumHeaderInfo", 0);
+	fAlbumHeaderInfo = albumInfo;
 	albumInfo->SetExplicitMinSize(BSize(0, artworkSize));
 	albumInfo->SetExplicitPreferredSize(BSize(B_SIZE_UNSET, artworkSize));
 	albumInfo->SetExplicitMaxSize(BSize(B_SIZE_UNLIMITED, artworkSize));
@@ -3328,4 +3300,62 @@ PlaylistWindow::~PlaylistWindow()
 		s.playlistWindowW = frame.Width();
 		s.playlistWindowH = frame.Height();
 	});
+}
+
+void
+PlaylistWindow::_ApplyPodcastHeaderMetrics()
+{
+	const auto metrics = ResolvePodcastHeaderMetrics(UiScale::LineHeight(),
+		MediaHeaderStyle::ActionButtonMinWidth(), MediaHeaderStyle::Scaled(170.0f));
+	const float podcastInfoWidth = metrics.infoWidth;
+	const float podcastTitleHeight = metrics.titleHeight;
+	const float podcastSearchInfoHeight = metrics.searchInfoHeight;
+	fPlaylistName->SetExplicitMinSize(BSize(
+		podcastInfoWidth, B_SIZE_UNSET));
+	fPlaylistName->SetExplicitPreferredSize(BSize(
+		podcastInfoWidth, B_SIZE_UNSET));
+	fPlaylistName->SetExplicitMaxSize(BSize(podcastInfoWidth,
+		podcastTitleHeight));
+	fPlaylistInfo->SetExplicitMinSize(BSize(
+		podcastInfoWidth, B_SIZE_UNSET));
+	fPlaylistInfo->SetExplicitPreferredSize(BSize(
+		podcastInfoWidth, B_SIZE_UNSET));
+	fPlaylistInfo->SetExplicitMaxSize(BSize(
+		podcastInfoWidth, B_SIZE_UNSET));
+
+	fPodcastSearchInfo->SetExplicitMinSize(BSize(
+		podcastInfoWidth, podcastSearchInfoHeight));
+	fPodcastSearchInfo->SetExplicitPreferredSize(BSize(
+		podcastInfoWidth, podcastSearchInfoHeight));
+	fPodcastSearchInfo->SetExplicitMaxSize(BSize(
+		podcastInfoWidth, podcastSearchInfoHeight));
+}
+
+void
+PlaylistWindow::_RefreshFonts()
+{
+	const auto header = ResolvePlaylistHeader(fUri);
+	MediaHeaderStyle::ApplyArtworkSize(fCoverView);
+	MediaWindowScale::ApplyTitleFont(fPlaylistName,
+		header.isAlbum ? MediaHeaderStyle::kTitleScale : 1.0f);
+	fPlaylistName->SetExplicitMaxSize(BSize(B_SIZE_UNLIMITED, UiScale::Scaled(60)));
+	MediaWindowScale::ApplyPlainFont(fPlaylistInfo);
+	MediaWindowScale::ApplyPlainFont(fMenuBar);
+	for (BButton* button : {fAlbumSaveButton, fSubscribeButton}) {
+		if (!button)
+			continue;
+		MediaWindowScale::ApplyPlainFont(button);
+		button->SetExplicitMinSize(BSize(MediaHeaderStyle::ActionButtonMinWidth(),
+			B_SIZE_UNSET));
+	}
+	if (header.isPodcast) {
+		MediaWindowScale::ApplyPlainFont(fSearchBox);
+		MediaWindowScale::ApplyTextSize(fSearchBox->TextView());
+		MediaWindowScale::ApplyTextSize(fPodcastSearchInfo);
+		_ApplyPodcastHeaderMetrics();
+		fDescriptionScroll->SetExplicitMinSize(BSize(B_SIZE_UNSET, UiScale::Scaled(72)));
+		fDescriptionScroll->SetExplicitPreferredSize(BSize(B_SIZE_UNSET, UiScale::Scaled(94)));
+	}
+	MediaWindowScale::ApplyHeaderInfoSize(fAlbumHeaderInfo);
+	MediaWindowScale::ApplyWindowMinimum(this, header.minimumWidth, header.minimumHeight);
 }

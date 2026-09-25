@@ -4,6 +4,7 @@
 #include "messages/Messages.h"
 #include "settings/SettingsController.h"
 #include "ui/UiScale.h"
+#include "ui/PlayerControlMetrics.h"
 
 #include <Message.h>
 #include <Messenger.h>
@@ -14,42 +15,15 @@
 #include <cmath>
 #include <cstdio>
 
-static const float kMinimumBarThickness = 18.0f;
-static const float kMinimumViewHeight = 20.0f;
-
-
-static float
-FontLineHeight()
-{
-    return UiScale::LineHeight();
-}
-
-
-static float
-ScaledViewHeight(float scale)
-{
-    return std::max(kMinimumViewHeight * scale, FontLineHeight() + 8.0f);
-}
-
-
-static float
-ScaledBarThickness(float scale)
-{
-    return std::max(kMinimumBarThickness * scale,
-        ScaledViewHeight(scale) - 6.0f);
-}
-
-
 static void
 ApplyScaledLayoutSize(BView* view, float scale)
 {
     if (!view)
         return;
-    float fontH = FontLineHeight();
-    float viewH = ScaledViewHeight(scale);
-    view->SetExplicitMinSize(BSize(fontH * 10.0f * scale, viewH));
-    view->SetExplicitMaxSize(BSize(B_SIZE_UNLIMITED, viewH));
-    view->SetExplicitPreferredSize(BSize(fontH * 24.0f * scale, viewH));
+    const auto metrics = ResolveSeekBarMetrics(scale, UiScale::LineHeight());
+    view->SetExplicitMinSize(BSize(metrics.minWidth, metrics.height));
+    view->SetExplicitMaxSize(BSize(B_SIZE_UNLIMITED, metrics.height));
+    view->SetExplicitPreferredSize(BSize(metrics.preferredWidth, metrics.height));
 }
 
 static uint8
@@ -246,8 +220,8 @@ BRect PlaybackSeekBarView::_TrackRect() const {
     BRect bounds = Bounds();
     BRect track = bounds;
     float availableHeight = bounds.Height() + 1.0f;
-    float trackHeight = std::min(ScaledBarThickness(fLayoutScale),
-        availableHeight);
+    float trackHeight = std::min(ResolveSeekBarMetrics(fLayoutScale,
+        UiScale::LineHeight()).thickness, availableHeight);
     track.top = std::floor(bounds.top
         + (availableHeight - trackHeight) / 2.0f);
     track.bottom = track.top + trackHeight - 1.0f;

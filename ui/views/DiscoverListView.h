@@ -2,8 +2,8 @@
 #define DISCOVER_LIST_VIEW_H
 
 #include "ui/drag/DropMarkerController.h"
+#include "ui/views/FontScaledListView.h"
 
-#include <ColumnListView.h>
 #include <ColumnTypes.h>
 #include <string>
 #include <vector>
@@ -62,7 +62,7 @@ public:
 	int32				fFieldCount = 0;
 };
 
-class DiscoverListView : public BColumnListView {
+class DiscoverListView : public FontScaledListView {
 public:
 						DiscoverListView(const char* name,
 						                 const std::vector<ColDef>& cols,

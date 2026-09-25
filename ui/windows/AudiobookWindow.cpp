@@ -6,6 +6,8 @@
 #include "ui/views/DiscoverListView.h"
 #include "ui/views/MediaDescriptionView.h"
 #include "ui/MediaHeaderStyle.h"
+#include "ui/MediaWindowScale.h"
+#include <AppDefs.h>
 #include "messages/Messages.h"
 #include "messages/MessageContracts.h"
 #include "playback/NowPlayingFields.h"
@@ -385,7 +387,6 @@ AudiobookWindow::AudiobookWindow(const std::string& audiobookId)
 {
 	fArtwork = new ArtworkView("audiobookArtwork");
 	fArtwork->ShowLoading();
-	const float artworkSize = MediaHeaderStyle::ArtworkSize();
 	MediaHeaderStyle::ApplyArtworkSize(fArtwork);
 	fArtwork->SetExplicitAlignment(BAlignment(B_ALIGN_LEFT,
 		B_ALIGN_TOP));
@@ -403,17 +404,12 @@ AudiobookWindow::AudiobookWindow(const std::string& audiobookId)
 
 	fName = new BTextView("audiobookName");
 	fName->SetText(B_TRANSLATE("Loading" B_UTF8_ELLIPSIS));
-	BFont titleFont(be_bold_font);
-	titleFont.SetSize(be_plain_font->Size() * MediaHeaderStyle::kTitleScale);
-	fName->SetFontAndColor(&titleFont);
 	fName->MakeEditable(false);
 	fName->MakeSelectable(false);
 	fName->SetWordWrap(true);
 	fName->SetInsets(0, 0, 0, 0);
 	fName->SetViewUIColor(B_PANEL_BACKGROUND_COLOR);
 	fName->SetExplicitMinSize(BSize(0, B_SIZE_UNSET));
-	fName->SetExplicitPreferredSize(BSize(B_SIZE_UNSET, 34));
-	fName->SetExplicitMaxSize(BSize(B_SIZE_UNLIMITED, 36));
 	fName->SetExplicitAlignment(BAlignment(B_ALIGN_USE_FULL_WIDTH, B_ALIGN_TOP));
 	fCredits = new BStringView("audiobookAuthors", "");
 	fCredits->SetExplicitMaxSize(BSize(B_SIZE_UNLIMITED, B_SIZE_UNSET));
@@ -425,15 +421,11 @@ AudiobookWindow::AudiobookWindow(const std::string& audiobookId)
 		B_ALIGN_VERTICAL_CENTER));
 	fResume = new BButton("resumeAudiobook", B_TRANSLATE("Play"),
 		new BMessage(kMsgResumeAudiobook));
-	fResume->SetExplicitMinSize(BSize(
-		MediaHeaderStyle::ActionButtonMinWidth(), B_SIZE_UNSET));
 	fResume->SetExplicitAlignment(BAlignment(B_ALIGN_LEFT,
 		B_ALIGN_VERTICAL_CENTER));
 	fResume->SetEnabled(false);
 	fSave = new BButton("saveAudiobook", B_TRANSLATE("Add to Audiobooks"),
 		new BMessage('aSav'));
-	fSave->SetExplicitMinSize(BSize(
-		MediaHeaderStyle::ActionButtonMinWidth(), B_SIZE_UNSET));
 	fSave->SetExplicitAlignment(BAlignment(B_ALIGN_LEFT,
 		B_ALIGN_VERTICAL_CENTER));
 	fSave->SetEnabled(false);
@@ -444,22 +436,15 @@ AudiobookWindow::AudiobookWindow(const std::string& audiobookId)
 		{B_TRANSLATE("Duration"), 80, kColNone},
 		{B_TRANSLATE("Status"), 90, kColNone}
 	}, -1, true);
-	fChapterList->SetExplicitMinSize(BSize(B_SIZE_UNSET, 96));
-	fChapterList->SetExplicitPreferredSize(BSize(B_SIZE_UNSET, 136));
-	BScrollView* descriptionScroll = new BScrollView(
+	fDescriptionScroll = new BScrollView(
 		"audiobookDescriptionScroll", fDescription, 0, false, true);
-	descriptionScroll->SetExplicitMinSize(BSize(B_SIZE_UNSET, 120));
-	descriptionScroll->SetExplicitPreferredSize(BSize(B_SIZE_UNSET, 260));
-	descriptionScroll->SetExplicitMaxSize(BSize(B_SIZE_UNLIMITED,
+	fDescriptionScroll->SetExplicitMaxSize(BSize(B_SIZE_UNLIMITED,
 		B_SIZE_UNLIMITED));
 
-	BView* headerInfo = new BView("audiobookHeaderInfo", 0);
-	headerInfo->SetExplicitMinSize(BSize(0, artworkSize));
-	headerInfo->SetExplicitPreferredSize(BSize(B_SIZE_UNSET, artworkSize));
-	headerInfo->SetExplicitMaxSize(BSize(B_SIZE_UNLIMITED, artworkSize));
-	headerInfo->SetExplicitAlignment(BAlignment(B_ALIGN_USE_FULL_WIDTH,
+	fHeaderInfo = new BView("audiobookHeaderInfo", 0);
+	fHeaderInfo->SetExplicitAlignment(BAlignment(B_ALIGN_USE_FULL_WIDTH,
 		B_ALIGN_USE_FULL_HEIGHT));
-	BLayoutBuilder::Group<>(headerInfo, B_VERTICAL, B_USE_SMALL_SPACING)
+	BLayoutBuilder::Group<>(fHeaderInfo, B_VERTICAL, B_USE_SMALL_SPACING)
 		.Add(fName, 0.0f)
 		.AddGroup(B_VERTICAL, 0, 0.0f)
 			.Add(fCredits, 0.0f)
@@ -476,7 +461,7 @@ AudiobookWindow::AudiobookWindow(const std::string& audiobookId)
 	BSplitView* contentSplit = new BSplitView(B_VERTICAL,
 		B_USE_SMALL_SPACING);
 	BLayoutBuilder::Split<>(contentSplit)
-		.Add(descriptionScroll, 1.0f)
+		.Add(fDescriptionScroll, 1.0f)
 		.Add(fChapterList, 0.0f)
 		.SetCollapsible(false);
 
@@ -487,12 +472,12 @@ AudiobookWindow::AudiobookWindow(const std::string& audiobookId)
 			.AddGroup(B_HORIZONTAL, B_USE_DEFAULT_SPACING, 0.0f)
 				.SetInsets(B_USE_DEFAULT_SPACING)
 				.Add(fArtwork, 0.0f)
-				.Add(headerInfo, 1.0f)
+				.Add(fHeaderInfo, 1.0f)
 			.End()
 			.Add(contentSplit, 1.0f)
 		.End()
 	.End();
-	SetSizeLimits(420, 100000, 360, 100000);
+	_RefreshFonts();
 
 	_Load();
 }
@@ -606,7 +591,7 @@ AudiobookWindow::_ApplyTitleText()
 	const float baseSize = be_plain_font->Size();
 	const float maxSize = baseSize * MediaHeaderStyle::kTitleScale;
 	const float minSize = baseSize;
-	const float maxHeight = 34.0f;
+	const float maxHeight = UiScale::Scaled(34.0f);
 
 	BFont titleFont(be_bold_font);
 	const int32 titleSizeSteps = static_cast<int32>(maxSize - minSize);
@@ -996,6 +981,10 @@ AudiobookWindow::_ApplyCapabilitiesChanged()
 void
 AudiobookWindow::MessageReceived(BMessage* message)
 {
+	if (message->what == B_FONTS_UPDATED) {
+		_RefreshFonts();
+		return;
+	}
 	switch (message->what) {
 		case MSG_LIBRARY_CHANGED:
 			_ApplyLibraryChanged(message);
@@ -1053,4 +1042,28 @@ AudiobookWindow::MessageReceived(BMessage* message)
 			BWindow::MessageReceived(message);
 			break;
 	}
+}
+
+void
+AudiobookWindow::_RefreshFonts()
+{
+	MediaHeaderStyle::ApplyArtworkSize(fArtwork);
+	MediaWindowScale::ApplyTitleFont(fName);
+	fName->SetExplicitPreferredSize(BSize(B_SIZE_UNSET, UiScale::Scaled(34)));
+	fName->SetExplicitMaxSize(BSize(B_SIZE_UNLIMITED, UiScale::Scaled(36)));
+	MediaWindowScale::ApplyPlainFont(fMenuBar);
+	MediaWindowScale::ApplyPlainFont(fCredits);
+	MediaWindowScale::ApplyPlainFont(fNarrators);
+	for (BButton* button : {fResume, fSave}) {
+		MediaWindowScale::ApplyPlainFont(button);
+		button->SetExplicitMinSize(BSize(MediaHeaderStyle::ActionButtonMinWidth(),
+			B_SIZE_UNSET));
+	}
+	fChapterList->SetExplicitMinSize(BSize(B_SIZE_UNSET, UiScale::Scaled(96)));
+	fChapterList->SetExplicitPreferredSize(BSize(B_SIZE_UNSET, UiScale::Scaled(136)));
+	fDescriptionScroll->SetExplicitMinSize(BSize(B_SIZE_UNSET, UiScale::Scaled(120)));
+	fDescriptionScroll->SetExplicitPreferredSize(BSize(B_SIZE_UNSET, UiScale::Scaled(260)));
+	MediaWindowScale::ApplyHeaderInfoSize(fHeaderInfo);
+	MediaWindowScale::ApplyWindowMinimum(this, 420, 360);
+	_ApplyTitleText();
 }

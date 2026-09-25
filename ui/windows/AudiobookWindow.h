@@ -11,6 +11,7 @@ class BMenuBar;
 class BMenuItem;
 class BStringView;
 class BTextView;
+class BScrollView;
 class MediaDescriptionView;
 
 class AudiobookWindow : public BWindow {
@@ -22,6 +23,7 @@ public:
 	virtual void MessageReceived(BMessage* message) override;
 
 private:
+	void _RefreshFonts();
 	void _Load();
 	void _LoadChapters(int32 offset);
 	void _LoadArtwork(const std::string& url);
@@ -65,4 +67,6 @@ private:
 	BButton* fResume = nullptr;
 	BButton* fSave = nullptr;
 	BColumnListView* fChapterList = nullptr;
+	BView* fHeaderInfo = nullptr;
+	BScrollView* fDescriptionScroll = nullptr;
 };

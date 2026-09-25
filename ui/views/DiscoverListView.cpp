@@ -303,7 +303,7 @@ DiscoverListView::DiscoverListView(const char* name,
                                    const std::vector<ColDef>& cols,
                                    int32 logicalTab,
                                    bool showHorizontalScrollbar)
-	: BColumnListView(name, B_NAVIGABLE, B_NO_BORDER,
+	: FontScaledListView(name, B_NAVIGABLE, B_NO_BORDER,
 		showHorizontalScrollbar),
 	  fLogicalTab(logicalTab),
 	  fDropMarker(this, [](BRow* row, int32 position, bool target) {
@@ -331,7 +331,7 @@ DiscoverListView::~DiscoverListView()
 void
 DiscoverListView::AttachedToWindow()
 {
-	BColumnListView::AttachedToWindow();
+	FontScaledListView::AttachedToWindow();
 	if (fFiltersInstalled)
 		return;
 	if (BView* outline = ScrollView()) {
@@ -448,6 +448,8 @@ DiscoverListView::_ShowContextMenuAt(BPoint screenWhere)
 void
 DiscoverListView::SelectionChanged()
 {
+	if (IsResizingRows())
+		return;
 	BColumnListView::SelectionChanged();
 
 	BMessage* cur = Window() ? Window()->CurrentMessage() : nullptr;
@@ -459,6 +461,8 @@ DiscoverListView::SelectionChanged()
 void
 DiscoverListView::MessageReceived(BMessage* message)
 {
+	if (message->what == B_FONTS_UPDATED)
+		ClearDropMarker();
 	if (message->what == kMsgDropMarkerCleanup) {
 		_ClearDropMarkerIfDragEnded();
 		return;
@@ -473,7 +477,7 @@ DiscoverListView::MessageReceived(BMessage* message)
 			_ShowContextMenuAt(screen);
 		return;
 	}
-	BColumnListView::MessageReceived(message);
+	FontScaledListView::MessageReceived(message);
 }
 
 

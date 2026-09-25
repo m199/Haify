@@ -23,6 +23,7 @@
 
 #include <AboutWindow.h>
 #include <AppFileInfo.h>
+#include <AppDefs.h>
 #include <Application.h>
 #include <File.h>
 #include <LayoutBuilder.h>
@@ -2321,6 +2322,13 @@ PlayerWindow::_HandleAccountDeviceMessage(BMessage* message)
 void
 PlayerWindow::MessageReceived(BMessage* message)
 {
+	if (message->what == B_FONTS_UPDATED) {
+		// BWindow has already notified the player view and its children.
+		if (fMenuBar)
+			fMenuBar->SetFont(be_plain_font);
+		_ApplySizeLimits();
+		return;
+	}
 	if (_HandlePlaybackMessage(message) || _HandlePlaybackDeviceMessage(message)
 			|| _HandleTransportMessage(message)
 			|| _HandleInterfaceMessage(message)

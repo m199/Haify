@@ -10,6 +10,7 @@ class BMenuBar;
 class BMenuItem;
 class BStringView;
 class BTextView;
+class BScrollView;
 
 class EpisodeWindow : public BWindow {
 public:
@@ -19,6 +20,7 @@ public:
     virtual void MessageReceived(BMessage* message);
 
 private:
+    void _RefreshFonts();
     void _Load();
     void _LoadArtwork(const std::string& url);
     void _UpdateSaved(bool saved);
@@ -44,4 +46,5 @@ private:
     BStringView* fName = nullptr;
     ClickableLabelView* fShow = nullptr;
     BTextView* fDescription = nullptr;
+    BScrollView* fDescriptionScroll = nullptr;
 };

@@ -1,9 +1,13 @@
 #include "ui/windows/ArtistWindow.h"
+#include "ui/views/FontScaledListView.h"
 #include "ui/views/ArtworkView.h"
 #include "ui/menus/TrackContextMenu.h"
 #include "app/App.h"
 #include "ui/drag/HaifyDragState.h"
 #include "ui/MediaHeaderStyle.h"
+#include "ui/MediaWindowScale.h"
+#include <AppDefs.h>
+#include <GroupLayout.h>
 #include "messages/Messages.h"
 #include "messages/MessageContracts.h"
 #include "app/HaifyDebug.h"
@@ -203,10 +207,10 @@ public:
 
 class ArtistWindow;
 
-class TrackArtistListView : public BColumnListView {
+class TrackArtistListView : public FontScaledListView {
 public:
 	TrackArtistListView(const char* name)
-		: BColumnListView(name, B_NAVIGABLE, B_FANCY_BORDER, true) {}
+		: FontScaledListView(name, B_NAVIGABLE, B_FANCY_BORDER, true) {}
 
 	class RightClickFilter : public BMessageFilter {
 	public:
@@ -221,7 +225,7 @@ public:
 	};
 
 	virtual void AttachedToWindow() {
-		BColumnListView::AttachedToWindow();
+		FontScaledListView::AttachedToWindow();
 		if (BView* outline = ScrollView())
 			outline->AddFilter(new RightClickFilter(this));
 		else
@@ -261,7 +265,7 @@ public:
 			}
 			return;
 		}
-		BColumnListView::MessageReceived(msg);
+		FontScaledListView::MessageReceived(msg);
 	}
 
 	virtual void ItemInvoked() {
@@ -315,10 +319,10 @@ private:
 };
 
 
-class AlbumArtistListView : public BColumnListView {
+class AlbumArtistListView : public FontScaledListView {
 public:
 	AlbumArtistListView()
-		: BColumnListView("albums", B_NAVIGABLE, B_FANCY_BORDER, true) {}
+		: FontScaledListView("albums", B_NAVIGABLE, B_FANCY_BORDER, true) {}
 
 	class RightClickFilter : public BMessageFilter {
 	public:
@@ -333,7 +337,7 @@ public:
 	};
 
 	virtual void AttachedToWindow() {
-		BColumnListView::AttachedToWindow();
+		FontScaledListView::AttachedToWindow();
 		if (BView* outline = ScrollView())
 			outline->AddFilter(new RightClickFilter(this));
 		else
@@ -369,7 +373,7 @@ public:
 				_ShowContextMenuAt(screen);
 			return;
 		}
-		BColumnListView::MessageReceived(msg);
+		FontScaledListView::MessageReceived(msg);
 	}
 
 private:
@@ -452,13 +456,10 @@ ArtistWindow::ArtistWindow(const std::string& artistId)
 {
 	fArtworkView = new ArtworkView("artistCover");
 	fArtworkView->ShowLoading();
-	MediaHeaderStyle::ApplyArtworkSize(fArtworkView, 110.0f);
+	MediaHeaderStyle::ApplyArtworkSize(fArtworkView);
 	fArtworkView->SetExplicitAlignment(BAlignment(B_ALIGN_LEFT, B_ALIGN_TOP));
 
 	fNameView = new BStringView("artistName", B_UTF8_ELLIPSIS);
-	BFont bigFont(be_bold_font);
-	bigFont.SetSize(be_plain_font->Size() * 2.0f);
-	fNameView->SetFont(&bigFont);
 	fNameView->SetAlignment(B_ALIGN_LEFT);
 	fNameView->SetExplicitAlignment(BAlignment(B_ALIGN_LEFT, B_ALIGN_TOP));
 	fNameView->SetExplicitMaxSize(BSize(B_SIZE_UNLIMITED, B_SIZE_UNSET));
@@ -481,9 +482,6 @@ ArtistWindow::ArtistWindow(const std::string& artistId)
 	    "Album",   160,  50, 350,  B_TRUNCATE_END), 2);
 	fTrackList->AddColumn(new TrackArtistStringColumn(
 	    "Duration", 58,  40,  80,  B_TRUNCATE_END), 3);
-	fTrackList->SetExplicitMinSize(BSize(B_SIZE_UNSET, 80));
-	fTrackList->SetExplicitPreferredSize(BSize(B_SIZE_UNSET, 220));
-	fTrackList->SetExplicitMaxSize(BSize(B_SIZE_UNLIMITED, 220));
 
 	fTracksLabel = new BStringView("tracksLabel", B_TRANSLATE("Top Tracks"));
 
@@ -494,10 +492,9 @@ ArtistWindow::ArtistWindow(const std::string& artistId)
 	    "Year",    55,  40,  70, B_TRUNCATE_END), 1);
 	fAlbumList->AddColumn(new BStringColumn(
 	    "Type",    80,  50, 120, B_TRUNCATE_END), 2);
-	fAlbumList->SetExplicitMinSize(BSize(B_SIZE_UNSET, 140));
 	fAlbumList->SetInvocationMessage(new BMessage('aopn'));
 
-	float followerIndent = std::ceil(be_plain_font->StringWidth(" "));
+	fAlbumsLabel = new BStringView("albumsLabel", "Albums");
 	BSplitView* contentSplit = new BSplitView(B_VERTICAL, B_USE_SMALL_SPACING);
 	BLayoutBuilder::Split<>(contentSplit)
 		.AddGroup(B_VERTICAL, 0, 1.0f)
@@ -510,7 +507,7 @@ ArtistWindow::ArtistWindow(const std::string& artistId)
 		.AddGroup(B_VERTICAL, 0, 1.0f)
 			.AddGroup(B_VERTICAL, 0, 0.0f)
 				.SetInsets(12, 6, 12, 0)
-				.Add(new BStringView("albumsLabel", "Albums"))
+				.Add(fAlbumsLabel)
 			.End()
 			.Add(fAlbumList, 1.0f)
 		.End()
@@ -524,7 +521,7 @@ ArtistWindow::ArtistWindow(const std::string& artistId)
 	        .AddGroup(B_VERTICAL, 4, 0.0f)
 	            .Add(fNameView, 0.0f)
 	            .AddGroup(B_HORIZONTAL, 0, 0.0f)
-	                .AddStrut(followerIndent)
+	                .GetLayout(&fFollowerLayout)
 	                .Add(fFollowersView, 0.0f)
 	                .AddGlue()
 	            .End()
@@ -536,7 +533,7 @@ ArtistWindow::ArtistWindow(const std::string& artistId)
 	    .Add(contentSplit, 1.0f)
 	.End();
 
-	SetSizeLimits(495, 100000, 430, 100000);
+	_RefreshFonts();
 }
 
 
@@ -1124,10 +1121,32 @@ ArtistWindow::_SaveAlbum(BMessage* message)
 
 void ArtistWindow::MessageReceived(BMessage* message)
 {
+	if (message->what == B_FONTS_UPDATED) {
+		_RefreshFonts();
+		return;
+	}
 	if (_HandleArtistStateMessage(message) || _HandleTrackActionMessage(message)
 			|| _HandleAlbumActionMessage(message)) {
 		return;
 	}
 
 	BWindow::MessageReceived(message);
+}
+
+void
+ArtistWindow::_RefreshFonts()
+{
+	MediaHeaderStyle::ApplyArtworkSize(fArtworkView);
+	MediaWindowScale::ApplyTitleFont(fNameView, 2.0f);
+	for (BView* view : {static_cast<BView*>(fFollowersView),
+		static_cast<BView*>(fTracksLabel), static_cast<BView*>(fAlbumsLabel),
+		static_cast<BView*>(fFollowButton)}) {
+		MediaWindowScale::ApplyPlainFont(view);
+	}
+	fFollowerLayout->SetInsets(std::ceil(be_plain_font->StringWidth(" ")), 0, 0, 0);
+	fTrackList->SetExplicitMinSize(BSize(B_SIZE_UNSET, UiScale::Scaled(80)));
+	fTrackList->SetExplicitPreferredSize(BSize(B_SIZE_UNSET, UiScale::Scaled(220)));
+	fTrackList->SetExplicitMaxSize(BSize(B_SIZE_UNLIMITED, UiScale::Scaled(220)));
+	fAlbumList->SetExplicitMinSize(BSize(B_SIZE_UNSET, UiScale::Scaled(140)));
+	MediaWindowScale::ApplyWindowMinimum(this, 495, 430);
 }

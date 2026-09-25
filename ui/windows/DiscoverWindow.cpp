@@ -399,6 +399,14 @@ DiscoverWindow::_MakeList(int32 i)
 		kTabCols[i], i, true);
 	list->SetDropFeedbackFlags(i == TAB_PLAYLISTS ? kDropFeedbackTargetRow
 		: kDropFeedbackNone);
+	if (i == TAB_PLAYLISTS) {
+		list->SetDetachedRowsProvider([this]() {
+			std::vector<BRow*> detached;
+			for (const auto& pending : fPendingPlaylistRemovals)
+				detached.push_back(pending.second.row);
+			return detached;
+		});
+	}
 	return list;
 }
 
