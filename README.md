@@ -18,19 +18,6 @@ cd Haify
 make
 ```
 
-## Source layout
-
-Application setup is in `app/`, windows and views in `ui/`, shared message
-contracts in `messages/`, and the application resource in `resources/`.
-Playback, navigation, Spotify, playlist and discovery code live in their respective
-feature directories. See [project structure](docs/project-structure.md).
-
-From the repository root, `python3 tools/check-project-layout.py` checks source,
-include and test paths without compiling. Regression tests and the build still
-run from the root; see the [release checklist](docs/release-checklist.md).
-After updating to the reorganized source layout, run `make clean` before `make`
-to discard dependency files that still refer to the old header locations.
-
 ## Using Haify
 
 Sign in to Spotify from Haify to browse your library, search, edit playlists,
