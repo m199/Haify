@@ -1,5 +1,7 @@
 #pragma once
 
+#include "playback/AudiobookProgress.h"
+
 #include <Window.h>
 
 #include <string>
@@ -39,6 +41,9 @@ private:
 	void _ApplyAudiobookData(BMessage* message);
 	void _ApplySavedState(BMessage* message);
 	void _ApplyChapters(BMessage* message);
+	void _ApplyPlaybackState(BMessage* message);
+	bool _HandlePlaybackMessage(BMessage* message);
+	void _UpdateChapterProgress();
 	void _PlayChapter(BMessage* message);
 	void _PlayChapterUri(const std::string& uri, const char* title,
 		int32 startPositionMs);
@@ -56,6 +61,7 @@ private:
 	bool fSavedKnown = false;
 	bool fSavePending = false;
 	bool fLoadingChapters = false;
+	AudiobookPlaybackPosition fPlaybackPosition;
 
 	ArtworkView* fArtwork = nullptr;
 	BMenuBar* fMenuBar = nullptr;

@@ -47,18 +47,9 @@
 #define B_TRANSLATION_CONTEXT "PlayerWindow"
 
 static const float kMinPlayerWindowWidth = 520.0f;
-static const bigtime_t kPlaybackStartupPollInterval = 1000000LL;
-static const bigtime_t kPlaybackStartupPollLimit = 5000000LL;
-static const bigtime_t kPlaybackStartupEmptyItemRetryLimit = 30000000LL;
-static const bigtime_t kPlaybackActivePollInterval = 5000000LL;
-static const bigtime_t kPlaybackIdlePollInterval = 15000000LL;
-static const bigtime_t kPlaybackErrorPollLimit = 30000000LL;
 static const bigtime_t kLocalPlaybackInterval = 1000000LL;
 static const bigtime_t kVerifyPollDelay = 1500000LL;
 static const bigtime_t kOptimisticTrackGuard = 15000000LL;
-static const bigtime_t kSeekGuard = 5000000LL;
-static const bigtime_t kVolumeGuard = 5000000LL;
-static const int32 kSeekProgressToleranceMs = 2000;
 static const int32 kQueuePrefetchRemainingMs = 30000;
 static const uint32 kMsgVerifyPoll = 'vpol';
 static const uint32 kMsgPlaybackTick = 'ptik';
@@ -297,21 +288,18 @@ PlayerWindow::QuitRequested()
 void
 PlayerWindow::_PollPlayback()
 {
-	if (fPlaybackRequestPending)
+	if (fPlaybackPoll.RequestPending())
 		return;
 
 	App* app = (App*)be_app;
 	SpotifyApi* api = app->GetApi();
 	if (!api) {
-		fPlaybackPollFailures++;
-		int32 shift = std::min(fPlaybackPollFailures - 1, (int32)5);
-		bigtime_t delay = kPlaybackStartupPollInterval << shift;
-		_SchedulePlaybackPoll(std::min(delay, fHasPlaybackState
-			? kPlaybackErrorPollLimit : kPlaybackStartupPollLimit));
+		_SchedulePlaybackPoll(fPlaybackPoll.Complete({}, system_time()).delayUs);
 		return;
 	}
 
-	fPlaybackRequestPending = true;
+	if (!fPlaybackPoll.BeginRequest())
+		return;
 	BMessenger self(this);
 	api->Playback().GetPlaybackState([self, api](bool ok,
 			const nlohmann::json& data) {
@@ -409,9 +397,9 @@ PlayerWindow::_ApplyPredictedNext()
 		predicted.AddString("repeat_state", fRepeatState.c_str());
 	if (predicted.ReplaceBool("shuffle_state", fShuffleOn) != B_OK)
 		predicted.AddBool("shuffle_state", fShuffleOn);
-	if (fVolumePct >= 0) {
-		if (predicted.ReplaceInt32("volume_percent", fVolumePct) != B_OK)
-			predicted.AddInt32("volume_percent", fVolumePct);
+	if (fVolume.Percent() >= 0) {
+		if (predicted.ReplaceInt32("volume_percent", fVolume.Percent()) != B_OK)
+			predicted.AddInt32("volume_percent", fVolume.Percent());
 	}
 	predicted.RemoveName("source_track_uri");
 	predicted.AddBool("optimistic", true);
@@ -428,15 +416,10 @@ PlayerWindow::_HandlePlaybackTick()
 {
 	_ReadLibrespotEvent();
 
-	if (!fIsPlaying || fDurationMs <= 0 || fLastPlaybackSyncUs <= 0)
+	auto remaining = fTimeline.RemainingMs(system_time());
+	if (!remaining)
 		return;
-
-	int64 elapsedMs = (system_time() - fLastPlaybackSyncUs) / 1000LL;
-	int64 estimated = (int64)fProgressMs + elapsedMs;
-	if (estimated > fDurationMs)
-		estimated = fDurationMs;
-
-	int32 remainingMs = fDurationMs - (int32)estimated;
+	int32 remainingMs = *remaining;
 	if (_ShouldFetchQueuePrediction(remainingMs))
 		_FetchQueuePrediction();
 
@@ -450,14 +433,14 @@ PlayerWindow::_ShouldFetchQueuePrediction(int32 remainingMs) const
 {
 	return remainingMs <= kQueuePrefetchRemainingMs && !fHasPredictedNext
 		&& !fQueueRequestPending && fQueueTrackUri != fCurrentTrackUri
-		&& fCurrentParentKind != "audiobook";
+		&& fMetadata.parentKind.value != "audiobook";
 }
 
 
 void
 PlayerWindow::_ApplyFinishedTrackTransition()
 {
-	if (_PlayNextAudiobookChapter())
+	if (_FinishAudiobookChapter())
 		return;
 	if (fHasPredictedNext)
 		_ApplyPredictedNext();
@@ -465,45 +448,33 @@ PlayerWindow::_ApplyFinishedTrackTransition()
 		_ScheduleVerifyPoll(kVerifyPollDelay);
 }
 
-PlayerWindow::PlaybackMessageData
+
+bool
+PlayerWindow::_FinishAudiobookChapter()
+{
+	auto action = fAudiobookEnd.Claim(fCurrentTrackUri, fMetadata.parentKind.value);
+	if (action == AudiobookEndAction::NotAudiobook)
+		return false;
+	if (action == AudiobookEndAction::AlreadyHandled)
+		return false;
+	// Publish the completed item before a next-item preview replaces its URI.
+	_PublishPlaybackReplicantState(fTimeline.DurationMs());
+	if (_PlayNextAudiobookChapter())
+		return true;
+	fTimeline.Store({false, fTimeline.DurationMs(), fTimeline.DurationMs()}, system_time());
+	if (fPlayerBar) {
+		fPlayerBar->SetPlaying(false);
+		fPlayerBar->SetPosition((bigtime_t)fTimeline.ProgressMs() * 1000LL,
+			(bigtime_t)fTimeline.DurationMs() * 1000LL);
+	}
+	_ScheduleVerifyPoll(kVerifyPollDelay);
+	return false;
+}
+
+PlaybackMessageData
 PlayerWindow::_ReadPlaybackMessage(BMessage* message) const
 {
-	PlaybackMessageData update;
-	update.isPlaying = message->GetBool("is_playing", false);
-	update.progressMs = message->GetInt32("progress_ms", 0);
-	update.durationMs = message->GetInt32("duration_ms", 0);
-	update.volumePct = message->GetInt32("volume_percent", -1);
-	update.optimistic = message->GetBool("optimistic", false);
-	update.preserveCurrentArtwork = message->GetBool(
-		"preserve_current_artwork", false);
-	update.volumeAuthoritative = message->GetBool("volume_authoritative",
-		true);
-	update.knownItemState = message->FindBool("has_item",
-		&update.hasItem) == B_OK;
-	update.trackUri = message->GetString("track_uri", "");
-	update.repeatState = message->GetString("repeat_state", "off");
-	update.shuffleState = message->GetBool("shuffle_state", false);
-	update.effectiveTitle = message->GetString(MessageFields::Title, "");
-	update.effectiveArtist = message->GetString(MessageFields::Artist, "");
-	update.effectiveAlbumId = message->GetString("album_id", "");
-	update.effectiveArtistId = message->GetString("artist_id", "");
-	update.effectiveItemKind = message->GetString(kNowPlayingItemKindField, "");
-	update.effectiveOpenUri = message->GetString(
-		kNowPlayingPrimaryOpenUriField, "");
-	update.effectiveParentUri = message->GetString(
-		kNowPlayingParentUriField, "");
-	update.effectiveParentKind = message->GetString(
-		kNowPlayingParentKindField, "");
-	update.effectiveShowId = message->GetString(kNowPlayingShowIdField, "");
-	update.effectiveAudiobookId = message->GetString(
-		kNowPlayingAudiobookIdField, "");
-	update.effectiveArtworkUrl = ResolvePlaybackArtworkUrl(
-		message->GetString("artwork_url", ""), fLastArtworkUrl,
-		update.preserveCurrentArtwork);
-	update.deviceId = message->GetString(MessageFields::DeviceId, "");
-	update.deviceName = message->GetString("device_name", "");
-	update.deviceType = message->GetString("device_type", "");
-	return update;
+	return PlaybackStateMessages::ReadUpdate(*message);
 }
 
 
@@ -525,36 +496,12 @@ void
 PlayerWindow::_ApplyPlaybackSeekGuard(PlaybackMessageData& update,
 	bool trackChanged)
 {
-	if (trackChanged) {
-		fSeekGuardUntilUs = 0;
-		fSeekTargetMs = 0;
-		return;
-	}
-	if (update.optimistic || fSeekGuardUntilUs <= 0)
-		return;
-	bigtime_t now = system_time();
-	if (now >= fSeekGuardUntilUs) {
-		fSeekGuardUntilUs = 0;
-		return;
-	}
-	int32 estimatedMs = fSeekTargetMs;
-	if (update.isPlaying && fLastPlaybackSyncUs > 0)
-		estimatedMs += (int32)((now - fLastPlaybackSyncUs) / 1000LL);
-	if (update.durationMs > 0 && estimatedMs > update.durationMs)
-		estimatedMs = update.durationMs;
-	if (estimatedMs < 0)
-		estimatedMs = 0;
-
-	int32 delta = update.progressMs - estimatedMs;
-	if (delta < 0)
-		delta = -delta;
-	if (delta > kSeekProgressToleranceMs) {
-		update.progressMs = estimatedMs;
-		fSeekTargetMs = update.progressMs;
+	PlaybackSeekReport result = fTimeline.FilterReport(
+		{update.isPlaying, update.progressMs, update.durationMs},
+		update.optimistic, trackChanged, system_time());
+	update.progressMs = result.progressMs;
+	if (result.verifyNeeded)
 		_ScheduleVerifyPoll(kVerifyPollDelay);
-	} else {
-		fSeekGuardUntilUs = 0;
-	}
 }
 
 
@@ -564,7 +511,7 @@ PlayerWindow::_ApplyPlaybackVolume(PlaybackMessageData& update)
 	if (!update.optimistic && update.volumeAuthoritative
 			&& update.volumePct >= 0
 			&& !_AcceptReportedVolume(update.volumePct)) {
-		update.volumePct = fVolumePct;
+		update.volumePct = fVolume.Percent();
 	}
 }
 
@@ -573,124 +520,29 @@ void
 PlayerWindow::_ResolvePlaybackMetadata(PlaybackMessageData& update,
 	bool trackChanged)
 {
-	bool hasTrackUri = !update.trackUri.empty();
-	bool preserveCurrentMetadata = ShouldPreserveCurrentNowPlayingMetadata(
-		update.optimistic, trackChanged, hasTrackUri);
-	bool preserveCurrentAudiobookContext = ShouldPreserveCurrentAudiobookContext(
-		update.optimistic, trackChanged, hasTrackUri, fCurrentParentKind,
-		update.effectiveParentKind, fCurrentPrimaryOpenUri,
-		update.effectiveOpenUri);
-	bool carryAudiobookContext = ShouldCarryAudiobookContextAcrossChapterChange(
-		update.optimistic, trackChanged, update.trackUri, fCurrentParentKind,
-		update.effectiveParentKind, fCurrentPrimaryOpenUri,
-		update.effectiveOpenUri);
-	update.effectiveTitle = ResolveNowPlayingFallbackField(
-		update.effectiveTitle, fCurrentTitle, preserveCurrentMetadata);
-	update.effectiveArtist = ResolveNowPlayingFallbackField(
-		update.effectiveArtist, fCurrentArtist, preserveCurrentMetadata);
-	update.effectiveAlbumId = ResolveNowPlayingFallbackField(
-		update.effectiveAlbumId, fCurrentAlbumId, preserveCurrentMetadata);
-	update.effectiveArtistId = ResolveNowPlayingFallbackField(
-		update.effectiveArtistId, fCurrentArtistId, preserveCurrentMetadata);
-
-	bool preserveCurrentItemContext = preserveCurrentMetadata;
-	if (preserveCurrentAudiobookContext) {
-		update.effectiveArtist = fCurrentArtist;
-		update.effectiveItemKind = fCurrentItemKind;
-		update.effectiveOpenUri = fCurrentPrimaryOpenUri;
-		update.effectiveParentUri = fCurrentParentUri;
-		update.effectiveParentKind = fCurrentParentKind;
-		update.effectiveShowId = fCurrentShowId;
-		update.effectiveAudiobookId = fCurrentAudiobookId;
-		preserveCurrentItemContext = false;
-	} else if (carryAudiobookContext) {
-		update.effectiveOpenUri = fCurrentPrimaryOpenUri;
-		update.effectiveParentUri = fCurrentParentUri;
-		update.effectiveParentKind = fCurrentParentKind;
-		update.effectiveAudiobookId = fCurrentAudiobookId;
-		preserveCurrentItemContext = false;
-	}
-	update.effectiveItemKind = ResolveNowPlayingFallbackField(
-		update.effectiveItemKind, fCurrentItemKind, preserveCurrentItemContext);
-	update.effectiveOpenUri = ResolveNowPlayingFallbackField(
-		update.effectiveOpenUri, fCurrentPrimaryOpenUri,
-		preserveCurrentItemContext);
-	update.effectiveParentUri = ResolveNowPlayingFallbackField(
-		update.effectiveParentUri, fCurrentParentUri,
-		preserveCurrentItemContext);
-	update.effectiveParentKind = ResolveNowPlayingFallbackField(
-		update.effectiveParentKind, fCurrentParentKind,
-		preserveCurrentItemContext);
-	update.effectiveShowId = ResolveNowPlayingFallbackField(
-		update.effectiveShowId, fCurrentShowId, preserveCurrentItemContext);
-	update.effectiveAudiobookId = ResolveNowPlayingFallbackField(
-		update.effectiveAudiobookId, fCurrentAudiobookId,
-		preserveCurrentItemContext);
-	update.effectiveArtworkUrl = ResolveNowPlayingFallbackField(
-		update.effectiveArtworkUrl, fLastArtworkUrl, update.optimistic);
-	if (update.effectiveOpenUri.empty() && hasTrackUri)
-		update.effectiveOpenUri = update.trackUri;
-	if (!NowPlayingUsesTrackIds(update.effectiveItemKind,
-			update.effectiveOpenUri)) {
-		update.effectiveAlbumId.clear();
-		update.effectiveArtistId.clear();
+	update.metadata = ResolvePlaybackMetadata(update.metadata, fMetadata,
+		{update.trackUri, update.optimistic, trackChanged, update.preserveCurrentArtwork});
+	fAudiobookPlayback.Apply(update.trackUri, update.optimistic, update.metadata);
+	if (trackChanged) {
+		DEBUG_PRINT("Playback context uri=%s item=%s parent=%s open=%s\n",
+			update.trackUri.c_str(), update.metadata.itemKind.value.c_str(),
+			update.metadata.parentKind.value.c_str(), update.metadata.openUri.value.c_str());
 	}
 }
-
-static void
-StoreResolvedPlaybackField(bool optimistic, const std::string& value,
-	std::string& target)
-{
-	if (!optimistic || !value.empty())
-		target = value;
-}
-
 
 void
 PlayerWindow::_StorePlaybackMetadata(const PlaybackMessageData& update)
 {
-	StoreResolvedPlaybackField(update.optimistic, update.effectiveTitle,
-		fCurrentTitle);
-	StoreResolvedPlaybackField(update.optimistic, update.effectiveArtist,
-		fCurrentArtist);
-	StoreResolvedPlaybackField(update.optimistic, update.effectiveAlbumId,
-		fCurrentAlbumId);
-	StoreResolvedPlaybackField(update.optimistic, update.effectiveArtistId,
-		fCurrentArtistId);
-	StoreResolvedPlaybackField(update.optimistic, update.effectiveItemKind,
-		fCurrentItemKind);
-	StoreResolvedPlaybackField(update.optimistic, update.effectiveOpenUri,
-		fCurrentPrimaryOpenUri);
-	StoreResolvedPlaybackField(update.optimistic, update.effectiveParentUri,
-		fCurrentParentUri);
-	StoreResolvedPlaybackField(update.optimistic, update.effectiveParentKind,
-		fCurrentParentKind);
-	StoreResolvedPlaybackField(update.optimistic, update.effectiveShowId,
-		fCurrentShowId);
-	StoreResolvedPlaybackField(update.optimistic, update.effectiveAudiobookId,
-		fCurrentAudiobookId);
-	if (!NowPlayingUsesTrackIds(update.effectiveItemKind,
-			update.effectiveOpenUri)) {
-		fCurrentAlbumId.clear();
-		fCurrentArtistId.clear();
-	}
+	StorePlaybackMetadata(fMetadata, update.metadata, update.optimistic);
 }
 
 
 void
 PlayerWindow::_StorePlaybackState(const PlaybackMessageData& update)
 {
-	fIsPlaying = update.isPlaying;
-	fProgressMs = update.progressMs;
-	fDurationMs = update.durationMs;
-	fLastPlaybackSyncUs = system_time();
-	if (update.volumePct >= 0)
-		fVolumePct = update.volumePct;
-	if (fVolumePct > 0) {
-		fLastNonZeroVolume = fVolumePct;
-		fHasLastNonZeroVolume = true;
-		fMutedByHaify = false;
-	}
+	fTimeline.Store({update.isPlaying, update.progressMs, update.durationMs},
+		system_time());
+	fVolume.Store(update.volumePct);
 	fRepeatState = update.repeatState;
 	fShuffleOn = update.shuffleState;
 	if (!update.deviceId.empty())
@@ -713,14 +565,14 @@ PlayerWindow::_ApplyPlayerBarState(const PlaybackMessageData& update)
 {
 	if (!fPlayerBar)
 		return;
-	fPlayerBar->SetTrack(update.effectiveTitle.c_str(),
-		update.effectiveArtist.c_str());
+	fPlayerBar->SetTrack(update.metadata.title.value.c_str(),
+		update.metadata.artist.value.c_str());
 	fPlayerBar->SetTrackUri(update.trackUri.c_str());
-	fPlayerBar->SetOpenUri(update.effectiveOpenUri.c_str());
-	fPlayerBar->SetTrackIds(update.effectiveAlbumId.c_str(),
-		update.effectiveArtistId.c_str());
+	fPlayerBar->SetOpenUri(update.metadata.openUri.value.c_str());
+	fPlayerBar->SetTrackIds(update.metadata.albumId.value.c_str(),
+		update.metadata.artistId.value.c_str());
 	fPlayerBar->SetPlaybackOptionsEnabled(
-		update.effectiveParentKind != "audiobook");
+		update.metadata.parentKind.value != "audiobook");
 	fPlayerBar->SetPlaying(update.isPlaying);
 	fPlayerBar->SetPosition((bigtime_t)update.progressMs * 1000LL,
 		(bigtime_t)update.durationMs * 1000LL);
@@ -758,6 +610,20 @@ PlayerWindow::_PublishPlaybackReplicantState(int32 progressMs)
 }
 
 
+bool
+PlayerWindow::_ConsumePlaybackTransition(const PlaybackMessageData& update)
+{
+	if (_ShouldDeferPlaybackUpdate(update)) {
+		_ScheduleVerifyPoll(kVerifyPollDelay);
+		return true;
+	}
+	return AudiobookReportReachesEnd(fCurrentTrackUri, fTimeline,
+			{update.trackUri, {update.isPlaying, update.progressMs, update.durationMs},
+				update.optimistic, update.knownItemState, update.hasItem}, system_time())
+		&& _FinishAudiobookChapter();
+}
+
+
 void
 PlayerWindow::_ApplyPlaybackMessage(BMessage* message)
 {
@@ -765,10 +631,8 @@ PlayerWindow::_ApplyPlaybackMessage(BMessage* message)
 	fVerifyTimer = nullptr;
 
 	PlaybackMessageData update = _ReadPlaybackMessage(message);
-	if (_ShouldDeferPlaybackUpdate(update)) {
-		_ScheduleVerifyPoll(kVerifyPollDelay);
+	if (_ConsumePlaybackTransition(update))
 		return;
-	}
 
 	bool trackChanged = (!update.trackUri.empty()
 			&& fCurrentTrackUri != update.trackUri)
@@ -782,7 +646,6 @@ PlayerWindow::_ApplyPlaybackMessage(BMessage* message)
 	}
 	_ApplyPlaybackVolume(update);
 	_ResolvePlaybackMetadata(update, trackChanged);
-	_SyncAudiobookQueueForPlayback(update);
 	_StorePlaybackMetadata(update);
 	_StorePlaybackState(update);
 	_ApplyPlayerBarState(update);
@@ -790,33 +653,24 @@ PlayerWindow::_ApplyPlaybackMessage(BMessage* message)
 	if (trackChanged)
 		_ApplyTrackChangedState(update);
 
-	fLastArtworkUrl = update.effectiveArtworkUrl;
+	fMetadata.artworkUrl = update.metadata.artworkUrl;
 	_ResolveAudiobookContextForPlayback(update.trackUri,
-		update.effectiveParentKind, update.effectiveOpenUri,
-		update.durationMs <= 0 || update.effectiveTitle.empty());
+		update.metadata.parentKind.value, update.metadata.openUri.value,
+		update.durationMs <= 0 || update.metadata.title.value.empty());
 	_PublishPlaybackReplicantState(update.progressMs);
 
-	if (trackChanged && fIsPlaying && !update.optimistic
-			&& update.effectiveParentKind != "audiobook")
+	if (trackChanged && fTimeline.IsPlaying() && !update.optimistic
+			&& update.metadata.parentKind.value != "audiobook")
 		_FetchQueuePrediction();
 	else
 		_HandlePlaybackTick();
 }
 
 
-void
-PlayerWindow::_SyncAudiobookQueueForPlayback(
-	const PlaybackMessageData& update)
-{
-	if (update.effectiveParentKind != "audiobook")
-		fAudiobookNextUris.clear();
-}
-
-
 bool
 PlayerWindow::_ApplyOptimisticPlay(BMessage* message)
 {
-	if (!ShouldPreviewPlaybackStart(fIsPlaying, fCurrentTrackUri))
+	if (!ShouldPreviewPlaybackStart(fTimeline.IsPlaying(), fCurrentTrackUri))
 		return false;
 	const char* uri = message->GetString(MessageFields::Uri, "");
 	if (!uri || !uri[0])
@@ -833,8 +687,8 @@ PlayerWindow::_ApplyOptimisticPlay(BMessage* message)
 	optimistic.AddInt32("duration_ms", message->GetInt32("duration_ms", 0));
 	optimistic.AddString("repeat_state", fRepeatState.c_str());
 	optimistic.AddBool("shuffle_state", fShuffleOn);
-	if (fVolumePct >= 0)
-		optimistic.AddInt32("volume_percent", fVolumePct);
+	if (fVolume.Percent() >= 0)
+		optimistic.AddInt32("volume_percent", fVolume.Percent());
 
 	std::string uriString = uri;
 	std::string contextUri = message->GetString(MessageFields::ContextUri, "");
@@ -955,6 +809,11 @@ PlayerWindow::_PlayUriNow(BMessage* message)
 	if (!MessageContracts::ReadPlayCommand(*message, command))
 		return;
 
+	fAudiobookEnd.Reset();
+	fAudiobookPlayback.Begin(command);
+	DEBUG_PRINT("Playback command uri=%s parent=%s open=%s following=%zu\n",
+		command.uri.c_str(), command.parentKind.c_str(),
+		command.primaryOpenUri.c_str(), command.nextQueueUris.size());
 	fLocalPlaybackPresentation.Dispatched(command.uri, system_time());
 	const std::string& uriStr = command.uri;
 
@@ -962,20 +821,13 @@ PlayerWindow::_PlayUriNow(BMessage* message)
 	if (SpotifyItemIsPlayable(kind)) {
 		bool previewApplied = !fLocalPlaybackPresentation.Active(system_time())
 			&& _ApplyOptimisticPlay(message);
-		if (PlaybackTargetsAudiobookQueue(command))
-			fAudiobookNextUris = command.nextQueueUris;
-		else
-			fAudiobookNextUris.clear();
-
 		// This metadata callback publishes a preview too; it must obey the same
 		// start gate. Confirmed playback supplies metadata through polls/events.
 		if (previewApplied && kind == kSpotifyItemTrack) {
 			_RequestTrackMetadataUpdate(api, BMessenger(this),
 				SpotifyItemIdForUri(uriStr), fRepeatState, fShuffleOn,
-				fVolumePct);
+				fVolume.Percent());
 		}
-	} else {
-		fAudiobookNextUris.clear();
 	}
 
 	DispatchPlaybackStart(api->Playback(), command, fShuffleOn, _ReportPlaybackStart);
@@ -1192,7 +1044,7 @@ PlayerWindow::_ReadLibrespotEvent()
 		_ClearPendingLibrespotTrack();
 	if (session <= 0)
 		return;
-	auto readEventFile = [this](const std::string& path, bool track) {
+	auto readEventFile = [this](const std::string& path, bool track, bool end = false) {
 		std::ifstream file(path);
 		if (!file.is_open())
 			return;
@@ -1206,8 +1058,12 @@ PlayerWindow::_ReadLibrespotEvent()
 			fields[line.substr(0, pos)] = line.substr(pos + 1);
 		}
 
-		if (!fLibrespotEvents.Accept(fields[LibrespotEventFields::SessionId],
-				fields["event_id"], track)) {
+		bool accepted = end
+			? fLibrespotEvents.AcceptEnd(fields[LibrespotEventFields::SessionId],
+				fields["event_id"])
+			: fLibrespotEvents.Accept(fields[LibrespotEventFields::SessionId],
+				fields["event_id"], track);
+		if (!accepted) {
 			return;
 		}
 
@@ -1216,6 +1072,7 @@ PlayerWindow::_ReadLibrespotEvent()
 
 	std::string statePath = SettingsController::LibrespotEventStatePath();
 	readEventFile(statePath, true);
+	readEventFile(statePath + ".end", false, true);
 	readEventFile(statePath + ".playback", false);
 }
 
@@ -1230,6 +1087,10 @@ PlayerWindow::_ApplyLibrespotEvent(
 	};
 
 	std::string event = field("event");
+	if (event == "end_of_track") {
+		_ApplyLibrespotEndEvent(fields);
+		return;
+	}
 	if (event == "track_changed") {
 		_ApplyLibrespotTrackChanged(fields);
 		return;
@@ -1266,6 +1127,17 @@ LibrespotField(const std::map<std::string, std::string>& fields,
 
 
 void
+PlayerWindow::_ApplyLibrespotEndEvent(const std::map<std::string, std::string>& fields)
+{
+	auto action = fLibrespotEvents.PositionAction(false,
+		LibrespotField(fields, "track_id"), fCurrentTrackUri, "");
+	if (action == LibrespotPositionAction::ApplyCurrent && _FinishAudiobookChapter())
+		return;
+	_SchedulePlaybackPoll(0);
+}
+
+
+void
 PlayerWindow::_ApplyLibrespotTrackChanged(
 	const std::map<std::string, std::string>& fields)
 {
@@ -1280,13 +1152,13 @@ PlayerWindow::_ApplyLibrespotTrackChanged(
 	int32 reportedProgressMs = (int32)strtol(
 		LibrespotField(fields, "position_ms").c_str(), nullptr, 10);
 	bool sameTrack = !trackUri.empty() && fCurrentTrackUri == trackUri;
-	bigtime_t elapsedSinceSyncMs = fLastPlaybackSyncUs > 0
-		? (system_time() - fLastPlaybackSyncUs) / 1000LL : 0;
+	int64 elapsedSinceSyncMs = fTimeline.ElapsedSinceSyncMs(system_time());
 	int32 progressMs = ResolveTrackChangedProgress(reportedProgressMs,
-		fProgressMs, elapsedSinceSyncMs, sameTrack, fIsPlaying, durationMs);
+		fTimeline.ProgressMs(), elapsedSinceSyncMs, sameTrack,
+		fTimeline.IsPlaying(), durationMs);
 
 	BMessage msg('pbst');
-	msg.AddBool("is_playing", fIsPlaying);
+	msg.AddBool("is_playing", fTimeline.IsPlaying());
 	msg.AddInt32("progress_ms", progressMs);
 	msg.AddInt32("duration_ms", durationMs);
 	msg.AddString("track_uri", trackUri.c_str());
@@ -1298,8 +1170,8 @@ PlayerWindow::_ApplyLibrespotTrackChanged(
 	msg.AddBool("preserve_current_artwork", true);
 	msg.AddString("repeat_state", fRepeatState.c_str());
 	msg.AddBool("shuffle_state", fShuffleOn);
-	if (fVolumePct >= 0)
-		msg.AddInt32("volume_percent", fVolumePct);
+	if (fVolume.Percent() >= 0)
+		msg.AddInt32("volume_percent", fVolume.Percent());
 	msg.AddBool("volume_authoritative", false);
 	if (ShouldDeferLibrespotTrackChanged(sameTrack)) {
 		fPendingLibrespotTrack = msg;
@@ -1336,18 +1208,16 @@ PlayerWindow::_ApplyLibrespotPositionEvent(const std::string& event,
 		_ApplyPlaybackMessage(&pending);
 		return;
 	}
-	bool playing = event == "playing" || (event != "paused" && fIsPlaying);
+	bool playing = event == "playing" || (event != "paused" && fTimeline.IsPlaying());
 	if (fLocalPlaybackPresentation.Defer(fCurrentTrackUri, false, playing, system_time())) {
 		_ScheduleVerifyPoll(kVerifyPollDelay);
 		return;
 	}
-	fIsPlaying = playing;
-	fProgressMs = positionMs;
-	fLastPlaybackSyncUs = system_time();
+	fTimeline.Store({playing, positionMs, fTimeline.DurationMs()}, system_time());
 	if (fPlayerBar) {
-		fPlayerBar->SetPlaying(fIsPlaying);
-		fPlayerBar->SetPosition((bigtime_t)fProgressMs * 1000LL,
-			(bigtime_t)fDurationMs * 1000LL);
+		fPlayerBar->SetPlaying(fTimeline.IsPlaying());
+		fPlayerBar->SetPosition((bigtime_t)fTimeline.ProgressMs() * 1000LL,
+			(bigtime_t)fTimeline.DurationMs() * 1000LL);
 	}
 }
 
@@ -1393,54 +1263,30 @@ PlayerWindow::_ApplyLibrespotVolumeChanged(
 		reportedVolume = 100;
 	if (!_AcceptReportedVolume(reportedVolume))
 		return;
-	fVolumePct = reportedVolume;
-	if (fVolumePct > 0) {
-		fLastNonZeroVolume = fVolumePct;
-		fHasLastNonZeroVolume = true;
-		fMutedByHaify = false;
-	}
+	fVolume.Store(reportedVolume);
 	if (fPlayerBar)
-		fPlayerBar->SetVolume(fVolumePct);
+		fPlayerBar->SetVolume(fVolume.Percent());
 }
 
 
 void
-PlayerWindow::_SetVolumeOptimistically(int32 volume)
+PlayerWindow::_ApplyVolumeCommand(const PlaybackVolumeCommand& command,
+	SpotifyApi* api)
 {
-	if (volume < 0)
-		volume = 0;
-	if (volume > 100)
-		volume = 100;
-
-	fVolumePct = volume;
-	fVolumeTargetPct = volume;
-	fVolumeGuardUntilUs = system_time() + kVolumeGuard;
-	fMutedByHaify = volume == 0;
-	if (volume > 0) {
-		fLastNonZeroVolume = volume;
-		fHasLastNonZeroVolume = true;
-	}
 	if (fPlayerBar)
-		fPlayerBar->SetVolume(volume);
+		fPlayerBar->SetVolume(command.percent);
 	_PublishReplicantState();
 	_ScheduleVerifyPoll(kVerifyPollDelay);
+	if (api)
+		api->Playback().SetVolume(command.percent, nullptr, command.deviceId);
 }
 
 
 bool
 PlayerWindow::_AcceptReportedVolume(int32 volume)
 {
-	if (fVolumeGuardUntilUs <= 0)
-		return true;
-
-	bool guardActive = system_time() < fVolumeGuardUntilUs;
-	if (!guardActive) {
-		fVolumeGuardUntilUs = 0;
-		fVolumeTargetPct = -1;
-		return true;
-	}
-
-	if (ShouldAcceptReportedVolume(volume, fVolumeTargetPct, true))
+	if (fVolume.FilterReport(volume, system_time())
+			== PlaybackVolumeReportDecision::Accept)
 		return true;
 
 	_ScheduleVerifyPoll(kVerifyPollDelay);
@@ -1451,20 +1297,13 @@ PlayerWindow::_AcceptReportedVolume(int32 volume)
 void
 PlayerWindow::_PublishReplicantState()
 {
-	if (fCurrentTrackUri.empty() && fCurrentTitle.empty()
-			&& fCurrentArtist.empty() && fDurationMs <= 0) {
+	if (fCurrentTrackUri.empty() && fMetadata.title.value.empty()
+			&& fMetadata.artist.value.empty() && fTimeline.DurationMs() <= 0) {
 		_PollPlayback();
 		return;
 	}
 
-	int32 progressMs = fProgressMs;
-	if (fIsPlaying && fLastPlaybackSyncUs > 0) {
-		bigtime_t elapsedUs = system_time() - fLastPlaybackSyncUs;
-		if (elapsedUs > 0)
-			progressMs += (int32)(elapsedUs / 1000LL);
-		if (fDurationMs > 0 && progressMs > fDurationMs)
-			progressMs = fDurationMs;
-	}
+	int32 progressMs = fTimeline.EstimatedProgressMs(system_time());
 
 	BMessage stateMsg(MSG_REPLICANT_STATE);
 	_FillReplicantStateMessage(stateMsg, progressMs);
@@ -1476,27 +1315,9 @@ void
 PlayerWindow::_FillReplicantStateMessage(BMessage& stateMsg,
 	int32 progressMs) const
 {
-	stateMsg.AddBool("is_playing",    fIsPlaying);
-	stateMsg.AddInt32("progress_ms",  progressMs);
-	stateMsg.AddInt32("duration_ms",  fDurationMs);
-	stateMsg.AddString("title",        fCurrentTitle.c_str());
-	stateMsg.AddString("artist",       fCurrentArtist.c_str());
-	stateMsg.AddString("album_id",     fCurrentAlbumId.c_str());
-	stateMsg.AddString("artist_id",    fCurrentArtistId.c_str());
-	stateMsg.AddString("track_uri",    fCurrentTrackUri.c_str());
-	stateMsg.AddString(kNowPlayingItemKindField, fCurrentItemKind.c_str());
-	stateMsg.AddString(kNowPlayingPrimaryOpenUriField,
-		fCurrentPrimaryOpenUri.c_str());
-	stateMsg.AddString(kNowPlayingParentUriField, fCurrentParentUri.c_str());
-	stateMsg.AddString(kNowPlayingParentKindField, fCurrentParentKind.c_str());
-	stateMsg.AddString(kNowPlayingShowIdField, fCurrentShowId.c_str());
-	stateMsg.AddString(kNowPlayingAudiobookIdField,
-		fCurrentAudiobookId.c_str());
-	stateMsg.AddString("repeat_state", fRepeatState.c_str());
-	stateMsg.AddBool("shuffle_state",  fShuffleOn);
-	if (fVolumePct >= 0)
-		stateMsg.AddInt32("volume_percent", fVolumePct);
-	stateMsg.AddString("artwork_url", fLastArtworkUrl.c_str());
+	stateMsg = PlaybackStateMessages::MakeReplicantState({fMetadata,
+		fCurrentTrackUri, fTimeline.IsPlaying(), progressMs, fTimeline.DurationMs(),
+		fVolume.Percent(), fRepeatState, fShuffleOn});
 }
 
 
@@ -1539,43 +1360,21 @@ PlayerWindow::_RemoveCurrentTrackFromLikedSongs(const std::string& trackUri)
 void
 PlayerWindow::_ApplyPlaybackPollResult(BMessage* message)
 {
-	fPlaybackRequestPending = false;
-	if (message->GetBool("poll_ok", false)) {
+	PlaybackPollReport report{message->GetBool("poll_ok", false),
+		message->GetBool("has_item", false),
+		message->GetBool("is_playing", false),
+		message->GetInt32("retry_after", -1)};
+	PlaybackPollDecision decision = fPlaybackPoll.Complete(report, system_time());
+	if (report.ok) {
 		fPendingLibrespotTrack.MakeEmpty();
 		fHasPendingLibrespotTrack = false;
-		fPlaybackPollFailures = 0;
-		bool hadPlaybackState = fHasPlaybackState;
-		bool hasItem = message->GetBool("has_item", false);
-		bool retryStartupEmptyPoll =
-			ShouldRetryStartupEmptyPlaybackPoll(hasItem, hadPlaybackState,
-				system_time(), fStartupEmptyPlaybackRetryUntilUs);
-		if (retryStartupEmptyPoll) {
-			_SchedulePlaybackPoll(kPlaybackStartupPollInterval);
-			return;
-		}
-		if (hasItem) {
-			fHasPlaybackState = true;
-			fStartupEmptyPlaybackRetryUntilUs = 0;
-		} else {
-			message->AddString("title", B_TRANSLATE("Nothing is playing"));
-		}
-		_ApplyPlaybackMessage(message);
-		bigtime_t delay = message->GetBool("is_playing", false)
-			? kPlaybackActivePollInterval : kPlaybackIdlePollInterval;
-		_SchedulePlaybackPoll(delay);
-	} else {
-		fPlaybackPollFailures++;
-		int32 retryAfter = message->GetInt32("retry_after", -1);
-		int32 shift = std::min(fPlaybackPollFailures - 1, (int32)5);
-		bigtime_t delay = retryAfter > 0
-			? (bigtime_t)retryAfter * 1000000LL
-			: kPlaybackStartupPollInterval << shift;
-		bigtime_t limit = fHasPlaybackState
-			? kPlaybackErrorPollLimit : kPlaybackStartupPollLimit;
-		if (retryAfter <= 0 && delay > limit)
-			delay = limit;
-		_SchedulePlaybackPoll(delay);
 	}
+	if (decision.action != PlaybackPollAction::RetryOnly) {
+		if (decision.action == PlaybackPollAction::ApplyEmpty)
+			message->AddString("title", B_TRANSLATE("Nothing is playing"));
+		_ApplyPlaybackMessage(message);
+	}
+	_SchedulePlaybackPoll(decision.delayUs);
 }
 
 
@@ -1600,10 +1399,10 @@ PlayerWindow::_ApplyAudiobookContextResult(BMessage* message)
 		return;
 	}
 
-	message->AddBool("is_playing", fIsPlaying);
-	message->AddInt32("progress_ms", fProgressMs);
-	if (fVolumePct >= 0)
-		message->AddInt32("volume_percent", fVolumePct);
+	message->AddBool("is_playing", fTimeline.IsPlaying());
+	message->AddInt32("progress_ms", fTimeline.ProgressMs());
+	if (fVolume.Percent() >= 0)
+		message->AddInt32("volume_percent", fVolume.Percent());
 	message->AddString("repeat_state", fRepeatState.c_str());
 	message->AddBool("shuffle_state", fShuffleOn);
 	_ApplyPlaybackMessage(message);
@@ -1622,7 +1421,7 @@ PlayerWindow::_ApplyQueuePrediction(BMessage* message)
 		fHasPredictedNext = true;
 		fQueueTrackUri = trackUri;
 		_HandlePlaybackTick();
-	} else if (fIsPlaying && trackUri && fCurrentTrackUri != trackUri) {
+	} else if (fTimeline.IsPlaying() && trackUri && fCurrentTrackUri != trackUri) {
 		_FetchQueuePrediction();
 	}
 }
@@ -1644,7 +1443,7 @@ PlayerWindow::_TogglePlayPause()
 	SpotifyApi* api = app->GetApi();
 	if (!api)
 		return;
-	bool wasPlaying = fIsPlaying;
+	bool wasPlaying = fTimeline.IsPlaying();
 	if (!wasPlaying) {
 		BMessage play(MSG_PLAY_PAUSE);
 		if (!_EnsurePlaybackDeviceThen(&play))
@@ -1654,8 +1453,7 @@ PlayerWindow::_TogglePlayPause()
 	}
 	if (fPlayerBar)
 		fPlayerBar->SetPlaying(false);
-	fIsPlaying = false;
-	fLastPlaybackSyncUs = system_time();
+	fTimeline.SetPlaying(false, system_time());
 	api->Playback().Pause(nullptr);
 }
 
@@ -1670,8 +1468,7 @@ PlayerWindow::_ResumePlayback(const std::string& deviceId)
 		return;
 	if (fPlayerBar)
 		fPlayerBar->SetPlaying(true);
-	fIsPlaying = true;
-	fLastPlaybackSyncUs = system_time();
+	fTimeline.SetPlaying(true, system_time());
 	api->Playback().Play(nullptr, deviceId);
 }
 
@@ -1698,27 +1495,21 @@ PlayerWindow::_SkipNextTrack()
 bool
 PlayerWindow::_PlayNextAudiobookChapter()
 {
-	if (fCurrentParentKind != "audiobook" || fAudiobookNextUris.empty())
-		return false;
-
 	App* app = dynamic_cast<App*>(be_app);
 	SpotifyApi* api = app ? app->GetApi() : nullptr;
 	if (!api)
 		return false;
 
-	std::string nextUri = fAudiobookNextUris.front();
-	fAudiobookNextUris.erase(fAudiobookNextUris.begin());
-	if (nextUri.empty())
+	auto next = fAudiobookPlayback.TakeNext(fCurrentTrackUri, fCurrentDeviceId);
+	if (!next)
 		return false;
 
-	PlaybackCommand command{nextUri};
-	command.parentKind = "audiobook";
-	command.primaryOpenUri = fCurrentPrimaryOpenUri;
+	const PlaybackCommand& command = *next;
 	BMessage play = MessageContracts::MakePlayCommand(command);
-	play.AddString(MessageFields::Artist, fCurrentArtist.c_str());
+	play.AddString(MessageFields::Artist, fMetadata.artist.value.c_str());
 	play.AddString(kNowPlayingItemKindField, "chapter");
-	play.AddString(kNowPlayingParentUriField, fCurrentParentUri.c_str());
-	play.AddString(kNowPlayingAudiobookIdField, fCurrentAudiobookId.c_str());
+	play.AddString(kNowPlayingParentUriField, fMetadata.parentUri.value.c_str());
+	play.AddString(kNowPlayingAudiobookIdField, fMetadata.audiobookId.value.c_str());
 	_ApplyOptimisticPlay(&play);
 
 	DispatchPlaybackStart(api->Playback(), command, fShuffleOn, _ReportPlaybackStart);
@@ -1750,13 +1541,7 @@ PlayerWindow::_SetVolumeFromMessage(BMessage* message)
 	int32 volume = 0;
 	if (message->FindInt32("be:value", &volume) != B_OK)
 		return;
-	if (volume < 0)
-		volume = 0;
-	if (volume > 100)
-		volume = 100;
-	_SetVolumeOptimistically(volume);
-	if (api)
-		api->Playback().SetVolume((int)volume, nullptr);
+	_ApplyVolumeCommand(fVolume.SetOptimistic(volume, system_time()), api);
 }
 
 
@@ -1768,8 +1553,10 @@ PlayerWindow::_ToggleMute()
 	if (!api)
 		return;
 
-	if (_RestoreMutedVolumeIfNeeded(api))
+	if (auto command = fVolume.RestoreMuted(system_time())) {
+		_ApplyVolumeCommand(*command, api);
 		return;
+	}
 
 	BMessenger self(this);
 	api->Playback().GetPlaybackState([self](bool ok,
@@ -1783,61 +1570,21 @@ PlayerWindow::_ToggleMute()
 }
 
 
-bool
-PlayerWindow::_RestoreMutedVolumeIfNeeded(SpotifyApi* api)
-{
-	if (!fMutedByHaify || fVolumePct != 0 || !fHasLastNonZeroVolume)
-		return false;
-
-	int32 targetVolume = fLastNonZeroVolume;
-	if (targetVolume <= 0)
-		targetVolume = 50;
-	if (targetVolume > 100)
-		targetVolume = 100;
-
-	_SetVolumeOptimistically(targetVolume);
-	api->Playback().SetVolume((int)targetVolume, nullptr, fVolumeDeviceId);
-	return true;
-}
-
-
 void
 PlayerWindow::_ApplyMuteToggle(BMessage* message)
 {
-	if (!message->GetBool("ok", false)
-			|| !message->GetBool("supports_volume", true)
-			|| message->GetBool("is_restricted", false)) {
+	if (!message->GetBool("ok", false))
 		return;
-	}
-
-	int32 currentVolume = -1;
-	if (message->FindInt32("volume_percent", &currentVolume) != B_OK)
+	PlaybackVolumeDevice device;
+	device.percent = message->GetInt32("volume_percent", -1);
+	device.supportsVolume = message->GetBool("supports_volume", true);
+	device.restricted = message->GetBool("is_restricted", false);
+	device.id = message->GetString("device_id", "");
+	auto command = fVolume.ToggleMute(device, system_time());
+	if (!command)
 		return;
-	if (currentVolume < 0)
-		return;
-	if (currentVolume > 100)
-		currentVolume = 100;
-	fVolumeDeviceId = message->GetString("device_id", "");
-
-	int32 targetVolume = 0;
-	if (currentVolume > 0) {
-		fLastNonZeroVolume = currentVolume;
-		fHasLastNonZeroVolume = true;
-	} else {
-		targetVolume = fHasLastNonZeroVolume ? fLastNonZeroVolume : 50;
-	}
-	if (targetVolume < 0)
-		targetVolume = 0;
-	if (targetVolume > 100)
-		targetVolume = 100;
-
-	_SetVolumeOptimistically(targetVolume);
-
 	App* app = (App*)be_app;
-	SpotifyApi* api = app->GetApi();
-	if (api)
-		api->Playback().SetVolume((int)targetVolume, nullptr,
-			fVolumeDeviceId);
+	_ApplyVolumeCommand(*command, app->GetApi());
 }
 
 
@@ -1846,7 +1593,7 @@ PlayerWindow::_ToggleShuffle()
 {
 	App* app = (App*)be_app;
 	SpotifyApi* api = app->GetApi();
-	if (!api || fCurrentParentKind == "audiobook")
+	if (!api || fMetadata.parentKind.value == "audiobook")
 		return;
 	fShuffleOn = !fShuffleOn;
 	if (fPlayerBar)
@@ -1862,7 +1609,7 @@ PlayerWindow::_ToggleRepeat()
 {
 	App* app = (App*)be_app;
 	SpotifyApi* api = app->GetApi();
-	if (!api || fCurrentParentKind == "audiobook")
+	if (!api || fMetadata.parentKind.value == "audiobook")
 		return;
 	if (fRepeatState == "off")
 		fRepeatState = "context";
@@ -1899,15 +1646,12 @@ PlayerWindow::_SeekFromMessage(BMessage* message)
 	int64 posUs = 0;
 	if (!api || message->FindInt64("position", &posUs) != B_OK)
 		return;
-	bigtime_t now = system_time();
-	fProgressMs = (int32)(posUs / 1000LL);
-	fSeekTargetMs = fProgressMs;
-	fSeekGuardUntilUs = now + kSeekGuard;
-	fLastPlaybackSyncUs = now;
+	fTimeline.SeekOptimistic((int32)(posUs / 1000LL), system_time());
+	fAudiobookEnd.Reset();
 	if (fPlayerBar)
-		fPlayerBar->SetPosition(posUs, (bigtime_t)fDurationMs * 1000LL);
+		fPlayerBar->SetPosition(posUs, (bigtime_t)fTimeline.DurationMs() * 1000LL);
 	BMessage stateMsg(MSG_REPLICANT_STATE);
-	_FillReplicantStateMessage(stateMsg, fProgressMs);
+	_FillReplicantStateMessage(stateMsg, fTimeline.ProgressMs());
 	be_app->PostMessage(&stateMsg);
 	api->Playback().Seek((int)(posUs / 1000LL), nullptr,
 		fCurrentDeviceId);
@@ -2378,7 +2122,7 @@ PlayerWindow::MenusBeginning()
 	std::string currentDeviceId = fCurrentDeviceId;
 	std::string currentDeviceName = fCurrentDeviceName;
 	std::string currentDeviceType = fCurrentDeviceType;
-	bool hasCurrentPlaybackDevice = fIsPlaying && !currentDeviceId.empty();
+	bool hasCurrentPlaybackDevice = fTimeline.IsPlaying() && !currentDeviceId.empty();
 	api->Playback().GetDevices([self, currentDeviceId, currentDeviceName,
 			currentDeviceType, hasCurrentPlaybackDevice](bool ok,
 			const nlohmann::json& data) {
@@ -2508,8 +2252,7 @@ PlayerWindow::_InitLayout()
 	fPlaybackTimer = new BMessageRunner(BMessenger(this), &tickMsg,
 		kLocalPlaybackInterval);
 
-	fStartupEmptyPlaybackRetryUntilUs = system_time()
-		+ kPlaybackStartupEmptyItemRetryLimit;
+	fPlaybackPoll.Start(system_time());
 	_SchedulePlaybackPoll(0);
 
 	_ApplySizeLimits();

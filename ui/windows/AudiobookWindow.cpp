@@ -10,6 +10,7 @@
 #include <AppDefs.h>
 #include "messages/Messages.h"
 #include "messages/MessageContracts.h"
+#include "messages/PlaybackStateMessages.h"
 #include "playback/NowPlayingFields.h"
 #include "ui/menus/TrackContextMenu.h"
 #include "spotify/SpotifyUri.h"
@@ -312,19 +313,34 @@ public:
 	AudiobookChapterRow(const std::vector<std::string>& values,
 		const std::vector<std::string>& uris,
 		const std::vector<std::string>& titles, bool playable,
-		bool resumeKnown, bool fullyPlayed, int32 resumePositionMs)
+		bool resumeKnown, bool fullyPlayed, int32 resumePositionMs,
+		int32 durationMs)
 		: DiscoverRow(values, uris, titles, playable),
 		  fPlayable(playable),
-		  fResumeKnown(resumeKnown),
-		  fFullyPlayed(fullyPlayed),
-		  fResumePositionMs(resumePositionMs)
+		  fProgress{resumeKnown, fullyPlayed, resumePositionMs},
+		  fDurationMs(durationMs)
 	{
 	}
 
+	bool ApplyPlaybackPosition(const AudiobookPlaybackPosition& playback)
+	{
+		if (fUris.empty())
+			return false;
+		auto progress = ResolveAudiobookChapterProgress(fProgress, fUris[0],
+			fDurationMs, playback);
+		if (!progress)
+			return false;
+		fProgress = *progress;
+		std::string text = AudiobookProgressText(fProgress.known,
+			fProgress.fullyPlayed, fProgress.positionMs);
+		auto* field = static_cast<BStringField*>(GetField(2));
+		field->SetString(text.c_str());
+		return true;
+	}
+
 	bool fPlayable;
-	bool fResumeKnown;
-	bool fFullyPlayed;
-	int32 fResumePositionMs;
+	AudiobookChapterProgress fProgress;
+	int32 fDurationMs;
 };
 
 struct AudiobookResumeCandidate {
@@ -360,12 +376,12 @@ UpdateResumeCandidates(AudiobookChapterRow* row,
 	}
 	if (!HasResumeCandidate(firstPlayable))
 		SetResumeCandidate(firstPlayable, row, 0);
-	if (!row->fResumeKnown || row->fFullyPlayed)
+	if (!row->fProgress.known || row->fProgress.fullyPlayed)
 		return;
 	if (!HasResumeCandidate(firstUnplayed))
 		SetResumeCandidate(firstUnplayed, row, 0);
-	if (row->fResumePositionMs > 0)
-		SetResumeCandidate(inProgress, row, row->fResumePositionMs);
+	if (row->fProgress.positionMs > 0)
+		SetResumeCandidate(inProgress, row, row->fProgress.positionMs);
 }
 
 static bool
@@ -436,6 +452,7 @@ AudiobookWindow::AudiobookWindow(const std::string& audiobookId)
 		{B_TRANSLATE("Duration"), 80, kColNone},
 		{B_TRANSLATE("Status"), 90, kColNone}
 	}, -1, true);
+	fChapterList->SetRowInvocationColumn(0);
 	fDescriptionScroll = new BScrollView(
 		"audiobookDescriptionScroll", fDescription, 0, false, true);
 	fDescriptionScroll->SetExplicitMaxSize(BSize(B_SIZE_UNLIMITED,
@@ -813,14 +830,36 @@ AudiobookWindow::_ApplyChapters(BMessage* message)
 			{displayTitle, duration, progress},
 			{playable ? chapterUri : "", "", ""},
 			{chapterTitle, "", ""}, playable, resumeKnown, fullyPlayed,
-			resumePositionMs));
+			resumePositionMs, durationMs));
 	}
+	_UpdateChapterProgress();
 	int32 next = message->GetInt32("next_offset", 0);
 	if (next > 0 && next < message->GetInt32("total", 0)) {
 		_LoadChapters(next);
 		return;
 	}
 	_UpdateResumeControl();
+}
+
+
+void
+AudiobookWindow::_ApplyPlaybackState(BMessage* message)
+{
+	const auto state = PlaybackStateMessages::ReadReplicantState(*message);
+	fPlaybackPosition = {state.trackUri, state.progressMs, state.durationMs};
+	_UpdateChapterProgress();
+	_UpdateResumeControl();
+}
+
+
+void
+AudiobookWindow::_UpdateChapterProgress()
+{
+	for (int32 index = 0; index < fChapterList->CountRows(); index++) {
+		auto* row = dynamic_cast<AudiobookChapterRow*>(fChapterList->RowAt(index));
+		if (row && row->ApplyPlaybackPosition(fPlaybackPosition))
+			fChapterList->InvalidateRow(row);
+	}
 }
 
 
@@ -978,6 +1017,26 @@ AudiobookWindow::_ApplyCapabilitiesChanged()
 }
 
 
+bool
+AudiobookWindow::_HandlePlaybackMessage(BMessage* message)
+{
+	switch (message->what) {
+		case MSG_REPLICANT_STATE:
+			_ApplyPlaybackState(message);
+			return true;
+		case MSG_PLAY_URI:
+		case 'tply':
+			_PlayChapter(message);
+			return true;
+		case kMsgResumeAudiobook:
+			_ResumeAudiobook();
+			return true;
+		default:
+			return false;
+	}
+}
+
+
 void
 AudiobookWindow::MessageReceived(BMessage* message)
 {
@@ -985,6 +1044,8 @@ AudiobookWindow::MessageReceived(BMessage* message)
 		_RefreshFonts();
 		return;
 	}
+	if (_HandlePlaybackMessage(message))
+		return;
 	switch (message->what) {
 		case MSG_LIBRARY_CHANGED:
 			_ApplyLibraryChanged(message);
@@ -1002,20 +1063,12 @@ AudiobookWindow::MessageReceived(BMessage* message)
 			_ApplyChapters(message);
 			break;
 
-		case MSG_PLAY_URI:
-			_PlayChapter(message);
-			break;
-
 		case 'rClk':
 			_ShowChapterContextMenu(message);
 			break;
 
 		case 'iCmR':
 			_ShowPlayableContextMenu(message);
-			break;
-
-		case 'tply':
-			_PlayChapter(message);
 			break;
 
 		case 'remL':
@@ -1028,10 +1081,6 @@ AudiobookWindow::MessageReceived(BMessage* message)
 
 		case 'aSav':
 			_ToggleSaved();
-			break;
-
-		case kMsgResumeAudiobook:
-			_ResumeAudiobook();
 			break;
 
 		case MSG_SPOTIFY_CAPABILITIES_CHANGED:

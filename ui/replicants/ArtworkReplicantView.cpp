@@ -1,3 +1,4 @@
+#include "messages/PlaybackStateMessages.h"
 #include "ui/replicants/ArtworkReplicantView.h"
 #include "ui/windows/ArtworkWindow.h"
 #include "app/Config.h"
@@ -533,15 +534,12 @@ ArtworkReplicantView::_ApplyReplicantStateMessage(BMessage* message)
 {
     if (!fRegistered)
         _Register();
-    fTitle = message->GetString("title", "");
-    fArtist = message->GetString("artist", "");
-    const char* openUri = message->GetString(
-        kNowPlayingPrimaryOpenUriField, "");
-    if (!openUri || !openUri[0])
-        openUri = message->GetString("track_uri", "");
-    fOpenUri = openUri;
+    const auto state = PlaybackStateMessages::ReadReplicantState(*message);
+    fTitle = state.metadata.title.value;
+    fArtist = state.metadata.artist.value;
+    fOpenUri = state.metadata.openUri.value;
     _ApplyAppearance(message);
-    SetArtworkUrl(message->GetString("artwork_url", ""));
+    SetArtworkUrl(state.metadata.artworkUrl.value.c_str());
 }
 
 

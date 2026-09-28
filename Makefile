@@ -13,6 +13,11 @@ SRCS = app/App.cpp ui/windows/PlayerWindow.cpp playback/NowPlayingItem.cpp playb
 	ui/views/ArtworkView.cpp ui/views/MediaDescriptionView.cpp ui/DescriptionTextFormatter.cpp ui/views/DiscoverListView.cpp ui/menus/TrackContextMenu.cpp ui/dialogs/TextInputDialog.cpp \
 	network/HttpClient.cpp network/OAuthCallbackServer.cpp network/ImageCache.cpp \
 	playback/PlaybackStartController.cpp \
+	playback/PlaybackVolumeState.cpp \
+	playback/PlaybackTimeline.cpp \
+	playback/PlaybackPollState.cpp \
+	playback/PlaybackMetadata.cpp \
+	messages/PlaybackStateMessages.cpp \
 	playback/LibrespotTransferController.cpp \
 	playback/LibrespotTransferMessages.cpp \
 	discover/DiscoverRowFactory.cpp \

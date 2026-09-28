@@ -1790,6 +1790,7 @@ App::_WriteLibrespotEventScript()
 		<< "PLAYBACK_FILE=\"${STATE_FILE}.playback\"\n"
 		<< "case \"$PLAYER_EVENT\" in\n"
 		<< "    track_changed) TARGET_FILE=\"$STATE_FILE\" ;;\n"
+		<< "    end_of_track) TARGET_FILE=\"${STATE_FILE}.end\" ;;\n"
 		<< "    *) TARGET_FILE=\"$PLAYBACK_FILE\" ;;\n"
 		<< "esac\n"
 		<< "tmp=\"${TARGET_FILE}.tmp.$$\"\n"

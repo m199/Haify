@@ -62,18 +62,6 @@ NormalizeSearchFilters(bool selectAll, std::vector<bool>& typeSelections)
 	return false;
 }
 
-inline bool
-ShouldAcceptReportedVolume(int reportedVolume, int targetVolume,
-	bool guardActive, int tolerance = 1)
-{
-	if (!guardActive)
-		return true;
-	int difference = reportedVolume - targetVolume;
-	if (difference < 0)
-		difference = -difference;
-	return difference <= tolerance;
-}
-
 inline int
 ResolveTrackChangedProgress(int reportedProgressMs, int currentProgressMs,
 	long long elapsedSinceSyncMs, bool sameTrack, bool isPlaying,
@@ -97,70 +85,12 @@ ShouldDeferLibrespotTrackChanged(bool sameTrack)
 	return !sameTrack;
 }
 
-inline std::string
-ResolvePlaybackArtworkUrl(const std::string& reportedArtworkUrl,
-	const std::string& currentArtworkUrl, bool preserveCurrentArtwork)
-{
-	return preserveCurrentArtwork ? currentArtworkUrl : reportedArtworkUrl;
-}
-
-inline std::string
-ResolveNowPlayingFallbackField(const std::string& reportedValue,
-	const std::string& currentValue, bool preserveCurrentWhenReportedEmpty)
-{
-	if (preserveCurrentWhenReportedEmpty && reportedValue.empty())
-		return currentValue;
-	return reportedValue;
-}
-
-inline bool
-ShouldPreserveCurrentNowPlayingMetadata(bool optimistic, bool trackChanged,
-	bool hasTrackUri)
-{
-	return optimistic || (!trackChanged && hasTrackUri);
-}
-
-inline bool
-ShouldPreserveCurrentAudiobookContext(bool optimistic, bool trackChanged,
-	bool hasTrackUri, const std::string& currentParentKind,
-	const std::string& reportedParentKind,
-	const std::string& currentOpenUri, const std::string& reportedOpenUri)
-{
-	return !optimistic && !trackChanged && hasTrackUri
-		&& currentParentKind == "audiobook"
-		&& reportedParentKind != "audiobook"
-		&& SpotifyItemKindForUri(currentOpenUri) == kSpotifyItemAudiobook
-		&& SpotifyItemKindForUri(reportedOpenUri) != kSpotifyItemAudiobook;
-}
-
-inline bool
-ShouldCarryAudiobookContextAcrossChapterChange(bool optimistic,
-	bool trackChanged, const std::string& trackUri,
-	const std::string& currentParentKind,
-	const std::string& reportedParentKind,
-	const std::string& currentOpenUri, const std::string& reportedOpenUri)
-{
-	return !optimistic && trackChanged
-		&& SpotifyItemKindForUri(trackUri) == kSpotifyItemEpisode
-		&& currentParentKind == "audiobook"
-		&& reportedParentKind.empty()
-		&& SpotifyItemKindForUri(currentOpenUri) == kSpotifyItemAudiobook
-		&& SpotifyItemKindForUri(reportedOpenUri) != kSpotifyItemShow;
-}
-
 // Preview a track switch only while a known item is already playing. Finding
 // a device (including a starting librespot) is not a playback confirmation.
 inline bool
 ShouldPreviewPlaybackStart(bool isPlaying, const std::string& currentTrackUri)
 {
 	return isPlaying && SpotifyItemIsPlayable(SpotifyItemKindForUri(currentTrackUri));
-}
-
-inline bool
-ShouldRetryStartupEmptyPlaybackPoll(bool hasItem, bool hadPlaybackState,
-	long long nowUs, long long retryUntilUs)
-{
-	return !hasItem && !hadPlaybackState && nowUs < retryUntilUs;
 }
 
 inline bool
@@ -208,21 +138,6 @@ ResolveNowPlayingSubtitleClickAction(const std::string& artistId,
 	if (!openUri.empty())
 		return kNowPlayingSubtitleClickOpenUri;
 	return kNowPlayingSubtitleClickIgnore;
-}
-
-inline bool
-NowPlayingUsesTrackIds(const std::string& itemKind,
-	const std::string& openUri)
-{
-	SpotifyItemKind effectiveKind = SpotifyItemKindForTypeName(itemKind);
-	SpotifyItemKind openKind = SpotifyItemKindForUri(openUri);
-	if (effectiveKind == kSpotifyItemEpisode
-			|| openKind == kSpotifyItemShow
-			|| openKind == kSpotifyItemAudiobook
-			|| openKind == kSpotifyItemEpisode) {
-		return false;
-	}
-	return true;
 }
 
 inline SpotifyItemKind

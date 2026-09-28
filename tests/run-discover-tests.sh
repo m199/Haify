@@ -1,5 +1,5 @@
 #!/bin/sh
-# Phase 3/4/5/6 regression tests on Haiku. Do not run before
+# Haify regression tests on Haiku. Do not run before
 # build/test permission; this script compiles fixtures but never starts Haify.
 set -eu
 cd "$(dirname "$0")/.."
@@ -36,6 +36,28 @@ cxx="${CXX:-c++}"
 # Local startup: stale event files, track identity and transfer-before-play.
 "$cxx" -std=c++17 -Wall -Wextra -Werror -I. tests/LocalPlaybackStateTest.cpp playback/PlaybackStartController.cpp spotify/api/PlaybackApi.cpp spotify/api/SpotifyUrl.cpp -o "$test_output/local-playback-state"
 "$test_output/local-playback-state"
+# Phase 8a: volume guard, mute/restore and device routing without a Haiku runtime.
+"$cxx" -std=c++17 -Wall -Wextra -Werror -I. tests/PlaybackVolumeStateTest.cpp playback/PlaybackVolumeState.cpp -o "$test_output/playback-volume-state"
+"$test_output/playback-volume-state"
+# Phase 8b: supplied-clock seek/position and poll scheduling without Haiku.
+"$cxx" -std=c++17 -Wall -Wextra -Werror -I. tests/PlaybackTimelineTest.cpp playback/PlaybackTimeline.cpp -o "$test_output/playback-timeline"
+"$test_output/playback-timeline"
+"$cxx" -std=c++17 -Wall -Wextra -Werror -I. tests/PlaybackPollStateTest.cpp playback/PlaybackPollState.cpp -o "$test_output/playback-poll-state"
+"$test_output/playback-poll-state"
+# Phase 8c: metadata inheritance and the existing native replicant wire contract.
+"$cxx" -std=c++17 -Wall -Wextra -Werror -I. tests/PlaybackMetadataTest.cpp playback/PlaybackMetadata.cpp -o "$test_output/playback-metadata"
+"$test_output/playback-metadata"
+"$cxx" -std=c++17 -Wall -Wextra -Werror -Wno-multichar -I. tests/PlaybackStateMessagesTest.cpp messages/PlaybackStateMessages.cpp -lbe -o "$test_output/playback-state-messages"
+"$test_output/playback-state-messages"
+# Audiobook status follows the matching playback snapshot, including pause/seek.
+"$cxx" -std=c++17 -Wall -Wextra -Werror -I. tests/AudiobookProgressTest.cpp -o "$test_output/audiobook-progress"
+"$test_output/audiobook-progress"
+# Chapter completion, final-report ordering, duplicate end events and replay.
+"$cxx" -std=c++17 -Wall -Wextra -Werror -I. tests/AudiobookEndStateTest.cpp playback/PlaybackTimeline.cpp -o "$test_output/audiobook-end-state"
+"$test_output/audiobook-end-state"
+# Explicit book provenance survives local startup without a playback preview.
+"$cxx" -std=c++17 -Wall -Wextra -Werror -I. tests/AudiobookPlaybackContextTest.cpp playback/PlaybackMetadata.cpp playback/PlaybackStartController.cpp spotify/api/PlaybackApi.cpp spotify/api/SpotifyUrl.cpp -o "$test_output/audiobook-playback-context"
+"$test_output/audiobook-playback-context"
 # Phase 5b: discovery/idle/transfer ordering and strict native completion messages.
 "$cxx" -std=c++17 -Wall -Wextra -Werror -I. tests/LibrespotTransferControllerTest.cpp playback/LibrespotTransferController.cpp spotify/api/PlaybackApi.cpp spotify/api/SpotifyUrl.cpp -o "$test_output/librespot-transfer-controller"
 "$test_output/librespot-transfer-controller"

@@ -79,6 +79,9 @@ public:
 	virtual void		MessageReceived(BMessage* message);
 	virtual void		AttachedToWindow();
 	void				SetPlayingUri(const std::string& uri);
+	// A single-action list can invoke its focused row without pointer hit testing.
+	// Other lists retain column-specific actions (the default is -1).
+	void				SetRowInvocationColumn(int32 column) { fRowInvocationColumn = column; }
 	void				ForwardDroppedMessage(BMessage* message);
 	void				UpdateDropMarker(BPoint screenWhere);
 	void				UpdateDropTarget(BPoint screenWhere);
@@ -110,6 +113,7 @@ private:
 	bool				_BuildDragMessage(DiscoverRow* row, int32 column,
 							BMessage& drag) const;
 	std::vector<ColAction>	fActions;
+	int32				fRowInvocationColumn = -1;
 	int32				fLogicalTab;
 	DropMarkerController fDropMarker;
 	bool				fFiltersInstalled = false;

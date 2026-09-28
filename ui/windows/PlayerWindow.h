@@ -3,6 +3,12 @@
 
 #include "playback/LibrespotEventState.h"
 #include "playback/LocalPlaybackPresentation.h"
+#include "playback/PlaybackVolumeState.h"
+#include "playback/PlaybackTimeline.h"
+#include "playback/PlaybackPollState.h"
+#include "playback/AudiobookEndState.h"
+#include "playback/AudiobookPlaybackContext.h"
+#include "messages/PlaybackStateMessages.h"
 
 #include <Message.h>
 #include <Window.h>
@@ -27,35 +33,6 @@ public:
 	virtual void			MenusBeginning();
 
 private:
-	struct PlaybackMessageData {
-		bool isPlaying = false;
-		int32 progressMs = 0;
-		int32 durationMs = 0;
-		int32 volumePct = -1;
-		bool optimistic = false;
-		bool preserveCurrentArtwork = false;
-		bool volumeAuthoritative = true;
-		bool hasItem = true;
-		bool knownItemState = false;
-		std::string trackUri;
-		std::string repeatState;
-		bool shuffleState = false;
-		std::string effectiveTitle;
-		std::string effectiveArtist;
-		std::string effectiveAlbumId;
-		std::string effectiveArtistId;
-		std::string effectiveItemKind;
-		std::string effectiveOpenUri;
-		std::string effectiveParentUri;
-		std::string effectiveParentKind;
-		std::string effectiveShowId;
-		std::string effectiveAudiobookId;
-		std::string effectiveArtworkUrl;
-		std::string deviceId;
-		std::string deviceName;
-		std::string deviceType;
-	};
-
 	void					_InitMenu();
 	void					_InitLayout();
 	void					_PollPlayback();
@@ -65,6 +42,10 @@ private:
 	bool					_ShouldFetchQueuePrediction(
 								int32 remainingMs) const;
 	void					_ApplyFinishedTrackTransition();
+	bool					_FinishAudiobookChapter();
+	bool					_ConsumePlaybackTransition(const PlaybackMessageData& update);
+	void					_ApplyLibrespotEndEvent(
+								const std::map<std::string, std::string>& fields);
 	void					_ScheduleVerifyPoll(bigtime_t delay);
 	void					_ApplyPredictedNext();
 	void					_ApplyPlaybackMessage(BMessage* message);
@@ -79,8 +60,6 @@ private:
 	void					_ResolvePlaybackMetadata(
 								PlaybackMessageData& update,
 								bool trackChanged);
-	void					_SyncAudiobookQueueForPlayback(
-								const PlaybackMessageData& update);
 	void					_StorePlaybackMetadata(
 								const PlaybackMessageData& update);
 	void					_StorePlaybackState(
@@ -119,7 +98,6 @@ private:
 	void					_SkipPreviousTrack();
 	void					_SetVolumeFromMessage(BMessage* message);
 	void					_ToggleMute();
-	bool					_RestoreMutedVolumeIfNeeded(SpotifyApi* api);
 	void					_ApplyMuteToggle(BMessage* message);
 	void					_ToggleShuffle();
 	void					_ToggleRepeat();
@@ -156,7 +134,8 @@ private:
 								const std::map<std::string, std::string>& fields);
 	void					_ApplyLibrespotVolumeChanged(
 								const std::map<std::string, std::string>& fields);
-	void					_SetVolumeOptimistically(int32 volume);
+	void					_ApplyVolumeCommand(const PlaybackVolumeCommand& command,
+								SpotifyApi* api);
 	bool					_AcceptReportedVolume(int32 volume);
 	void					_PublishReplicantState();
 	void					_ShowAddTrackMenu(const std::string& trackUri,
@@ -178,42 +157,19 @@ private:
 	BMessageRunner*			fVerifyTimer   = nullptr;
 	BMessageRunner*			fLocalPlaybackDeviceTimer = nullptr;
 
-	bool					fIsPlaying     = false;
 	bool					fHasPredictedNext = false;
 	bool					fQueueRequestPending = false;
-	bool					fPlaybackRequestPending = false;
 	bool					fHasPendingPlaybackCommand = false;
 	bool					fPlaybackDevicePromptOpen = false;
 	int32					fLocalPlaybackDeviceAttempts = 0;
 	int64					fPreviousLocalPlaybackGeneration = 0;
-	bool					fHasPlaybackState = false;
-	bigtime_t				fStartupEmptyPlaybackRetryUntilUs = 0;
-	int32					fPlaybackPollFailures = 0;
 	bool					fShuffleOn     = false;
-	int32					fProgressMs    = 0;
-	int32					fDurationMs    = 0;
-	int32					fVolumePct     = -1;
-	int32					fLastNonZeroVolume = 50;
-	bool					fHasLastNonZeroVolume = false;
-	bool					fMutedByHaify = false;
-	int32					fVolumeTargetPct = -1;
-	bigtime_t				fVolumeGuardUntilUs = 0;
-	bigtime_t				fLastPlaybackSyncUs = 0;
-	int32					fSeekTargetMs = 0;
-	bigtime_t				fSeekGuardUntilUs = 0;
+	PlaybackVolumeState		fVolume;
+	PlaybackMetadata		fMetadata;
+	PlaybackTimeline		fTimeline;
+	PlaybackPollState		fPlaybackPoll;
+	AudiobookEndState		fAudiobookEnd;
 	std::string				fRepeatState   = "off";
-	std::string				fCurrentTitle;
-	std::string				fCurrentArtist;
-	std::string				fCurrentAlbumId;
-	std::string				fCurrentArtistId;
-	std::string				fCurrentItemKind;
-	std::string				fCurrentPrimaryOpenUri;
-	std::string				fCurrentParentUri;
-	std::string				fCurrentParentKind;
-	std::string				fCurrentShowId;
-	std::string				fCurrentAudiobookId;
-	std::string				fLastArtworkUrl;
-	std::string				fVolumeDeviceId;
 	std::string				fCurrentDeviceId;
 	std::string				fCurrentDeviceName;
 	std::string				fCurrentDeviceType;
@@ -226,7 +182,7 @@ private:
 	bool					fAudiobookContextRequestPending = false;
 	std::string				fAudiobookContextRequestTrackUri;
 	std::string				fLastAudiobookContextLookupTrackUri;
-	std::vector<std::string> fAudiobookNextUris;
+	AudiobookPlaybackContext fAudiobookPlayback;
 	bool					fHasPendingLibrespotTrack = false;
 	BMessage				fPendingLibrespotTrack;
 	BMessage				fPredictedNext;

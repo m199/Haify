@@ -702,15 +702,20 @@ DiscoverListView::_FindClickTarget(DiscoverRow*& row, int32& column,
 	if (!Window())
 		return false;
 
-	row = (DiscoverRow*)CurrentSelection();
+	row = dynamic_cast<DiscoverRow*>(fRowInvocationColumn >= 0
+		? FocusRow() : CurrentSelection());
+	if (!row)
+		row = dynamic_cast<DiscoverRow*>(CurrentSelection());
 	if (!row)
 		return false;
 
-	BPoint where;
-	uint32 buttons;
-	GetMouse(&where, &buttons, false);
-
-	column = _ColumnAt(where.x);
+	column = fRowInvocationColumn;
+	if (column < 0) {
+		BPoint where;
+		uint32 buttons;
+		GetMouse(&where, &buttons, false);
+		column = _ColumnAt(where.x);
+	}
 	if (column < 0 || column >= (int32)fActions.size())
 		return false;
 	if (column >= (int32)row->fUris.size() || row->fUris[column].empty())

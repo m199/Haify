@@ -22,6 +22,7 @@ public:
 		fSession = session;
 		fTrackEvent.clear();
 		fPlaybackEvent.clear();
+		fEndEvent.clear();
 		fTrackUri.clear();
 		fTrackId.clear();
 		return true;
@@ -48,6 +49,15 @@ public:
 		return true;
 	}
 
+	bool AcceptEnd(const std::string& session, const std::string& eventId)
+	{
+		if (fSession <= 0 || session != std::to_string(fSession)
+				|| eventId.empty() || eventId == fEndEvent)
+			return false;
+		fEndEvent = eventId;
+		return true;
+	}
+
 	LibrespotPositionAction PositionAction(bool playing, const std::string& trackId,
 		const std::string& currentUri, const std::string& pendingUri) const
 	{
@@ -65,6 +75,7 @@ private:
 	int64_t fSession = 0;
 	std::string fTrackEvent;
 	std::string fPlaybackEvent;
+	std::string fEndEvent;
 	std::string fTrackUri;
 	std::string fTrackId;
 };

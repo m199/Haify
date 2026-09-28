@@ -1,3 +1,4 @@
+#include "messages/PlaybackStateMessages.h"
 #include "ui/views/PlayerBarView.h"
 #include "app/Config.h"
 #include "messages/Messages.h"
@@ -1469,24 +1470,18 @@ void PlayerBarView::_ApplyReplicantStateMessage(BMessage* msg) {
     if (fIsReplicant && !fRegistered)
         _RegisterReplicant();
     _ApplyReplicantAppearance(msg);
-    SetTrack(msg->GetString("title", ""), msg->GetString("artist", ""));
-    SetTrackUri(msg->GetString("track_uri", ""));
-    const char* openUri = msg->GetString(kNowPlayingPrimaryOpenUriField, "");
-    if (!openUri || !openUri[0])
-        openUri = msg->GetString("track_uri", "");
-    SetOpenUri(openUri);
-    SetTrackIds(msg->GetString("album_id", ""), msg->GetString("artist_id", ""));
-    SetPlaying(msg->GetBool("is_playing", false));
-    int32 pos = msg->GetInt32("progress_ms", 0);
-    int32 dur = msg->GetInt32("duration_ms", 0);
-    SetPosition((bigtime_t)pos * 1000LL, (bigtime_t)dur * 1000LL);
-    int32 vol = msg->GetInt32("volume_percent", -1);
-    if (vol >= 0) SetVolume(vol);
-    SetShuffle(msg->GetBool("shuffle_state", false));
-    SetRepeat(msg->GetString("repeat_state", "off"));
-    SetPlaybackOptionsEnabled(
-        strcmp(msg->GetString(kNowPlayingParentKindField, ""), "audiobook")
-            != 0);
+    const auto state = PlaybackStateMessages::ReadReplicantState(*msg);
+    SetTrack(state.metadata.title.value.c_str(), state.metadata.artist.value.c_str());
+    SetTrackUri(state.trackUri.c_str());
+    SetOpenUri(state.metadata.openUri.value.c_str());
+    SetTrackIds(state.metadata.albumId.value.c_str(), state.metadata.artistId.value.c_str());
+    SetPlaying(state.isPlaying);
+    SetPosition((bigtime_t)state.progressMs * 1000LL,
+        (bigtime_t)state.durationMs * 1000LL);
+    if (state.volumePct >= 0) SetVolume(state.volumePct);
+    SetShuffle(state.shuffleState);
+    SetRepeat(state.repeatState.c_str());
+    SetPlaybackOptionsEnabled(state.metadata.parentKind.value != "audiobook");
 }
 
 
