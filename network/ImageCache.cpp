@@ -1,5 +1,6 @@
 #include "ImageCache.h"
 #include "HttpClient.h"
+#include "ImageCacheKeys.h"
 #include "SettingsController.h"
 #include <TranslationUtils.h>
 #include <Autolock.h>
@@ -11,6 +12,7 @@
 #include <Locker.h>
 #include <algorithm>
 #include <chrono>
+#include <deque>
 #include <stdio.h>
 #include <thread>
 #include <sys/stat.h>
@@ -26,6 +28,22 @@ static int64 sMaxCacheBytes = 500LL * 1024LL * 1024LL;
 static BLocker sImageCacheLock("Haify image cache");
 static const size_t kMaxMemoryCacheEntries = 96;
 static const int32 kMaxDownloadAttempts = 3;
+static const int32 kMaxActiveLoads = 4;
+
+struct ImageLoadJob {
+    std::string url;
+    uint64 generation = 0;
+    bool allowDiskCache = true;
+    int32 attempt = 0;
+};
+
+// Guarded by sImageCacheLock.
+static std::deque<ImageLoadJob> sLoadQueue;
+static int32 sActiveLoads = 0;
+// Approximate bytes on disk, -1 when unknown. Overestimates (overwrites,
+// removed broken files) only cause an earlier prune, never an overrun.
+static int64 sDiskCacheBytes = -1;
+static bool sPruneRunning = false;
 
 struct CacheFileInfo {
     std::string path;
@@ -47,20 +65,7 @@ static std::string GetCachePath(const std::string& url) {
     if (dirPath.empty())
         return "";
     BPath path(dirPath.c_str());
-
-    std::string filename;
-    size_t lastSlash = url.find_last_of('/');
-    filename = (lastSlash != std::string::npos) ? url.substr(lastSlash + 1) : url;
-
-    for (char& c : filename) {
-        if (c == '/' || c == '\\' || c == ':' || c == '*' ||
-            c == '?' || c == '"' || c == '<' || c == '>' || c == '|')
-            c = '_';
-    }
-    if (filename.length() > 60) filename = filename.substr(filename.length() - 60);
-    filename += ".jpg";
-
-    path.Append(filename.c_str());
+    path.Append(ImageCacheKeys::FileName(url).c_str());
     return path.Path();
 }
 
@@ -103,6 +108,8 @@ status_t ImageCache::Clear(int32* filesRemoved)
             (*filesRemoved)++;
     }
 
+    BAutolock lock(&sImageCacheLock);
+    sDiskCacheBytes = -1;
     return B_OK;
 }
 
@@ -193,6 +200,8 @@ status_t ImageCache::PruneToSize(int64 maxBytes)
             totalSize -= file.size;
     }
 
+    BAutolock lock(&sImageCacheLock);
+    sDiskCacheBytes = totalSize;
     return B_OK;
 }
 
@@ -289,32 +298,74 @@ LooksLikeCompleteImage(const std::string& body)
 void ImageCache::StartLoad(const std::string& url, uint64 generation,
     bool allowDiskCache)
 {
-    std::thread([url, generation, allowDiskCache]() {
-        if (!ImageCache::IsCurrentGeneration(url, generation))
-            return;
+    ImageLoadJob job;
+    job.url = url;
+    job.generation = generation;
+    job.allowDiskCache = allowDiskCache;
+    EnqueueLoad(job);
+}
 
-        std::string cacheFile = GetCachePath(url);
-        if (!allowDiskCache && !cacheFile.empty())
-            unlink(cacheFile.c_str());
+void ImageCache::EnqueueLoad(const ImageLoadJob& job)
+{
+    {
+        BAutolock lock(&sImageCacheLock);
+        sLoadQueue.push_back(job);
+    }
+    PumpLoads();
+}
 
-        if (allowDiskCache && !cacheFile.empty()) {
-            BBitmap* diskBitmap = BTranslationUtils::GetBitmap(
-                cacheFile.c_str());
-            if (diskBitmap && !diskBitmap->IsValid()) {
-                delete diskBitmap;
-                diskBitmap = nullptr;
-            }
-            if (diskBitmap) {
-                utime(cacheFile.c_str(), nullptr);
-                ImageCache::FinishLoad(url, generation, diskBitmap);
-                return;
-            }
-            // Do not repeatedly decode a known-broken cache entry.
-            unlink(cacheFile.c_str());
+void ImageCache::PumpLoads()
+{
+    BAutolock lock(&sImageCacheLock);
+    while (sActiveLoads < kMaxActiveLoads && !sLoadQueue.empty()) {
+        ImageLoadJob job = sLoadQueue.front();
+        sLoadQueue.pop_front();
+        sActiveLoads++;
+        std::thread([job]() { ImageCache::RunLoad(job); }).detach();
+    }
+}
+
+// Every started job calls this exactly once, when its disk read or HTTP
+// request has finished.
+void ImageCache::ReleaseLoadSlot()
+{
+    {
+        BAutolock lock(&sImageCacheLock);
+        sActiveLoads--;
+    }
+    PumpLoads();
+}
+
+void ImageCache::RunLoad(const ImageLoadJob& job)
+{
+    // Rows scrolled away or reloaded meanwhile cost neither disk nor network.
+    if (!IsCurrentGeneration(job.url, job.generation)) {
+        ReleaseLoadSlot();
+        return;
+    }
+
+    std::string cacheFile = GetCachePath(job.url);
+    bool readDisk = job.allowDiskCache && job.attempt == 0;
+    if (!job.allowDiskCache && job.attempt == 0 && !cacheFile.empty())
+        unlink(cacheFile.c_str());
+
+    if (readDisk && !cacheFile.empty()) {
+        BBitmap* diskBitmap = BTranslationUtils::GetBitmap(cacheFile.c_str());
+        if (diskBitmap && !diskBitmap->IsValid()) {
+            delete diskBitmap;
+            diskBitmap = nullptr;
         }
+        if (diskBitmap) {
+            utime(cacheFile.c_str(), nullptr);
+            FinishLoad(job.url, job.generation, diskBitmap);
+            ReleaseLoadSlot();
+            return;
+        }
+        // Do not repeatedly decode a known-broken cache entry.
+        unlink(cacheFile.c_str());
+    }
 
-        ImageCache::StartNetworkLoad(url, generation, cacheFile, 0);
-    }).detach();
+    StartNetworkLoad(job);
 }
 
 bool ImageCache::IsCurrentGeneration(const std::string& url,
@@ -356,6 +407,26 @@ DecodeBitmapBody(const std::string& body)
     return bitmap;
 }
 
+static void
+NoteCacheFileWritten(off_t size)
+{
+    int64 limit;
+    {
+        BAutolock lock(&sImageCacheLock);
+        limit = sMaxCacheBytes;
+        if (sDiskCacheBytes >= 0)
+            sDiskCacheBytes += size;
+        bool needsPrune = limit > 0
+            && (sDiskCacheBytes < 0 || sDiskCacheBytes > limit);
+        if (!needsPrune || sPruneRunning)
+            return;
+        sPruneRunning = true;
+    }
+    ImageCache::PruneToSize(ImageCacheKeys::PruneTarget(limit));
+    BAutolock lock(&sImageCacheLock);
+    sPruneRunning = false;
+}
+
 static BBitmap*
 WriteBitmapBodyToCache(const std::string& cacheFile, uint64 generation,
     const std::string& body)
@@ -367,15 +438,11 @@ WriteBitmapBodyToCache(const std::string& cacheFile, uint64 generation,
             && file.Write(body.data(), body.size()) == (ssize_t)body.size()) {
         bitmap = ValidatedBitmapFromFile(temporary);
     }
-    if (bitmap) {
-        unlink(cacheFile.c_str());
-        rename(temporary.c_str(), cacheFile.c_str());
-        int64 maxCacheBytes = ImageCache::MaxCacheBytes();
-        if (maxCacheBytes > 0)
-            ImageCache::PruneToSize(maxCacheBytes);
-    } else {
+    file.Unset();
+    if (bitmap && rename(temporary.c_str(), cacheFile.c_str()) == 0)
+        NoteCacheFileWritten((off_t)body.size());
+    else
         unlink(temporary.c_str());
-    }
     return bitmap;
 }
 
@@ -394,41 +461,59 @@ BitmapFromImageResponse(const HttpResponse& response,
     return bitmap ? bitmap : DecodeBitmapBody(response.body);
 }
 
-void ImageCache::StartNetworkLoad(const std::string& url, uint64 generation,
-    const std::string& cacheFile, int32 attempt)
+// Delay before the next attempt, or -1 when the server asked for a longer
+// pause than a UI image is worth waiting for.
+static int32
+RetryDelayMs(const HttpResponse& response, int32 attempt)
 {
-    if (!IsCurrentGeneration(url, generation))
-        return;
+    static const int32 kMaxRetryDelayMs = 5000;
+    if (response.retryAfter <= 0)
+        return 250 << (attempt * 2);
+    if (response.retryAfter > kMaxRetryDelayMs / 1000)
+        return -1;
+    return response.retryAfter * 1000;
+}
 
+void ImageCache::StartNetworkLoad(const ImageLoadJob& job)
+{
+    std::string cacheFile = GetCachePath(job.url);
     Headers headers;
-    HttpClient::Get(url, headers,
-        [url, cacheFile, generation, attempt](const HttpResponse& response) {
-            if (!ImageCache::IsCurrentGeneration(url, generation))
-                return;
-
-            bool successfulResponse = false;
-            BBitmap* bitmap = BitmapFromImageResponse(response, cacheFile,
-                generation, successfulResponse);
-
-            bool retryable = IsTransientImageFailure(response.statusCode)
-                || (successfulResponse && !bitmap);
-            if (!bitmap && retryable && attempt + 1 < kMaxDownloadAttempts) {
-                int32 delayMs = 250 << (attempt * 2);
-                if (response.retryAfter > 0)
-                    delayMs = std::min<int32>(response.retryAfter * 1000, 5000);
-                std::thread([url, cacheFile, generation, attempt, delayMs]() {
-                    std::this_thread::sleep_for(
-                        std::chrono::milliseconds(delayMs));
-                    if (ImageCache::IsCurrentGeneration(url, generation)) {
-                        ImageCache::StartNetworkLoad(url, generation,
-                            cacheFile, attempt + 1);
-                    }
-                }).detach();
+    HttpClient::Get(job.url, headers,
+        [job, cacheFile](const HttpResponse& response) {
+            if (!ImageCache::IsCurrentGeneration(job.url, job.generation)) {
+                ImageCache::ReleaseLoadSlot();
                 return;
             }
 
-            ImageCache::FinishLoad(url, generation, bitmap);
+            bool successfulResponse = false;
+            BBitmap* bitmap = BitmapFromImageResponse(response, cacheFile,
+                job.generation, successfulResponse);
+
+            bool retryable = IsTransientImageFailure(response.statusCode)
+                || (successfulResponse && !bitmap);
+            int32 delayMs = RetryDelayMs(response, job.attempt);
+            if (!bitmap && retryable && delayMs >= 0
+                    && job.attempt + 1 < kMaxDownloadAttempts) {
+                ImageCache::RetryLater(job, delayMs);
+                ImageCache::ReleaseLoadSlot();
+                return;
+            }
+
+            ImageCache::FinishLoad(job.url, job.generation, bitmap);
+            ImageCache::ReleaseLoadSlot();
         });
+}
+
+// The waiting thread holds no load slot; the retry queues behind other work.
+void ImageCache::RetryLater(const ImageLoadJob& job, int32 delayMs)
+{
+    ImageLoadJob next = job;
+    next.attempt++;
+    std::thread([next, delayMs]() {
+        std::this_thread::sleep_for(std::chrono::milliseconds(delayMs));
+        if (ImageCache::IsCurrentGeneration(next.url, next.generation))
+            ImageCache::EnqueueLoad(next);
+    }).detach();
 }
 
 void ImageCache::StoreMemoryCacheLocked(const std::string& url,

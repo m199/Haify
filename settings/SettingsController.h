@@ -40,6 +40,8 @@ struct HaifySettings {
     int64       accessTokenExpiresAt = 0;
     int         authScopeVersion = 0;
     std::string spotifyAccountId;
+    // Client ID of the user's own Spotify app; empty until set up.
+    std::string spotifyClientId;
 
 
     float       playerWindowX = -1, playerWindowY = -1;

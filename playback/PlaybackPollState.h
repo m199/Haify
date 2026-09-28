@@ -31,12 +31,21 @@ public:
 	void Start(int64_t nowUs);
 	bool RequestPending() const { return fRequestPending; }
 	bool BeginRequest();
+	// An own command or a local librespot event: playback is about to change.
+	// Ends the long-idle backoff and allows two quick follow-up polls while
+	// Spotify does not report playback yet (e.g. during a device transfer).
+	void NoteActivity();
 	// Also accepts a failed report when no API client exists and no request began.
 	PlaybackPollDecision Complete(const PlaybackPollReport& report, int64_t nowUs);
 
 private:
 	int64_t _FailureDelay(int32_t retryAfterSeconds);
+	// Playing: 15 s. Paused/empty: 3 s for the follow-ups after an activity,
+	// otherwise 15 s, and 60 s after two idle minutes.
+	int64_t _SuccessDelay(bool isPlaying, int64_t nowUs);
 	bool fRequestPending = false;
+	int64_t fIdleSinceUs = 0;
+	int32_t fFollowUpPolls = 0;
 	bool fHasPlaybackState = false;
 	int64_t fStartupEmptyRetryUntilUs = 0;
 	int32_t fFailures = 0;

@@ -72,7 +72,7 @@ cxx="${CXX:-c++}"
 "$cxx" -std=c++17 -Wall -Wextra -Werror -Wno-multichar -I. tests/SpotifyNavigationMessagesTest.cpp navigation/SpotifyNavigationMessages.cpp navigation/SpotifyNavigation.cpp spotify/api/ContentApi.cpp spotify/api/SpotifyUrl.cpp -lbe -o "$test_output/spotify-navigation-messages"
 "$test_output/spotify-navigation-messages"
 # Phase 5d: actual API/cache services with in-memory settings and forbidden network I/O.
-session_api_sources="spotify/api/SpotifyApi.cpp spotify/api/SpotifyRequestClient.cpp spotify/api/ArtistApi.cpp spotify/api/ContentApi.cpp spotify/api/LibraryApi.cpp spotify/api/PlaybackApi.cpp spotify/api/PlaylistApi.cpp spotify/api/ProfileApi.cpp spotify/api/SpotifyResponse.cpp spotify/api/SpotifyUrl.cpp"
+session_api_sources="spotify/api/SpotifyApi.cpp spotify/api/SpotifyRequestClient.cpp spotify/api/ArtistApi.cpp spotify/api/ContentApi.cpp spotify/api/LibraryApi.cpp spotify/api/PlaybackApi.cpp spotify/api/PlaylistApi.cpp spotify/api/ProfileApi.cpp spotify/api/SpotifyResponse.cpp spotify/api/SpotifyUrl.cpp playlist/PlaylistCacheStore.cpp"
 session_sources="spotify/session/SpotifyAccountSession.cpp spotify/session/SpotifyCredentialStore.cpp spotify/SpotifyCapabilities.cpp tests/SpotifySessionTestSupport.cpp"
 "$cxx" -std=c++17 -Wall -Wextra -Werror -I. -Isettings -Inetwork tests/SpotifyAccountSessionTest.cpp $session_sources $session_api_sources -lbe -o "$test_output/spotify-account-session"
 "$test_output/spotify-account-session"
@@ -81,7 +81,7 @@ session_sources="spotify/session/SpotifyAccountSession.cpp spotify/session/Spoti
 "$cxx" -std=c++17 -Wall -Wextra -Werror -Wno-multichar -I. -Isettings -Inetwork tests/SpotifySessionMessagesTest.cpp spotify/session/SpotifySessionMessages.cpp $session_sources $session_api_sources -lbe -o "$test_output/spotify-session-messages"
 "$test_output/spotify-session-messages"
 # PlaylistApiTest supplies an unavailable cache path; real user files are never touched.
-"$cxx" -std=c++17 -Wall -Wextra -Werror -I. -Isettings tests/PlaylistApiTest.cpp spotify/api/PlaylistApi.cpp spotify/api/SpotifyUrl.cpp -lbe -o "$test_output/playlist-api"
+"$cxx" -std=c++17 -Wall -Wextra -Werror -I. -Isettings tests/PlaylistApiTest.cpp spotify/api/PlaylistApi.cpp spotify/api/SpotifyUrl.cpp playlist/PlaylistCacheStore.cpp -lbe -o "$test_output/playlist-api"
 "$test_output/playlist-api"
 # Phase 4: pure page mapping/routing and the existing Haiku row wire contract.
 "$cxx" -std=c++17 -Wall -Wextra -Werror -I. tests/PlaylistPageControllerTest.cpp playlist/PlaylistPageController.cpp playlist/PlaylistContent.cpp -o "$test_output/playlist-page-controller"
@@ -134,3 +134,18 @@ session_sources="spotify/session/SpotifyAccountSession.cpp spotify/session/Spoti
 # The fixture supplies SettingsController::Load() with in-memory defaults.
 "$cxx" -std=c++17 -Wall -Wextra -Werror -Wno-multichar -I. -I/boot/system/develop/headers/private/interface tests/ListRowScaleTest.cpp ui/views/FontScaledListView.cpp ui/views/DiscoverListView.cpp playlist/PlaylistTrackRow.cpp -lbe -lcolumnlistview -o "$test_output/list-row-scale"
 "$test_output/list-row-scale"
+# OAuth redirect: only GET /callback ends sign-in; idle or unrelated requests are ignored.
+"$cxx" -std=c++17 -Wall -Wextra -Werror -I. tests/OAuthCallbackRequestTest.cpp network/OAuthCallbackRequest.cpp -o "$test_output/oauth-callback-request"
+"$test_output/oauth-callback-request"
+# Playlist/library/show cache keys: per-account directories and safe item IDs.
+"$cxx" -std=c++17 -Wall -Wextra -Werror -I. tests/PlaylistCacheKeysTest.cpp -o "$test_output/playlist-cache-keys"
+"$test_output/playlist-cache-keys"
+# Artwork disk cache: full-URL file names and prune headroom.
+"$cxx" -std=c++17 -Wall -Wextra -Werror -I. tests/ImageCacheKeysTest.cpp network/ImageCacheKeys.cpp -o "$test_output/image-cache-keys"
+"$test_output/image-cache-keys"
+# librespot stop escalation shared by the blocking and the timer-driven stop.
+"$cxx" -std=c++17 -Wall -Wextra -Werror -I. tests/LibrespotStopPolicyTest.cpp -o "$test_output/librespot-stop-policy"
+"$test_output/librespot-stop-policy"
+# Spotify setup assistant: Client ID format, built-in fallback and page gates.
+"$cxx" -std=c++17 -Wall -Wextra -Werror -I. tests/SpotifySetupAssistantTest.cpp -o "$test_output/spotify-setup-assistant"
+"$test_output/spotify-setup-assistant"

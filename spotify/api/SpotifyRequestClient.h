@@ -44,7 +44,12 @@ public:
                          JsonCallback callback);
     void            Delete(const std::string& path, const std::string& body,
                            JsonCallback callback);
+    // Drops the stored value and detaches an in-flight GET, for data a
+    // mutation just changed.
     void            EraseCache(const std::string& path);
+    // Drops only the stored value; the next Get joins a GET already in
+    // flight. For live reads whose in-flight answer is equally current.
+    void            ExpireCachedValue(const std::string& path);
     void            InvalidateCachePrefix(const std::string& prefix);
 
 private:
@@ -55,6 +60,9 @@ private:
 	                    const std::string& body, RawCallback callback, bool allowRefresh,
 	                    const std::string& contentType, std::optional<uint64_t> session);
 	bool            _SessionMatches(uint64_t session) const;
+	void            _NoteRateLimit(int retryAfterSeconds, int64_t nowUs);
+	int             _RateLimitRemainingSeconds(int64_t nowUs) const;
+	bool            _RefuseWhileRateLimited(const RawCallback& callback) const;
     std::string     _CacheKey(const std::string& path) const;
 
     std::string     fAccessToken;
@@ -65,4 +73,6 @@ private:
     std::map<std::string, ApiCacheEntry> fCache;
     std::map<std::string, std::shared_ptr<PendingGet>> fPendingGets;
 	uint64_t        fSessionGeneration = 0;
+	// system_time() until which requests are answered locally with 429.
+	int64_t         fRateLimitedUntilUs = 0;
 };

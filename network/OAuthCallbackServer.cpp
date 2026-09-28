@@ -2,13 +2,14 @@
 
 #include <Autolock.h>
 #include <arpa/inet.h>
+#include <fcntl.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
+#include <sys/time.h>
 #include <unistd.h>
 
+#include <cerrno>
 #include <cstring>
-#include <cstdlib>
-#include <map>
 #include <string>
 #include <utility>
 
@@ -29,58 +30,13 @@ static const char kFailurePage[] =
     "<h2>Sign-in failed</h2><p>Please return to Haify and try again.</p>"
     "</body></html>\r\n";
 
-struct CallbackResult {
-    std::string code;
-    std::string state;
-    std::string error;
-};
+static const char kNotFoundPage[] =
+    "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n"
+    "Connection: close\r\n\r\n";
 
-static std::string
-UrlDecode(const std::string& value)
-{
-    std::string decoded;
-    decoded.reserve(value.size());
-    for (size_t i = 0; i < value.size(); i++) {
-        if (value[i] == '+') {
-            decoded += ' ';
-        } else if (value[i] == '%' && i + 2 < value.size()) {
-            char hex[3] = {value[i + 1], value[i + 2], 0};
-            char* end = nullptr;
-            long byte = strtol(hex, &end, 16);
-            if (end && *end == 0) {
-                decoded += (char)byte;
-                i += 2;
-            } else {
-                decoded += value[i];
-            }
-        } else {
-            decoded += value[i];
-        }
-    }
-    return decoded;
-}
-
-static std::map<std::string, std::string>
-ParseQuery(const std::string& query)
-{
-    std::map<std::string, std::string> values;
-    size_t start = 0;
-    while (start <= query.size()) {
-        size_t end = query.find('&', start);
-        std::string part = query.substr(start,
-            end == std::string::npos ? std::string::npos : end - start);
-        size_t equals = part.find('=');
-        std::string key = UrlDecode(part.substr(0, equals));
-        std::string value = equals == std::string::npos
-            ? "" : UrlDecode(part.substr(equals + 1));
-        if (!key.empty())
-            values[key] = value;
-        if (end == std::string::npos)
-            break;
-        start = end + 1;
-    }
-    return values;
-}
+// A browser that opened an idle connection must not hold the listener: each
+// read and write on an accepted connection gives up after this long.
+static const time_t kClientTimeoutSeconds = 5;
 
 static std::string
 ReadHttpRequest(int client)
@@ -90,6 +46,8 @@ ReadHttpRequest(int client)
     while (request.size() < 16384
         && request.find("\r\n\r\n") == std::string::npos) {
         ssize_t bytes = recv(client, buffer, sizeof(buffer), 0);
+        if (bytes < 0 && errno == EINTR)
+            continue;
         if (bytes <= 0)
             break;
         request.append(buffer, (size_t)bytes);
@@ -98,62 +56,34 @@ ReadHttpRequest(int client)
 }
 
 static void
-ParseRequestLine(const std::string& request, std::string& method,
-    std::string& target)
+SetCloseOnExec(int descriptor)
 {
-    size_t firstSpace = request.find(' ');
-    size_t secondSpace = firstSpace == std::string::npos
-        ? std::string::npos : request.find(' ', firstSpace + 1);
-    if (firstSpace == std::string::npos || secondSpace == std::string::npos)
-        return;
-
-    method = request.substr(0, firstSpace);
-    target = request.substr(firstSpace + 1, secondSpace - firstSpace - 1);
-}
-
-static std::string
-FindQueryValue(const std::map<std::string, std::string>& params,
-    const char* key)
-{
-    auto found = params.find(key);
-    return found == params.end() ? "" : found->second;
-}
-
-static CallbackResult
-ParseCallbackRequest(const std::string& request)
-{
-    std::string method;
-    std::string target;
-    ParseRequestLine(request, method, target);
-
-    size_t question = target.find('?');
-    std::string path = target.substr(0, question);
-    std::map<std::string, std::string> params = question == std::string::npos
-        ? std::map<std::string, std::string>()
-        : ParseQuery(target.substr(question + 1));
-
-    CallbackResult result;
-    result.code = FindQueryValue(params, "code");
-    result.state = FindQueryValue(params, "state");
-    result.error = FindQueryValue(params, "error");
-
-    if (method != "GET" || path != "/callback")
-        result.error = "invalid_callback_request";
-    else if (result.code.empty() && result.error.empty())
-        result.error = "missing_authorization_code";
-    return result;
+    int flags = fcntl(descriptor, F_GETFD);
+    if (flags >= 0)
+        fcntl(descriptor, F_SETFD, flags | FD_CLOEXEC);
 }
 
 static void
-SendCallbackResponse(int client, bool success)
+SetClientTimeouts(int client)
 {
-    const char* page = success ? kSuccessPage : kFailurePage;
+    struct timeval timeout{};
+    timeout.tv_sec = kClientTimeoutSeconds;
+    setsockopt(client, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
+    setsockopt(client, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
+}
+
+static void
+SendCallbackResponse(int client, const OAuthCallbackRequest& request)
+{
+    const char* page = kNotFoundPage;
+    if (request.isCallback)
+        page = request.code.empty() ? kFailurePage : kSuccessPage;
     send(client, page, strlen(page), 0);
 }
 
 OAuthCallbackServer::OAuthCallbackServer(int port, AuthCodeCallback callback)
-    : fPort(port), fSocket(-1), fThread(-1), fLock("OAuth callback"),
-      fCallback(std::move(callback)) {}
+    : fPort(port), fSocket(-1), fClient(-1), fThread(-1),
+      fLock("OAuth callback"), fCallback(std::move(callback)) {}
 
 OAuthCallbackServer::~OAuthCallbackServer() {
     Stop();
@@ -167,6 +97,8 @@ bool OAuthCallbackServer::Start() {
     fSocket = socket(AF_INET, SOCK_STREAM, 0);
     if (fSocket < 0)
         return false;
+    // librespot is started with fork/exec and must not inherit port 8765.
+    SetCloseOnExec(fSocket);
 
     int opt = 1;
     setsockopt(fSocket, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
@@ -182,7 +114,7 @@ bool OAuthCallbackServer::Start() {
         fSocket = -1;
         return false;
     }
-    if (listen(fSocket, 1) < 0) {
+    if (listen(fSocket, 4) < 0) {
         close(fSocket);
         fSocket = -1;
         return false;
@@ -206,6 +138,10 @@ void OAuthCallbackServer::Stop() {
         socket = fSocket;
         fSocket = -1;
         thread = fThread;
+        // The listener thread owns and closes the client; shutdown only
+        // wakes a blocked recv/send so the join below cannot hang.
+        if (fClient >= 0)
+            shutdown(fClient, SHUT_RDWR);
     }
 
     if (socket >= 0) {
@@ -221,6 +157,34 @@ void OAuthCallbackServer::Stop() {
     }
 }
 
+bool OAuthCallbackServer::_IsListening(int listener) {
+    BAutolock lock(&fLock);
+    return listener >= 0 && fSocket == listener;
+}
+
+// Serves one accepted connection. Returns false when Stop() raced the accept.
+bool OAuthCallbackServer::_ServeClient(int listener, int client,
+    OAuthCallbackRequest& result) {
+    {
+        BAutolock lock(&fLock);
+        if (fSocket != listener) {
+            close(client);
+            return false;
+        }
+        fClient = client;
+    }
+    SetCloseOnExec(client);
+    SetClientTimeouts(client);
+
+    result = ParseOAuthCallbackRequest(ReadHttpRequest(client));
+    SendCallbackResponse(client, result);
+
+    BAutolock lock(&fLock);
+    fClient = -1;
+    close(client);
+    return true;
+}
+
 int32 OAuthCallbackServer::_ListenThread(void* data) {
     auto* self = static_cast<OAuthCallbackServer*>(data);
     int listener;
@@ -229,7 +193,20 @@ int32 OAuthCallbackServer::_ListenThread(void* data) {
         listener = self->fSocket;
     }
 
-    int client = accept(listener, nullptr, nullptr);
+    OAuthCallbackRequest result;
+    while (self->_IsListening(listener)) {
+        int client = accept(listener, nullptr, nullptr);
+        if (client < 0) {
+            if (errno == EINTR || errno == ECONNABORTED)
+                continue;
+            break;
+        }
+        if (!self->_ServeClient(listener, client, result))
+            break;
+        if (result.isCallback)
+            break;
+    }
+
     {
         BAutolock lock(&self->fLock);
         if (self->fSocket == listener) {
@@ -238,15 +215,10 @@ int32 OAuthCallbackServer::_ListenThread(void* data) {
         }
     }
 
-    if (client < 0)
+    // Stop() before a callback arrived ends the thread without a result.
+    if (!result.isCallback)
         return 1;
-
-    CallbackResult result = ParseCallbackRequest(ReadHttpRequest(client));
-    SendCallbackResponse(client, !result.code.empty());
-    close(client);
-
     if (self->fCallback)
         self->fCallback(result.code, result.state, result.error);
-
     return 0;
 }

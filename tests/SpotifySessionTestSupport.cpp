@@ -24,6 +24,10 @@ std::string SettingsController::CacheFilePath(const std::string&, const std::str
 {
 	return ""; // No real cache files may be touched by fixtures.
 }
+std::string SettingsController::CachePath(const std::string&, bool)
+{
+	return "";
+}
 
 // Standalone substitutes: requests must use SetRequestHandler, never network I/O.
 void HttpClient::Get(const std::string&, const Headers&, HttpCallback) { assert(false); }

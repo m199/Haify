@@ -136,15 +136,59 @@ TestFailureClassification()
 		assert(!ok && data["status"] == 429 && data["retry_after"] == 12);
 	});
 	transport.Reply(0, 429, "limited", 12);
+	// Retry-After pauses every request of the client, answered locally.
+	int localRefusals = 0;
+	client.Put("/me/player/pause", "", [&localRefusals](bool ok,
+			const nlohmann::json& data) {
+		assert(!ok && data["status"] == 429);
+		assert(data["retry_after"] > 0 && data["retry_after"] <= 12);
+		localRefusals++;
+	});
+	assert(localRefusals == 1 && transport.completions.size() == 1);
+}
+
+static void
+TestMalformedResponses()
+{
+	SpotifyRequestClient client("token");
+	Transport transport;
+	transport.Attach(client);
 	client.Get("/malformed", [](bool ok, const nlohmann::json& data) {
 		assert(!ok && data["status"] == 200 && data["error"] == "invalid_json");
 	});
-	transport.Reply(1, 200, "broken");
+	transport.Reply(0, 200, "broken");
 	client.Get("/malformed", [](bool ok, const nlohmann::json& data) {
 		assert(ok && data.is_object());
 	});
+	assert(transport.completions.size() == 2);
+	transport.Reply(1, 200, "{}");
+}
+
+// A live read expires only the stored value: a read already in flight is
+// joined, while a mutation-style EraseCache still starts a new request.
+static void
+TestLiveReadsJoinInFlightRequests()
+{
+	SpotifyRequestClient client("token");
+	Transport transport;
+	transport.Attach(client);
+	int answers = 0;
+	auto count = [&answers](bool ok, const nlohmann::json&) {
+		assert(ok);
+		answers++;
+	};
+	client.Get("/me/player/queue", count);
+	client.ExpireCachedValue("/me/player/queue");
+	client.Get("/me/player/queue", count);
+	assert(transport.completions.size() == 1);
+	transport.Reply(0, 200, "{}");
+	assert(answers == 2);
+
+	client.ExpireCachedValue("/me/player/queue");
+	client.Get("/me/player/queue", count);
+	client.EraseCache("/me/player/queue");
+	client.Get("/me/player/queue", count);
 	assert(transport.completions.size() == 3);
-	transport.Reply(2, 200, "{}");
 }
 
 static void
@@ -253,6 +297,8 @@ main()
 	TestAccountChangeAndSignOut();
 	TestRefreshDoesNotRetryInAnotherSession();
 	TestFailureClassification();
+	TestMalformedResponses();
+	TestLiveReadsJoinInFlightRequests();
 	TestAccountAtDispatch();
 	TestMutationFailureClassification();
 	TestAcceptedPlayAndEmptyPlaybackState();

@@ -1,29 +1,23 @@
 #include "PlaylistCacheFiles.h"
 
-#include "SettingsController.h"
+#include "PlaylistCacheStore.h"
 #include "spotify/SpotifyUri.h"
 
-#include <Autolock.h>
 #include <File.h>
-#include <Locker.h>
 #include <Path.h>
 #include <SupportDefs.h>
 
-#include <map>
-#include <thread>
 #include <time.h>
 #include <utility>
-#include <unistd.h>
 
 namespace {
 
-BLocker sCacheWriterLock("Haify playlist cache writer");
-std::map<std::string, uint64> sCacheWriteGenerations;
-uint64 sNextCacheWriteGeneration = 0;
-
 const int32 kLikedSongsCacheVersion = 1;
 const int32 kShowCacheVersion = 2;
-const time_t kLikedSongsCacheMaxAge = 5 * 60;
+// Haify's own like/unlike removes the document at once, and File > Refresh
+// forces a reload. The age limit only bounds changes made on other devices,
+// so a full paged reload is not repeated every few minutes.
+const time_t kLikedSongsCacheMaxAge = 24 * 60 * 60;
 
 
 const nlohmann::json&
@@ -206,46 +200,13 @@ AddEpisodeItem(nlohmann::json& data, nlohmann::json item)
 }
 
 
-void
-WriteAsync(const std::string& path, nlohmann::json data)
+bool
+StorePath(const char* kind, const std::string& id, BPath& path,
+	bool createDirectories)
 {
-	uint64 generation;
-	{
-		BAutolock lock(&sCacheWriterLock);
-		generation = ++sNextCacheWriteGeneration;
-		sCacheWriteGenerations[path] = generation;
-	}
-	std::thread([path, generation, data = std::move(data)]() mutable {
-		std::string serialized = data.dump();
-		std::string temporary = path + ".part-" + std::to_string(generation);
-		BFile file(temporary.c_str(), B_WRITE_ONLY | B_CREATE_FILE
-			| B_ERASE_FILE);
-		bool written = file.InitCheck() == B_OK
-			&& file.Write(serialized.data(), serialized.size())
-				== (ssize_t)serialized.size();
-		file.Unset();
-		bool current;
-		{
-			BAutolock lock(&sCacheWriterLock);
-			current = sCacheWriteGenerations[path] == generation;
-			if (current)
-				sCacheWriteGenerations.erase(path);
-		}
-		if (written && current) {
-			unlink(path.c_str());
-			rename(temporary.c_str(), path.c_str());
-		} else {
-			unlink(temporary.c_str());
-		}
-	}).detach();
-}
-
-
-void
-CancelWrite(const std::string& path)
-{
-	BAutolock lock(&sCacheWriterLock);
-	sCacheWriteGenerations[path] = ++sNextCacheWriteGeneration;
+	std::string file = PlaylistCacheStore::FilePath(kind, id,
+		createDirectories);
+	return !file.empty() && path.SetTo(file.c_str()) == B_OK;
 }
 
 }
@@ -253,9 +214,9 @@ CancelWrite(const std::string& path)
 bool
 PlaylistCacheFiles::LikedSongsPath(BPath& path, bool createDirectories)
 {
-	std::string file = SettingsController::CacheFilePath("library",
-		"liked-songs.json", createDirectories);
-	return !file.empty() && path.SetTo(file.c_str()) == B_OK;
+	return StorePath(PlaylistCacheStore::kLibrary,
+		PlaylistCacheStore::kLikedSongsId, path,
+		createDirectories);
 }
 
 
@@ -263,9 +224,8 @@ bool
 PlaylistCacheFiles::PlaylistPath(const std::string& playlistId, BPath& path,
 	bool createDirectories)
 {
-	std::string file = SettingsController::CacheFilePath("playlists",
-		playlistId + ".json", createDirectories);
-	return !file.empty() && path.SetTo(file.c_str()) == B_OK;
+	return StorePath(PlaylistCacheStore::kPlaylists, playlistId, path,
+		createDirectories);
 }
 
 
@@ -273,9 +233,8 @@ bool
 PlaylistCacheFiles::ShowPath(const std::string& showId, BPath& path,
 	bool createDirectories)
 {
-	std::string file = SettingsController::CacheFilePath("shows",
-		showId + ".json", createDirectories);
-	return !file.empty() && path.SetTo(file.c_str()) == B_OK;
+	return StorePath(PlaylistCacheStore::kShows, showId, path,
+		createDirectories);
 }
 
 
@@ -413,7 +372,7 @@ PlaylistCacheFiles::WriteTrackDocument(const std::string& path, bool isPlaylist,
 		snapshotId);
 	for (const PlaylistCacheDocument::Track& track : tracks)
 		AddTrackItem(data, PlaylistCacheDocument::ToJson(track));
-	WriteAsync(path, std::move(data));
+	PlaylistCacheStore::WriteAsync(path, std::move(data));
 }
 
 
@@ -453,7 +412,7 @@ WriteShowDocumentToPath(const std::string& path, int32 total,
 	nlohmann::json data = NewShowDocument(total, nextOffset, complete);
 	for (const PlaylistCacheDocument::Episode& episode : episodes)
 		AddEpisodeItem(data, PlaylistCacheDocument::ToJson(episode));
-	WriteAsync(path, std::move(data));
+	PlaylistCacheStore::WriteAsync(path, std::move(data));
 }
 
 
@@ -488,8 +447,7 @@ PlaylistCacheFiles::RemoveLikedSongs()
 	BPath path;
 	if (!LikedSongsPath(path, false))
 		return;
-	CancelWrite(path.Path());
-	unlink(path.Path());
+	PlaylistCacheStore::Remove(path.Path());
 }
 
 
@@ -499,8 +457,7 @@ PlaylistCacheFiles::RemovePlaylist(const std::string& playlistId)
 	BPath path;
 	if (!PlaylistPath(playlistId, path, false))
 		return;
-	CancelWrite(path.Path());
-	unlink(path.Path());
+	PlaylistCacheStore::Remove(path.Path());
 }
 
 
@@ -510,8 +467,7 @@ PlaylistCacheFiles::RemoveShow(const std::string& showId)
 	BPath path;
 	if (!ShowPath(showId, path, false))
 		return;
-	CancelWrite(path.Path());
-	unlink(path.Path());
+	PlaylistCacheStore::Remove(path.Path());
 }
 
 

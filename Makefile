@@ -10,9 +10,10 @@ SRCS = app/App.cpp ui/windows/PlayerWindow.cpp playback/NowPlayingItem.cpp playb
 	ui/views/FontScaledListView.cpp \
 	ui/replicants/ArtworkReplicantView.cpp ui/windows/ArtworkWindow.cpp \
 	ui/views/PlayerBarView.cpp ui/views/PlaybackSeekBarView.cpp ui/dialogs/PlaybackDevicePromptWindow.cpp playback/PlaybackDeviceResolver.cpp ui/views/IconButtonView.cpp ui/views/ClickableLabelView.cpp \
-	ui/views/ArtworkView.cpp ui/views/MediaDescriptionView.cpp ui/DescriptionTextFormatter.cpp ui/views/DiscoverListView.cpp ui/menus/TrackContextMenu.cpp ui/dialogs/TextInputDialog.cpp \
-	network/HttpClient.cpp network/OAuthCallbackServer.cpp network/ImageCache.cpp \
+	ui/views/ArtworkView.cpp ui/views/MediaDescriptionView.cpp ui/DescriptionTextFormatter.cpp ui/views/DiscoverListView.cpp ui/menus/TrackContextMenu.cpp ui/dialogs/TextInputDialog.cpp ui/dialogs/SpotifySetupAssistant.cpp \
+	network/HttpClient.cpp network/OAuthCallbackRequest.cpp network/OAuthCallbackServer.cpp network/ImageCache.cpp network/ImageCacheKeys.cpp \
 	playback/PlaybackStartController.cpp \
+	playback/PlaybackQueueRequests.cpp \
 	playback/PlaybackVolumeState.cpp \
 	playback/PlaybackTimeline.cpp \
 	playback/PlaybackPollState.cpp \
@@ -48,6 +49,7 @@ SRCS = app/App.cpp ui/windows/PlayerWindow.cpp playback/NowPlayingItem.cpp playb
 	playlist/PlaylistCacheDocument.cpp \
 	playlist/PlaylistEpisode.cpp \
 	playlist/PlaylistCacheFiles.cpp \
+	playlist/PlaylistCacheStore.cpp \
 	spotify/auth/SpotifyAuth.cpp spotify/api/SpotifyApi.cpp spotify/api/ArtistApi.cpp spotify/api/ContentApi.cpp spotify/api/LibraryApi.cpp spotify/api/PlaybackApi.cpp spotify/api/PlaylistApi.cpp spotify/api/ProfileApi.cpp spotify/api/SpotifyRequestClient.cpp spotify/api/SpotifyResponse.cpp spotify/api/SpotifyUrl.cpp spotify/SpotifyCapabilities.cpp \
 	discover/DiscoverCacheDocument.cpp \
 	discover/DiscoverMessages.cpp \

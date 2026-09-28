@@ -43,6 +43,7 @@
 #define B_TRANSLATION_CONTEXT "AudiobookWindow"
 
 static const uint32 kMsgResumeAudiobook = 'aRes';
+static const uint32 kMsgStartOverAudiobook = 'aSto';
 
 static std::string
 AudiobookJsonString(const nlohmann::json& object, const char* key,
@@ -331,16 +332,30 @@ public:
 		if (!progress)
 			return false;
 		fProgress = *progress;
-		std::string text = AudiobookProgressText(fProgress.known,
-			fProgress.fullyPlayed, fProgress.positionMs);
-		auto* field = static_cast<BStringField*>(GetField(2));
-		field->SetString(text.c_str());
+		_ShowProgress();
 		return true;
+	}
+
+	// Spotify offers no way to reset its stored progress; this only forgets
+	// it in this window. Playback reports fill it in again while listening.
+	void ResetProgress()
+	{
+		fProgress = AudiobookChapterProgress{};
+		_ShowProgress();
 	}
 
 	bool fPlayable;
 	AudiobookChapterProgress fProgress;
 	int32 fDurationMs;
+
+private:
+	void _ShowProgress()
+	{
+		std::string text = AudiobookProgressText(fProgress.known,
+			fProgress.fullyPlayed, fProgress.positionMs);
+		auto* field = static_cast<BStringField*>(GetField(2));
+		field->SetString(text.c_str());
+	}
 };
 
 struct AudiobookResumeCandidate {
@@ -413,6 +428,10 @@ AudiobookWindow::AudiobookWindow(const std::string& audiobookId)
 		new BMessage('aSav'));
 	fSaveMenuItem->SetEnabled(false);
 	audiobookMenu->AddItem(fSaveMenuItem);
+	fStartOverMenuItem = new BMenuItem(B_TRANSLATE("Start Over"),
+		new BMessage(kMsgStartOverAudiobook));
+	fStartOverMenuItem->SetEnabled(false);
+	audiobookMenu->AddItem(fStartOverMenuItem);
 	audiobookMenu->AddSeparatorItem();
 	audiobookMenu->AddItem(new BMenuItem(B_TRANSLATE("Close Window"),
 		new BMessage(B_QUIT_REQUESTED), 'W'));
@@ -447,12 +466,15 @@ AudiobookWindow::AudiobookWindow(const std::string& audiobookId)
 	fSave->SetEnabled(false);
 	fDescription = new MediaDescriptionView("audiobookDescription");
 
-	fChapterList = new DiscoverListView("Chapters", {
+	DiscoverListView* chapterList = new DiscoverListView("Chapters", {
 		{B_TRANSLATE("Chapter"), 300, kColPlayOnDouble},
 		{B_TRANSLATE("Duration"), 80, kColNone},
 		{B_TRANSLATE("Status"), 90, kColNone}
 	}, -1, true);
-	fChapterList->SetRowInvocationColumn(0);
+	// The member keeps the BColumnListView interface; the invocation column
+	// is a DiscoverListView setting.
+	chapterList->SetRowInvocationColumn(0);
+	fChapterList = chapterList;
 	fDescriptionScroll = new BScrollView(
 		"audiobookDescriptionScroll", fDescription, 0, false, true);
 	fDescriptionScroll->SetExplicitMaxSize(BSize(B_SIZE_UNLIMITED,
@@ -658,6 +680,7 @@ AudiobookWindow::_UpdateResumeControl()
 	int32 startPositionMs = 0;
 	bool canResume = _FindResumeChapter(uri, title, startPositionMs);
 	fResume->SetEnabled(canResume);
+	fStartOverMenuItem->SetEnabled(canResume);
 	fResume->SetLabel(startPositionMs > 0
 		? B_TRANSLATE("Resume") : B_TRANSLATE("Play"));
 }
@@ -926,6 +949,33 @@ AudiobookWindow::_ResumeAudiobook()
 }
 
 
+// Plays the first chapter from 0:00 and clears the Status column here. Spotify
+// keeps its own progress: chapters not heard again show "Done" after reopening.
+void
+AudiobookWindow::_StartOverAudiobook()
+{
+	if (!fChapterList)
+		return;
+
+	AudiobookResumeCandidate firstPlayable;
+	AudiobookResumeCandidate unusedUnplayed;
+	AudiobookResumeCandidate unusedInProgress;
+	for (int32 index = 0; index < fChapterList->CountRows(); index++) {
+		AudiobookChapterRow* row = dynamic_cast<AudiobookChapterRow*>(
+			fChapterList->RowAt(index));
+		UpdateResumeCandidates(row, firstPlayable, unusedUnplayed,
+			unusedInProgress);
+		if (row) {
+			row->ResetProgress();
+			fChapterList->UpdateRow(row);
+		}
+	}
+	_UpdateResumeControl();
+	if (HasResumeCandidate(firstPlayable))
+		_PlayChapterUri(firstPlayable.uri, firstPlayable.title.c_str(), 0);
+}
+
+
 void
 AudiobookWindow::_ShowChapterContextMenu(BMessage* message)
 {
@@ -1030,6 +1080,9 @@ AudiobookWindow::_HandlePlaybackMessage(BMessage* message)
 			return true;
 		case kMsgResumeAudiobook:
 			_ResumeAudiobook();
+			return true;
+		case kMsgStartOverAudiobook:
+			_StartOverAudiobook();
 			return true;
 		default:
 			return false;

@@ -50,6 +50,29 @@ SpotifyItemKindForUri(const std::string& uri)
 	return kSpotifyItemUnknown;
 }
 
+inline bool
+SpotifyIdCharacterIsSafe(unsigned char character)
+{
+	return (character >= 'a' && character <= 'z')
+		|| (character >= 'A' && character <= 'Z')
+		|| (character >= '0' && character <= '9')
+		|| character == '-' || character == '_';
+}
+
+// Spotify item IDs are base62. Anything else is rejected before an ID reaches
+// an API path ("?", "&", "/") or a cache file name (".." traversal).
+inline bool
+SpotifyIdIsSafe(const std::string& id)
+{
+	if (id.empty() || id.size() > 128)
+		return false;
+	for (unsigned char character : id) {
+		if (!SpotifyIdCharacterIsSafe(character))
+			return false;
+	}
+	return true;
+}
+
 inline SpotifyItemKind
 SpotifyItemKindForTypeName(const std::string& typeName)
 {
@@ -71,7 +94,8 @@ SpotifyItemIdForUri(const std::string& uri)
 	size_t separator = uri.rfind(':');
 	if (separator == std::string::npos || separator + 1 >= uri.size())
 		return "";
-	return uri.substr(separator + 1);
+	std::string id = uri.substr(separator + 1);
+	return SpotifyIdIsSafe(id) ? id : "";
 }
 
 inline const char*

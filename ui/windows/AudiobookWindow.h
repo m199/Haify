@@ -48,6 +48,7 @@ private:
 	void _PlayChapterUri(const std::string& uri, const char* title,
 		int32 startPositionMs);
 	void _ResumeAudiobook();
+	void _StartOverAudiobook();
 	void _ShowChapterContextMenu(BMessage* message);
 	void _ShowPlayableContextMenu(BMessage* message);
 	void _RemoveChapterFromLibrary(BMessage* message);
@@ -66,6 +67,7 @@ private:
 	ArtworkView* fArtwork = nullptr;
 	BMenuBar* fMenuBar = nullptr;
 	BMenuItem* fSaveMenuItem = nullptr;
+	BMenuItem* fStartOverMenuItem = nullptr;
 	BTextView* fName = nullptr;
 	BStringView* fCredits = nullptr;
 	BStringView* fNarrators = nullptr;

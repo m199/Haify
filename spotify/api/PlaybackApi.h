@@ -47,7 +47,8 @@ public:
     void            SetRepeat(const std::string& mode, JsonCallback callback);
     void            GetQueue(JsonCallback callback);
     void            AddToQueue(const std::string& uri, JsonCallback callback);
-    void            GetRecentlyPlayed(int limit, JsonCallback callback);
+    void            GetRecentlyPlayed(int limit, JsonCallback callback,
+                                      bool forceRefresh = false);
 
 private:
     GetHandler      fGet;

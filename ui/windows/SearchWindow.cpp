@@ -2,6 +2,7 @@
 #include "app/App.h"
 #include "messages/Messages.h"
 #include "messages/MessageContracts.h"
+#include "playback/PlaybackQueueRequests.h"
 #include "settings/SettingsController.h"
 #include "ui/views/DiscoverListView.h"
 #include "spotify/SpotifyUri.h"
@@ -346,7 +347,7 @@ HandleSearchMenuSelection(BMessage* message, const std::string& uri,
 	if (message->what == MSG_SEARCH_QUEUE_ITEM && api) {
 		MessageContracts::QueueCommand command;
 		if (MessageContracts::ReadQueueCommand(*message, command))
-			api->Playback().AddToQueue(command.uri, nullptr);
+			AddToPlaybackQueue(api->Playback(), command.uri, BMessenger(be_app));
 		return;
 	}
 	if (message->what == 'sAdd' || message->what == 'sRem') {

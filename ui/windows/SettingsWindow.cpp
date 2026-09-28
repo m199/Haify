@@ -7,6 +7,7 @@
 #include "settings/SettingsController.h"
 #include "network/ImageCache.h"
 #include "spotify/api/SpotifyApi.h"
+#include "spotify/auth/SpotifyClientId.h"
 
 #include <algorithm>
 #include <cmath>
@@ -289,10 +290,22 @@ private:
 };
 
 
+// A BStringView's maximum width defaults to its text width. Inside the
+// vertical page groups that capped the whole column and, through
+// B_AUTO_UPDATE_SIZE_LIMITS, how far the window could be resized.
+static BStringView*
+ExpandableLabel(const char* name, const char* text)
+{
+	BStringView* label = new BStringView(name, text);
+	label->SetExplicitMaxSize(BSize(B_SIZE_UNLIMITED, B_SIZE_UNSET));
+	return label;
+}
+
+
 static BStringView*
 SectionLabel(const char* name, const char* text)
 {
-	BStringView* label = new BStringView(name, text);
+	BStringView* label = ExpandableLabel(name, text);
 	BFont font(be_plain_font);
 	font.SetFace(B_BOLD_FACE);
 	label->SetFont(&font);
@@ -368,7 +381,7 @@ SettingsWindow::_InitLayout()
 	categoryScroll->SetExplicitPreferredSize(BSize(170.0f, 500.0f));
 	categoryScroll->SetExplicitMaxSize(BSize(190.0f, B_SIZE_UNLIMITED));
 
-	fCategoryTitle = new BStringView("categoryTitle", "");
+	fCategoryTitle = ExpandableLabel("categoryTitle", "");
 	BFont titleFont(be_plain_font);
 	titleFont.SetFace(B_BOLD_FACE);
 	titleFont.SetSize(be_plain_font->Size() + 1.0f);
@@ -376,7 +389,7 @@ SettingsWindow::_InitLayout()
 	fCategoryTitle->SetHighColor((rgb_color) { 180, 35, 25, 255 });
 	fCategoryTitle->SetViewUIColor(B_TOOL_TIP_BACKGROUND_COLOR);
 
-	fCategoryDescription = new BStringView("categoryDescription", "");
+	fCategoryDescription = ExpandableLabel("categoryDescription", "");
 	fCategoryDescription->SetViewUIColor(B_TOOL_TIP_BACKGROUND_COLOR);
 
 	BBox* headerBox = new BBox("categoryHeader");
@@ -513,14 +526,20 @@ SettingsWindow::_InitLayout()
 		fAudiobookModeMenu->AddItem(new BMenuItem(B_TRANSLATE("Disabled"), nullptr));
 		fAudiobookModeField = new BMenuField("audiobookModeField",
 			B_TRANSLATE("Audiobooks:"), fAudiobookModeMenu);
-		fAudiobookStateView = new BStringView("audiobookState", "");
+		fAudiobookStateView = ExpandableLabel("audiobookState", "");
 		fAudiobookRetryButton = new BButton("audiobookRetry",
 			B_TRANSLATE("Check Again"), new BMessage('abRp'));
-		fSpotifyAccountView = new BStringView("spotifyAccount",
+		fSpotifyAccountView = ExpandableLabel("spotifyAccount",
 			B_TRANSLATE("Connected account: loading" B_UTF8_ELLIPSIS));
 		fOpenSpotifyButton = new BButton("openSpotifyProfile",
 			B_TRANSLATE("Open Spotify Profile"), new BMessage('spOp'));
 		fOpenSpotifyButton->SetEnabled(false);
+		fSignButton = new BButton("spotifySign", B_TRANSLATE("Sign In"),
+			new BMessage(MSG_INIT_AUTH));
+		fClientIdView = ExpandableLabel("spotifyClientId", "");
+		fClientIdButton = new BButton("spotifyClientIdChange",
+			B_TRANSLATE("Change" B_UTF8_ELLIPSIS),
+			new BMessage(MSG_OPEN_SETUP_ASSISTANT));
 
 		BView* page = new BView("spotifyPage", B_SUPPORTS_LAYOUT);
 		BLayoutBuilder::Group<>(page, B_VERTICAL, B_USE_DEFAULT_SPACING)
@@ -528,7 +547,15 @@ SettingsWindow::_InitLayout()
 			.Add(SectionLabel("accountSection", B_TRANSLATE("Account")))
 			.Add(fSpotifyAccountView)
 			.AddGroup(B_HORIZONTAL)
+				.Add(fSignButton)
 				.Add(fOpenSpotifyButton)
+				.AddGlue()
+			.End()
+			.AddStrut(B_USE_DEFAULT_SPACING)
+			.Add(SectionLabel("appSection", B_TRANSLATE("Spotify App")))
+			.Add(fClientIdView)
+			.AddGroup(B_HORIZONTAL)
+				.Add(fClientIdButton)
 				.AddGlue()
 			.End()
 			.AddStrut(B_USE_DEFAULT_SPACING)
@@ -797,6 +824,49 @@ SettingsWindow::_LoadSpotifyCategory(const HaifySettings& settings)
 	if (item)
 		item->SetMarked(true);
 	_UpdateAudiobookState();
+	_UpdateClientIdRow(settings);
+	App* app = dynamic_cast<App*>(be_app);
+	_UpdateSignButton((app && app->GetApi()) || !settings.refreshToken.empty());
+}
+
+
+// Sign in/out lives here; the App owns the session and reports changes with
+// MSG_AUTH_STATE.
+void
+SettingsWindow::_UpdateSignButton(bool signedIn)
+{
+	fSignButton->SetLabel(signedIn ? B_TRANSLATE("Sign Out")
+		: B_TRANSLATE("Sign In"));
+	fSignButton->SetMessage(new BMessage(signedIn ? MSG_SIGN_OUT
+		: MSG_INIT_AUTH));
+}
+
+
+// Changing the ID goes through the setup assistant, which the App owns.
+void
+SettingsWindow::_UpdateClientIdRow(const HaifySettings& settings)
+{
+	std::string clientId = ResolveSpotifyClientId(settings.spotifyClientId,
+		!settings.refreshToken.empty(), HAIFY_CLIENT_ID);
+	if (clientId.empty()) {
+		fClientIdView->SetText(B_TRANSLATE("Client ID: not set up"));
+		fClientIdButton->SetLabel(B_TRANSLATE("Set Up" B_UTF8_ELLIPSIS));
+		return;
+	}
+	BString label(B_TRANSLATE("Client ID: %id%"));
+	label.ReplaceFirst("%id%", clientId.c_str());
+	fClientIdView->SetText(label.String());
+	fClientIdButton->SetLabel(B_TRANSLATE("Change" B_UTF8_ELLIPSIS));
+}
+
+
+// The assistant may have stored a new ID while this window was inactive.
+void
+SettingsWindow::WindowActivated(bool active)
+{
+	BWindow::WindowActivated(active);
+	if (active && fClientIdView)
+		_UpdateClientIdRow(SettingsController::Load());
 }
 
 
@@ -1240,6 +1310,16 @@ SettingsWindow::_HandleSpotifyMessage(BMessage* message)
 
 		case 'spOp':
 			_OpenSpotifyProfile();
+			return true;
+
+		case MSG_OPEN_SETUP_ASSISTANT:
+		case MSG_INIT_AUTH:
+		case MSG_SIGN_OUT:
+			be_app->PostMessage(message->what);
+			return true;
+
+		case MSG_AUTH_STATE:
+			_UpdateSignButton(message->GetBool(MessageFields::Ok, false));
 			return true;
 
 		default:

@@ -5,6 +5,9 @@
 #define HAIFY_APP_VERSION   "1.3.1"
 #define HAIFY_SETTINGS_FILE "Haify_settings"
 
+// Built-in Spotify app registration. Only sessions that were created with it
+// keep using it; everybody else registers an own app through the setup
+// assistant (see spotify/auth/SpotifyClientId.h). May be left empty.
 #define HAIFY_CLIENT_ID     "006877f3073c4796a6e7dedc31aadd46"
 #define HAIFY_AUTH_SCOPE_VERSION 3
 

@@ -69,6 +69,7 @@ private:
 	void					_OpenPlaylistWindow(BMessage* message);
 	void					_BroadcastPlaylistsChanged(BMessage* message);
 	void					_BroadcastLibraryChanged(BMessage* message);
+	void					_BroadcastQueueChanged();
 	void					_BroadcastDragEnded();
 	void					_ApplySpotifyCapabilitiesMessage(BMessage* message);
 	void					_ApplySpotifyAccount(BMessage* message);
@@ -107,10 +108,11 @@ private:
 								const std::string& errorDescription,
 								const std::string& operation);
 	status_t				_ClearAuthSession();
-	void					_SendAuthStateToPlayer(bool ok);
+	void					_BroadcastAuthState(bool ok);
 	void					_ReloadAllWindows();
 	void					_ShowAuthFailureAlert(const std::string& error,
 								const std::string& errorDescription);
+	status_t				_EndSession();
 	void					_SignOut();
 	void					_StartLibrespotFromMessage(BMessage* message);
 	void					_RegisterLibrespotOAuth();
@@ -123,10 +125,13 @@ private:
 	void					_InstallDeskbarReplicant();
 	void					_RemoveDeskbarReplicant();
 	void					_InitAuth(bool silent = false);
-	void					_ShowMissingClientIdAlert();
+	std::string				_ResolveClientId(const HaifySettings& settings);
+	void					_ShowSetupAssistant();
+	void					_ApplyChosenClientId(BMessage* message);
 	bool					_InitSilentAuth(const HaifySettings& settings);
 	int32					_BeginAuthGeneration();
-	void					_StartInteractiveOAuth(int32 generation);
+	void					_StartInteractiveOAuth(int32 generation,
+								const std::string& clientId);
 	void					_RefreshAccessToken(
 								std::function<void(bool)> completion = nullptr,
 								bool silent = true);
@@ -145,6 +150,9 @@ private:
 	void					_SpawnLibrespot(
 								const std::vector<std::string>& args);
 	void					_StopLibrespot();
+	void					_BeginLibrespotStop();
+	void					_ContinueLibrespotStop();
+	void					_ResetLibrespotSession();
 	void					_ScheduleLibrespotTransfer(bigtime_t delay);
 	void					_SchedulePlaybackPollAfterLibrespotTransfer(
 								bigtime_t delay);
@@ -161,6 +169,10 @@ private:
 	BMessageRunner*			fLibrespotTransferTimer = nullptr;
 	BMessageRunner*			fLibrespotPlaybackPollTimer = nullptr;
 	BMessageRunner*			fTokenRefreshTimer = nullptr;
+	// Non-null while a UI-requested stop escalates without blocking the looper.
+	BMessageRunner*			fLibrespotStopTimer = nullptr;
+	bigtime_t				fLibrespotStopStarted = 0;
+	int						fLibrespotStopSignal = 0;
 	OAuthCallbackServer*	fOAuthSrv;
 	SpotifyApi*				fApi;
 	SpotifyCapabilities	fCapabilities;

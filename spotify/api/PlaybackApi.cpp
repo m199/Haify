@@ -130,7 +130,7 @@ PlaybackApi::SetVolume(int percent, JsonCallback callback,
     std::string path = "/me/player/volume?volume_percent="
         + std::to_string(percent);
     if (!deviceId.empty())
-        path += "&device_id=" + deviceId;
+        path += "&device_id=" + SpotifyUrlEncode(deviceId);
     fPut(path, "", callback);
 }
 
@@ -181,8 +181,14 @@ PlaybackApi::AddToQueue(const std::string& uri, JsonCallback callback)
 }
 
 void
-PlaybackApi::GetRecentlyPlayed(int limit, JsonCallback callback)
+PlaybackApi::GetRecentlyPlayed(int limit, JsonCallback callback,
+    bool forceRefresh)
 {
-    fGet("/me/player/recently-played?limit=" + std::to_string(limit),
-        callback);
+    std::string path = "/me/player/recently-played?limit="
+        + std::to_string(limit);
+    // The shared GET cache keeps responses for an hour; callers that need a
+    // current history must say so.
+    if (forceRefresh)
+        fEraseCache(path);
+    fGet(path, callback);
 }

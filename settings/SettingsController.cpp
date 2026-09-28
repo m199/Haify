@@ -431,6 +431,7 @@ LoadAuthSettings(const nlohmann::json& j, HaifySettings& s)
     JsonGetString(j, "granted_scopes", s.grantedScopes);
     JsonGetInt(j, "auth_scope_version", s.authScopeVersion);
     JsonGetString(j, "spotify_account_id", s.spotifyAccountId);
+    JsonGetString(j, "spotify_client_id", s.spotifyClientId);
     if (j.contains("access_token_expires_at")
             && j["access_token_expires_at"].is_number_integer()) {
         s.accessTokenExpiresAt = j["access_token_expires_at"];
@@ -650,6 +651,7 @@ status_t SettingsController::Save(const HaifySettings& s)
         {"access_token_expires_at",      s.accessTokenExpiresAt},
         {"auth_scope_version",           s.authScopeVersion},
         {"spotify_account_id",            s.spotifyAccountId},
+        {"spotify_client_id",             s.spotifyClientId},
 
         {"player_window_x",              s.playerWindowX},
         {"player_window_y",              s.playerWindowY},

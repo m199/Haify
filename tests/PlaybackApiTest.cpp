@@ -80,6 +80,7 @@ TestPlaybackControls()
 	fixture.api.Previous(nullptr);
 	fixture.api.SetRepeat("context", nullptr);
 	fixture.api.SetVolume(37, nullptr, "baron");
+	fixture.api.SetVolume(5, nullptr, "a&b");
 	fixture.transport.Expect(0, "PUT", "/me/player/play?device_id=baron");
 	fixture.transport.ExpectJson(1, "PUT", "/me/player/play?device_id=baron",
 		{{"context_uri", "spotify:album:one"}});
@@ -93,7 +94,22 @@ TestPlaybackControls()
 	fixture.transport.Expect(8, "POST", "/me/player/previous");
 	fixture.transport.Expect(9, "PUT", "/me/player/repeat?state=context");
 	fixture.transport.Expect(10, "PUT", "/me/player/volume?volume_percent=37&device_id=baron");
-	assert(fixture.transport.requests.size() == 11);
+	fixture.transport.Expect(11, "PUT", "/me/player/volume?volume_percent=5&device_id=a%26b");
+	assert(fixture.transport.requests.size() == 12);
+}
+
+// The live timer may reuse the cached history; an explicit refresh may not.
+static void
+TestRecentlyPlayedRefreshIsExplicit()
+{
+	const std::string path = "/me/player/recently-played?limit=50";
+	PlaybackFixture fixture;
+	fixture.api.GetRecentlyPlayed(50, nullptr);
+	assert(fixture.transport.events.at(0) == "GET " + path);
+	fixture.api.GetRecentlyPlayed(50, nullptr, true);
+	assert(fixture.transport.events.at(1) == "INVALIDATE " + path);
+	assert(fixture.transport.events.at(2) == "GET " + path);
+	assert(fixture.transport.requests.size() == 2);
 }
 
 static void
@@ -188,6 +204,7 @@ main()
 	TestQueueOrderAndDuplicates();
 	TestPlaybackControls();
 	TestLiveReadsInvalidateBeforeDispatch();
+	TestRecentlyPlayedRefreshIsExplicit();
 	TestFailuresAreNotRetriedOrReplaced();
 	TestAcceptedPlayDoesNotInventPlaybackState();
 	TestColdPlaybackStartPresentation();

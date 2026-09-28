@@ -34,6 +34,7 @@ public:
 
 private:
 	void					_InitMenu();
+	void					_UpdateSetupMenuItem();
 	void					_InitLayout();
 	void					_PollPlayback();
 	void					_SchedulePlaybackPoll(bigtime_t delay);
@@ -108,9 +109,9 @@ private:
 	void					_SaveCurrentTrack();
 	void					_PrepareAddTrackMenu(BMessage* message);
 	void					_ShowAddTrackMenuFromMessage(BMessage* message);
-	void					_ApplyAuthStatus(BMessage* message);
 	void					_ApplyDeviceList(BMessage* message);
 	void					_TransferToDevice(BMessage* message);
+	void					_ApplyDeviceTransferResult(BMessage* message);
 	bool					_ApplyOptimisticPlay(BMessage* message);
 	void					_ResolveAudiobookContextForPlayback(
 								const std::string& trackUri,
@@ -147,7 +148,9 @@ private:
 	void					_ShowAboutWindow();
 
 	BMenuBar*				fMenuBar       = nullptr;
-	BMenuItem*				fAuthItem      = nullptr;
+	BMenu*					fFileMenu      = nullptr;
+	// Present only while no Client ID is set up.
+	BMenuItem*				fSetupItem     = nullptr;
 	BMenuItem*				fLibrespotToggleItem = nullptr;
 	BMenuItem*				fAutostartItem = nullptr;
 	BMenu*					fDeviceMenu    = nullptr;

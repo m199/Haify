@@ -26,6 +26,7 @@ public:
 								SettingsWindow();
 								~SettingsWindow() override;
 	virtual void				MessageReceived(BMessage* message);
+	void						WindowActivated(bool active) override;
 
 private:
 	void						_InitLayout();
@@ -38,6 +39,9 @@ private:
 									const HaifySettings& settings);
 	void						_LoadSpotifyCategory(
 									const HaifySettings& settings);
+	void						_UpdateClientIdRow(
+									const HaifySettings& settings);
+	void						_UpdateSignButton(bool signedIn);
 	void						_LoadLibrespotCategory(
 									const HaifySettings& settings);
 	void						_LoadDeviceCategory(
@@ -118,6 +122,9 @@ private:
 	BStringView*					fSpotifyAccountView = nullptr;
 	BButton*					fOpenSpotifyButton = nullptr;
 	std::string					fSpotifyProfileUrl;
+	BStringView*					fClientIdView = nullptr;
+	BButton*					fClientIdButton = nullptr;
+	BButton*					fSignButton = nullptr;
 
 };
 

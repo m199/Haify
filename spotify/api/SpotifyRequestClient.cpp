@@ -5,6 +5,7 @@
 
 #include <Autolock.h>
 #include <OS.h>
+#include <algorithm>
 #include <atomic>
 #include <ctime>
 #include <initializer_list>
@@ -250,6 +251,43 @@ SpotifyRequestClient::ClearSession()
     fSessionGeneration++;
 }
 
+// Spotify asks clients to pause after 429 for Retry-After seconds. The pause
+// covers every request of this client, not only the one that was refused.
+void
+SpotifyRequestClient::_NoteRateLimit(int retryAfterSeconds, int64_t nowUs)
+{
+    static const int kDefaultRetryAfterSeconds = 5;
+    static const int kMaxRetryAfterSeconds = 3600;
+    int seconds = retryAfterSeconds > 0
+        ? std::min(retryAfterSeconds, kMaxRetryAfterSeconds)
+        : kDefaultRetryAfterSeconds;
+    BAutolock lock(&fLock);
+    fRateLimitedUntilUs = std::max<int64_t>(fRateLimitedUntilUs,
+        nowUs + int64_t(seconds) * 1000000);
+}
+
+int
+SpotifyRequestClient::_RateLimitRemainingSeconds(int64_t nowUs) const
+{
+    BAutolock lock(&fLock);
+    if (nowUs >= fRateLimitedUntilUs)
+        return 0;
+    return int((fRateLimitedUntilUs - nowUs + 999999) / 1000000);
+}
+
+// Answers locally in the shape of Spotify's 429, so every caller's existing
+// rate-limit handling (including Retry-After) applies unchanged.
+bool
+SpotifyRequestClient::_RefuseWhileRateLimited(const RawCallback& callback) const
+{
+    int remainingSeconds = _RateLimitRemainingSeconds(system_time());
+    if (remainingSeconds <= 0)
+        return false;
+    if (callback)
+        callback(429, "{\"error\":\"rate_limited\"}", remainingSeconds);
+    return true;
+}
+
 bool
 SpotifyRequestClient::_SessionMatches(uint64_t session) const
 {
@@ -288,6 +326,9 @@ SpotifyRequestClient::_Request(const std::string& method,
         requestHandler = fRequestHandler;
     }
 
+    if (_RefuseWhileRateLimited(callback))
+        return;
+
     unsigned long long traceId = LogPlaybackDispatch(method, path, body);
     auto complete = [this, method, path, body, callback, allowRefresh,
         contentType, refreshHandler, session, traceId](int status, const std::string& responseBody,
@@ -299,6 +340,8 @@ SpotifyRequestClient::_Request(const std::string& method,
             return;
         }
         LogRequestFailure(method, path, status, responseBody);
+        if (status == 429)
+            _NoteRateLimit(retryAfter, system_time());
         if (status == 401 && allowRefresh && refreshHandler) {
             refreshHandler([this, method, path, body, callback,
                 contentType, session](bool ok) {
@@ -437,6 +480,13 @@ SpotifyRequestClient::EraseCache(const std::string& path)
     std::string key = _CacheKey(path);
     fCache.erase(key);
     fPendingGets.erase(key);
+}
+
+void
+SpotifyRequestClient::ExpireCachedValue(const std::string& path)
+{
+    BAutolock lock(&fLock);
+    fCache.erase(_CacheKey(path));
 }
 
 void

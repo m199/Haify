@@ -32,7 +32,9 @@
 
 static const uint32 kMsgTabSelected = 'tabS';
 static const uint32 kMsgLiveRefresh = 'qLiv';
-static const bigtime_t kQueueLiveRefreshInterval = 5000000LL;
+// Track changes and Haify's own queue additions reload at once; the timer only
+// catches additions made on other devices. File > Refresh reloads at once.
+static const bigtime_t kQueueLiveRefreshInterval = 60000000LL;
 
 static bool
 IsSecondaryMouseClick(BMessage* message)
@@ -450,9 +452,8 @@ QueueWindow::MessageReceived(BMessage* message)
 			break;
 
 		case kMsgLiveRefresh:
+		case MSG_PLAYBACK_QUEUE_CHANGED:
 			_LoadQueue();
-			if (fRecentLoaded && fTabView && fTabView->Selection() == 1)
-				_LoadRecent();
 			break;
 
 		case MSG_CURRENT_TRACK_UPDATE:
@@ -490,7 +491,7 @@ void
 QueueWindow::_LoadRecentIfNeeded(int32 tab)
 {
 	if (tab == 1 && !fRecentLoaded)
-		_LoadRecent();
+		_LoadRecent(true);
 }
 
 
@@ -503,7 +504,7 @@ QueueWindow::_RefreshQueueAndRecent()
 
 	fRecentLoaded = false;
 	if (fTabView && fTabView->Selection() == 1)
-		_LoadRecent();
+		_LoadRecent(true);
 }
 
 
@@ -513,7 +514,8 @@ QueueWindow::_ApplyPlayingTrack(BMessage* message)
 	MessageContracts::CurrentTrackUpdate update;
 	if (MessageContracts::ReadCurrentTrackUpdate(*message, update)) {
 		SetPlayingTrack(update.uri.c_str());
-		_LoadQueue();
+		// A new track changes both the queue and the play history.
+		_RefreshQueueAndRecent();
 	}
 }
 
@@ -729,7 +731,7 @@ QueueWindow::_LoadQueue()
 
 
 void
-QueueWindow::_LoadRecent()
+QueueWindow::_LoadRecent(bool forceRefresh)
 {
 	App* app = (App*)be_app;
 	SpotifyApi* api = app->GetApi();
@@ -738,6 +740,8 @@ QueueWindow::_LoadRecent()
 	fRecentLoaded = true;
 	BMessenger self(this);
 
+	// The live timer reuses the cached list; opening the tab and an explicit
+	// refresh fetch a current one.
 	api->Playback().GetRecentlyPlayed(50, [self](bool ok,
 			const nlohmann::json& data) {
 		if (!ok || !data.contains("items")) return;
@@ -774,5 +778,5 @@ QueueWindow::_LoadRecent()
 
 		self.SendMessage(msg);
 		delete msg;
-	});
+	}, forceRefresh);
 }

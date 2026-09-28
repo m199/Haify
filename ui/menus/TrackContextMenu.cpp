@@ -1,6 +1,7 @@
 #include "ui/menus/TrackContextMenu.h"
 #include "messages/Messages.h"
 #include "messages/MessageContracts.h"
+#include "playback/PlaybackQueueRequests.h"
 #include "spotify/SpotifyUri.h"
 #include "spotify/api/SpotifyApi.h"
 
@@ -185,7 +186,7 @@ HandlePlayableMenuSelection(BMessage* message, const std::string& itemUri,
         {
             MessageContracts::QueueCommand command;
             if (api && MessageContracts::ReadQueueCommand(*message, command))
-                api->Playback().AddToQueue(command.uri, nullptr);
+                AddToPlaybackQueue(api->Playback(), command.uri, BMessenger(be_app));
             break;
         }
         case 'likT':

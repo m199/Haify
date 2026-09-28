@@ -108,6 +108,7 @@ private:
 	void					_ApplyPlaylistSnapshot(BMessage* message);
 	void					_ReloadDataIfIdle();
 	void					_RefreshEpisodes();
+	void					_RefreshContent();
 	void					_SaveCacheNowFromMessage();
 	void					_ApplyTitleUpdate(BMessage* message);
 	void					_UploadPlaylistCoverFromMessage(BMessage* message);

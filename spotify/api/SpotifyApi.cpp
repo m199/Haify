@@ -1,4 +1,5 @@
 #include "SpotifyApi.h"
+#include "playlist/PlaylistCacheStore.h"
 
 #include <utility>
 
@@ -52,8 +53,10 @@ SpotifyApi::SpotifyApi(const std::string& accessToken)
                 JsonCallback callback) {
             Post(path, body, callback);
         },
+        // Playback only invalidates before live reads; a read already in
+        // flight is just as current, so it is joined instead of duplicated.
         [this](const std::string& path) {
-            _EraseCache(path);
+            fClient.ExpireCachedValue(path);
         }),
       fPlaylists(
         [this](const std::string& path, JsonCallback callback) {
@@ -110,6 +113,7 @@ void SpotifyApi::SetAccountId(const std::string& accountId)
     if (!fClient.SetAccountId(accountId))
         return;
     fPlaylists.SetAccountId(accountId);
+    PlaylistCacheStore::SetAccount(accountId);
 }
 
 void SpotifyApi::SetTokenRefreshHandler(TokenRefreshHandler handler)
@@ -126,6 +130,7 @@ void SpotifyApi::ClearSession()
 {
     fClient.ClearSession();
     fPlaylists.ClearSession();
+    PlaylistCacheStore::SetAccount("");
 }
 
 ArtistApi& SpotifyApi::Artists()

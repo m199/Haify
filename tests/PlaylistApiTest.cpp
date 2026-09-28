@@ -12,8 +12,15 @@ std::string
 SettingsController::CacheFilePath(const std::string& directory,
 	const std::string& fileName, bool createDirectory)
 {
-	assert(directory == "playlists" && !fileName.empty() && !createDirectory);
+	assert(directory.rfind("playlists/", 0) == 0 && !fileName.empty()
+		&& !createDirectory);
 	// An unavailable cache path prevents unlink from touching real user files.
+	return "";
+}
+
+std::string
+SettingsController::CachePath(const std::string&, bool)
+{
 	return "";
 }
 

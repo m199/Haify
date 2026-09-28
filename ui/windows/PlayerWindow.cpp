@@ -13,6 +13,7 @@
 #include "app/AppVersion.h"
 #include "app/HaifyDebug.h"
 #include "app/Config.h"
+#include "spotify/auth/SpotifyClientId.h"
 #include "policy/UiLogic.h"
 #include "playback/PlaybackStartController.h"
 #include "playback/PlaybackStartPolicy.h"
@@ -22,6 +23,7 @@
 #include <nlohmann/json.hpp>
 
 #include <AboutWindow.h>
+#include <Alert.h>
 #include <AppFileInfo.h>
 #include <AppDefs.h>
 #include <Application.h>
@@ -54,6 +56,7 @@ static const int32 kQueuePrefetchRemainingMs = 30000;
 static const uint32 kMsgVerifyPoll = 'vpol';
 static const uint32 kMsgPlaybackTick = 'ptik';
 static const uint32 kMsgPlaybackPollResult = 'pbrs';
+static const uint32 kMsgDeviceTransferResult = 'toDr';
 static const uint32 kMsgAudiobookContextResult = 'abcr';
 static const uint32 kMsgApplyMuteToggle = 'amte';
 static const uint32 kMsgPlaybackDeviceChoices = 'pbDc';
@@ -324,6 +327,10 @@ PlayerWindow::_PollPlayback()
 void
 PlayerWindow::_SchedulePlaybackPoll(bigtime_t delay)
 {
+	// Immediate polls come from librespot events and startup: playback is
+	// changing, so the long-idle backoff must not delay the next check.
+	if (delay <= 0)
+		fPlaybackPoll.NoteActivity();
 	delete fPollTimer;
 	fPollTimer = nullptr;
 	BMessage message('poll');
@@ -371,6 +378,7 @@ PlayerWindow::_FetchQueuePrediction()
 void
 PlayerWindow::_ScheduleVerifyPoll(bigtime_t delay)
 {
+	fPlaybackPoll.NoteActivity();
 	delete fVerifyTimer;
 	fVerifyTimer = nullptr;
 
@@ -1759,18 +1767,6 @@ PlayerWindow::_ShowAddTrackMenuFromMessage(BMessage* message)
 }
 
 
-void
-PlayerWindow::_ApplyAuthStatus(BMessage* message)
-{
-	bool auth = false;
-	message->FindBool("ok", &auth);
-	if (fAuthItem) {
-		fAuthItem->SetLabel(auth
-			? B_TRANSLATE("Sign Out") : B_TRANSLATE("Sign In"));
-		fAuthItem->SetMessage(new BMessage(auth ? 'sout' : MSG_INIT_AUTH));
-	}
-}
-
 
 void
 PlayerWindow::_ApplyDeviceList(BMessage* message)
@@ -1812,8 +1808,40 @@ PlayerWindow::_TransferToDevice(BMessage* message)
 		return;
 	App* app = (App*)be_app;
 	SpotifyApi* api = app->GetApi();
-	if (api)
-		api->Playback().TransferPlayback(id, nullptr);
+	if (!api)
+		return;
+	BMessenger self(this);
+	std::string deviceId = id;
+	api->Playback().TransferPlayback(deviceId, [self, deviceId](bool ok,
+			const nlohmann::json& data) {
+		BMessage result(kMsgDeviceTransferResult);
+		result.AddString("id", deviceId.c_str());
+		result.AddBool(MessageFields::Ok, ok);
+		result.AddInt32(MessageFields::Status, SpotifyResponseStatus(data));
+		self.SendMessage(&result);
+	});
+}
+
+
+// Commands sent right after a switch must target the new device, and the
+// display should follow at once instead of at the next regular poll.
+void
+PlayerWindow::_ApplyDeviceTransferResult(BMessage* message)
+{
+	if (message->GetBool(MessageFields::Ok, false)) {
+		fCurrentDeviceId = message->GetString("id", "");
+		_ScheduleVerifyPoll(kVerifyPollDelay);
+		return;
+	}
+	int32 status = message->GetInt32(MessageFields::Status, -1);
+	DEBUG_PRINT("Device transfer to %s failed: status=%ld\n",
+		message->GetString("id", ""), (long)status);
+	BString text(B_TRANSLATE("Spotify did not switch to the selected device "
+		"(status %status%). The device may be offline or not ready."));
+	text.ReplaceFirst("%status%", std::to_string(status).c_str());
+	BAlert* alert = new BAlert(B_TRANSLATE("Device"), text.String(),
+		B_TRANSLATE("OK"), nullptr, nullptr, B_WIDTH_AS_USUAL, B_WARNING_ALERT);
+	alert->Go(nullptr);
 }
 
 
@@ -2019,16 +2047,13 @@ PlayerWindow::_ForwardAppMessage(BMessage* message)
 		case MSG_OPEN_SEARCH:
 		case MSG_OPEN_ARTWORK:
 		case MSG_OPEN_SETTINGS:
+		case MSG_OPEN_SETUP_ASSISTANT:
 		case MSG_SHOW_PLAYER_WINDOW:
 		case MSG_SHOW_ARTIST:
 		case MSG_SHOW_ALBUM:
 		case MSG_INIT_AUTH:
 		case 'open':
 			be_app->PostMessage(message);
-			return true;
-
-		case 'sout':
-			be_app->PostMessage('sout');
 			return true;
 
 		default:
@@ -2041,16 +2066,16 @@ bool
 PlayerWindow::_HandleAccountDeviceMessage(BMessage* message)
 {
 	switch (message->what) {
-		case 'aust':
-			_ApplyAuthStatus(message);
-			return true;
-
 		case 'dEvL':
 			_ApplyDeviceList(message);
 			return true;
 
 		case 'toDv':
 			_TransferToDevice(message);
+			return true;
+
+		case kMsgDeviceTransferResult:
+			_ApplyDeviceTransferResult(message);
 			return true;
 
 		case B_ABOUT_REQUESTED:
@@ -2104,6 +2129,7 @@ PlayerWindow::_ShowAboutWindow()
 void
 PlayerWindow::MenusBeginning()
 {
+	_UpdateSetupMenuItem();
 	_UpdateLibrespotMenuItems();
 
 	if (!fDeviceMenu) return;
@@ -2151,6 +2177,29 @@ PlayerWindow::MenusBeginning()
 }
 
 
+// The setup entry is only offered while sign-in has no Client ID; it then
+// leads the File menu so it is the first thing a new user sees.
+void
+PlayerWindow::_UpdateSetupMenuItem()
+{
+	if (!fFileMenu)
+		return;
+	HaifySettings settings = SettingsController::Load();
+	bool needsSetup = ResolveSpotifyClientId(settings.spotifyClientId,
+		!settings.refreshToken.empty(), HAIFY_CLIENT_ID).empty();
+	if (needsSetup && !fSetupItem) {
+		fSetupItem = new BMenuItem(
+			B_TRANSLATE("Spotify App Setup" B_UTF8_ELLIPSIS),
+			new BMessage(MSG_OPEN_SETUP_ASSISTANT));
+		fFileMenu->AddItem(fSetupItem, 0);
+	} else if (!needsSetup && fSetupItem) {
+		fFileMenu->RemoveItem(fSetupItem);
+		delete fSetupItem;
+		fSetupItem = nullptr;
+	}
+}
+
+
 void
 PlayerWindow::_UpdateLibrespotMenuItems()
 {
@@ -2182,14 +2231,11 @@ PlayerWindow::_InitMenu()
 	fMenuBar = new BMenuBar("MenuBar");
 
 	BMenu* fileMenu = new BMenu(B_TRANSLATE("File"));
-	App* app = dynamic_cast<App*>(be_app);
-	HaifySettings settings = SettingsController::Load();
-	bool hasStoredSession = !settings.refreshToken.empty();
-	bool signedIn = (app && app->GetApi()) || hasStoredSession;
-	fAuthItem = new BMenuItem(signedIn
-		? B_TRANSLATE("Sign Out") : B_TRANSLATE("Sign In"),
-		new BMessage(signedIn ? 'sout' : MSG_INIT_AUTH));
-	fileMenu->AddItem(fAuthItem);
+	// Sign in/out lives in Settings > Spotify; the setup assistant entry is
+	// added here only while no Client ID exists (_UpdateSetupMenuItem).
+	// Polls slowly on its own; this shows changes from other devices at once.
+	fileMenu->AddItem(new BMenuItem(B_TRANSLATE("Refresh"),
+		new BMessage('poll'), 'R'));
 	fileMenu->AddItem(new BMenuItem(B_TRANSLATE("Settings" B_UTF8_ELLIPSIS),
 		new BMessage(MSG_OPEN_SETTINGS)));
 	fileMenu->AddItem(new BMenuItem(B_TRANSLATE("About Haify" B_UTF8_ELLIPSIS),
@@ -2198,6 +2244,8 @@ PlayerWindow::_InitMenu()
 	fileMenu->AddItem(new BMenuItem(B_TRANSLATE("Quit"),
 		new BMessage(MSG_QUIT_APP), 'Q'));
 	fMenuBar->AddItem(fileMenu);
+	fFileMenu = fileMenu;
+	_UpdateSetupMenuItem();
 
 	fDeviceMenu = new BMenu(B_TRANSLATE("Device"));
 	fDeviceMenu->AddItem(new BMenuItem(B_TRANSLATE("Loading" B_UTF8_ELLIPSIS), nullptr));

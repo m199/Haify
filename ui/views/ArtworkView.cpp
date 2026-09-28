@@ -4,9 +4,12 @@
 
 
 #include <algorithm>
+#include <Autolock.h>
 #include <Bitmap.h>
 #include <Catalog.h>
 #include <cmath>
+#include <Locker.h>
+#include <map>
 #include <Message.h>
 #include <Messenger.h>
 #include <View.h>
@@ -84,6 +87,49 @@ static BBitmap *ScaleBitmapStepwise(const BBitmap *source, int32 targetWidth,
   return result;
 }
 
+// Loaded bitmaps wait here instead of travelling as raw message pointers: a
+// message still queued when its view is deleted is dropped by the looper, and
+// the view's destructor then frees what was addressed to it. The owner
+// pointer is only a key and is never dereferenced.
+struct PendingArtwork {
+  const void *owner;
+  BBitmap *bitmap;
+};
+
+BLocker sPendingArtworkLock("Haify artwork delivery");
+std::map<uint64, PendingArtwork> sPendingArtwork;
+uint64 sNextArtworkToken = 0;
+
+uint64 ParkArtwork(const void *owner, BBitmap *bitmap) {
+  BAutolock lock(&sPendingArtworkLock);
+  uint64 token = ++sNextArtworkToken;
+  sPendingArtwork[token] = {owner, bitmap};
+  return token;
+}
+
+BBitmap *ClaimArtwork(uint64 token) {
+  BAutolock lock(&sPendingArtworkLock);
+  auto pending = sPendingArtwork.find(token);
+  if (pending == sPendingArtwork.end())
+    return nullptr;
+  BBitmap *bitmap = pending->second.bitmap;
+  sPendingArtwork.erase(pending);
+  return bitmap;
+}
+
+void DiscardArtworkFor(const void *owner) {
+  BAutolock lock(&sPendingArtworkLock);
+  for (auto pending = sPendingArtwork.begin();
+       pending != sPendingArtwork.end();) {
+    if (pending->second.owner == owner) {
+      delete pending->second.bitmap;
+      pending = sPendingArtwork.erase(pending);
+    } else {
+      ++pending;
+    }
+  }
+}
+
 }
 
 
@@ -122,6 +168,7 @@ status_t ArtworkView::Archive(BMessage* data, bool) const {
 }
 
 ArtworkView::~ArtworkView() {
+  DiscardArtworkFor(this);
   delete fBitmap;
   fBitmap = nullptr;
   delete fScaledBitmap;
@@ -229,14 +276,18 @@ void ArtworkView::_StartLoad(bool reload) {
   const std::string requestUrl = fArtworkUrl;
   const uint64 generation = fLoadGeneration;
   BMessenger self(this);
-  ImageCallback callback = [self, requestUrl, generation](BBitmap* bitmap) {
+  const void *owner = this;
+  ImageCallback callback = [self, owner, requestUrl, generation](BBitmap* bitmap) {
     BMessage message(kMsgArtworkLoaded);
     message.AddString("url", requestUrl.c_str());
     message.AddInt64("generation", static_cast<int64>(generation));
-    if (bitmap)
-      message.AddPointer("bitmap", bitmap);
-    if (self.SendMessage(&message) != B_OK)
-      delete bitmap;
+    uint64 token = 0;
+    if (bitmap) {
+      token = ParkArtwork(owner, bitmap);
+      message.AddUInt64("token", token);
+    }
+    if (self.SendMessage(&message) != B_OK && token != 0)
+      delete ClaimArtwork(token);
   };
   if (reload)
     ImageCache::ReloadImage(requestUrl, callback);
@@ -322,8 +373,7 @@ void ArtworkView::MessageReceived(BMessage *msg) {
   switch (msg->what) {
   case kMsgArtworkLoaded:
   {
-    BBitmap* bitmap = nullptr;
-    msg->FindPointer("bitmap", reinterpret_cast<void**>(&bitmap));
+    BBitmap* bitmap = ClaimArtwork(msg->GetUInt64("token", 0));
     const char* url = msg->GetString("url", "");
     int64 generation = msg->GetInt64("generation", -1);
     if (generation == static_cast<int64>(fLoadGeneration)

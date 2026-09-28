@@ -1,32 +1,21 @@
 #include "PlaylistApi.h"
 #include "app/HaifyDebug.h"
-#include "SettingsController.h"
+#include "playlist/PlaylistCacheStore.h"
 #include "spotify/SpotifyPlaylistPolicy.h"
 #include "spotify/SpotifyUri.h"
 #include "SpotifyUrl.h"
 
 #include <algorithm>
 #include <Autolock.h>
-#include <Path.h>
 #include <set>
 #include <utility>
-#include <unistd.h>
 
-static bool
-HaifyPlaylistCachePath(const std::string& playlistId, BPath& path,
-    bool createDirectories)
-{
-    std::string file = SettingsController::CacheFilePath("playlists",
-        playlistId + ".json", createDirectories);
-    return !file.empty() && path.SetTo(file.c_str()) == B_OK;
-}
-
+// Also cancels a pending page write, which could otherwise restore the
+// pre-mutation document after the unlink.
 static void
 DeletePlaylistCache(const std::string& playlistId)
 {
-    BPath path;
-    if (HaifyPlaylistCachePath(playlistId, path, false))
-        unlink(path.Path());
+    PlaylistCacheStore::Remove(PlaylistCacheStore::kPlaylists, playlistId);
 }
 
 static bool

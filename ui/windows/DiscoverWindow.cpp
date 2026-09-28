@@ -892,10 +892,6 @@ DiscoverWindow::_HandleAppForwardMessage(BMessage* message)
 			be_app->PostMessage(message);
 			return true;
 
-		case 'sout':
-			be_app->PostMessage('sout');
-			return true;
-
 		default:
 			return false;
 	}

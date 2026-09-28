@@ -1,12 +1,10 @@
 #include "LibraryApi.h"
-#include "SettingsController.h"
+#include "playlist/PlaylistCacheStore.h"
 #include "spotify/SpotifyUri.h"
 #include "SpotifyUrl.h"
 
 #include <algorithm>
-#include <Path.h>
 #include <utility>
-#include <unistd.h>
 
 static const size_t kLibraryBatchSize = 40;
 
@@ -51,20 +49,13 @@ AudiobookIds(const std::vector<std::string>& uris, std::string& encodedIds)
     return true;
 }
 
-static bool
-HaifyLibraryCachePath(BPath& path, bool createDirectories)
-{
-    std::string file = SettingsController::CacheFilePath("library",
-        "liked-songs.json", createDirectories);
-    return !file.empty() && path.SetTo(file.c_str()) == B_OK;
-}
-
+// Also cancels a pending page write, which could otherwise restore the
+// pre-mutation Liked Songs document after the unlink.
 static void
 DeleteLikedSongsCache()
 {
-    BPath path;
-    if (HaifyLibraryCachePath(path, false))
-        unlink(path.Path());
+    PlaylistCacheStore::Remove(PlaylistCacheStore::kLibrary,
+        PlaylistCacheStore::kLikedSongsId);
 }
 
 LibraryApi::LibraryApi(GetHandler get, BodyRequestHandler put,

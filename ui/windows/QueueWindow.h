@@ -21,7 +21,7 @@ public:
 private:
 	void					_InitLayout();
 	void					_LoadQueue();
-	void					_LoadRecent();
+	void					_LoadRecent(bool forceRefresh);
 	void					_LoadRecentIfNeeded(int32 tab);
 	void					_RefreshQueueAndRecent();
 	void					_ApplyPlayingTrack(BMessage* message);

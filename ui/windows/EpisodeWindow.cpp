@@ -9,6 +9,7 @@
 #include "messages/Messages.h"
 #include "messages/MessageContracts.h"
 #include "playback/NowPlayingFields.h"
+#include "playback/PlaybackQueueRequests.h"
 #include "spotify/SpotifyUri.h"
 #include "spotify/api/SpotifyApi.h"
 
@@ -292,7 +293,7 @@ void EpisodeWindow::_QueueEpisode()
     App* app = dynamic_cast<App*>(be_app);
     SpotifyApi* api = app ? app->GetApi() : nullptr;
     if (api && !fEpisodeUri.empty())
-        api->Playback().AddToQueue(fEpisodeUri, nullptr);
+        AddToPlaybackQueue(api->Playback(), fEpisodeUri, BMessenger(be_app));
 }
 
 void EpisodeWindow::_ToggleSaved()

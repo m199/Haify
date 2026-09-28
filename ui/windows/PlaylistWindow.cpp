@@ -95,6 +95,7 @@ static const uint32 kMsgClearPlaylist = 'pClr';
 static const uint32 kMsgMovePlaylistItemUp = 'pMvU';
 static const uint32 kMsgMovePlaylistItemDown = 'pMvD';
 static const uint32 kMsgSaveCache = 'sCch';
+static const uint32 kMsgRefreshContent = 'rfPl';
 static const int32 kLikedSongsIconResource = 2015;
 static const int32 kSearchIconResource = 2016;
 
@@ -457,6 +458,9 @@ PlaylistWindow::_HandleDataMessage(BMessage* message)
 		case 'rfEp':
 			_RefreshEpisodes();
 			return true;
+		case kMsgRefreshContent:
+			_RefreshContent();
+			return true;
 		case kMsgCheckLazyLoad:
 			_CheckLazyLoad();
 			_UpdatePlaylistMenuState();
@@ -618,9 +622,6 @@ PlaylistWindow::_HandleAppForwardMessage(BMessage* message)
 		case 'open':
 			be_app->PostMessage(message);
 			return true;
-		case 'sout':
-			be_app->PostMessage('sout');
-			return true;
 		default:
 			return false;
 	}
@@ -663,6 +664,18 @@ PlaylistWindow::_RefreshEpisodes()
 	if (SpotifyItemKindForUri(fUri) != kSpotifyItemShow)
 		return;
 
+	_DeleteCache();
+	_LoadData(true);
+}
+
+
+// Cached documents stay valid for a long time to spare the Web API; this is
+// the user's way to see changes made on other devices right away.
+void
+PlaylistWindow::_RefreshContent()
+{
+	if (_PlaylistMutationPending())
+		return;
 	_DeleteCache();
 	_LoadData(true);
 }
@@ -1771,6 +1784,14 @@ PlaylistWindow::_InitMenu()
 {
 	fMenuBar = new BMenuBar("MenuBar");
 
+	BMenu* fileMenu = new BMenu(B_TRANSLATE("File"));
+	fileMenu->AddItem(new BMenuItem(B_TRANSLATE("Refresh"),
+		new BMessage(kMsgRefreshContent), 'R'));
+	fileMenu->AddSeparatorItem();
+	fileMenu->AddItem(new BMenuItem(B_TRANSLATE("Close Window"),
+		new BMessage(B_QUIT_REQUESTED), 'W'));
+	fMenuBar->AddItem(fileMenu);
+
 	SpotifyItemKind kind = SpotifyItemKindForUri(fUri);
 	if (kind == kSpotifyItemAlbum) {
 		BMenu* albumMenu = new BMenu(B_TRANSLATE("Album"));
@@ -1806,11 +1827,6 @@ PlaylistWindow::_InitMenu()
 		playlistMenu->AddItem(fPlaylistDeleteItem);
 		fMenuBar->AddItem(playlistMenu);
 		_UpdatePlaylistMenuState();
-	} else if (kind != kSpotifyItemShow) {
-		BMenu* fileMenu = new BMenu(B_TRANSLATE("File"));
-		fileMenu->AddItem(new BMenuItem(B_TRANSLATE("Close Window"),
-			new BMessage(B_QUIT_REQUESTED), 'W'));
-		fMenuBar->AddItem(fileMenu);
 	}
 
 	if (kind == kSpotifyItemShow) {

@@ -61,6 +61,18 @@ enum {
 
 	MSG_INIT_AUTH		= 'iaut',
 	MSG_AUTH_COMPLETE	= 'acmp',
+	// No fields. Producers: File menu, App when sign-in has no Client ID.
+	// Consumer: App shows the single Spotify setup assistant.
+	MSG_OPEN_SETUP_ASSISTANT	= 'osas',
+	// No fields. Producer: Settings > Spotify. Consumer: App signs out.
+	MSG_SIGN_OUT		= 'sgno',
+	// Field MessageFields::Ok (bool, signed in). Producer: App after sign-in,
+	// sign-out and failed auth. Consumers: windows showing the account state.
+	MSG_AUTH_STATE		= 'aust',
+	// Field MessageFields::SpotifyClientId (string, already validated).
+	// Producer: setup assistant "Finish". Consumer: App stores the ID, ends a
+	// session issued for another ID and starts the interactive sign-in.
+	MSG_SPOTIFY_CLIENT_ID_CHOSEN	= 'scid',
 
 
 	MSG_SEARCH			= 'srch',
@@ -106,6 +118,9 @@ enum {
 	MSG_DISCOVER_TAB_ORDER_RESET	= 'tRst',
 	MSG_DISCOVER_DROP_TAB_SWITCH	= 'dTsW',
 	MSG_HAIFY_DRAG_ENDED		= 'dEnd',
+	// No fields. Producer: AddToPlaybackQueue after Spotify accepted the item.
+	// Consumer: App forwards it to open queue windows, which reload the queue.
+	MSG_PLAYBACK_QUEUE_CHANGED	= 'pqCh',
 
 	MSG_REGISTER_REPLICANT		= 'rRpl',
 	MSG_UNREGISTER_REPLICANT	= 'uRpl',
@@ -178,6 +193,7 @@ inline constexpr char DragGeneration[] = "dragGeneration";
 inline constexpr char TargetUri[] = "targetUri";
 inline constexpr char TargetTitle[] = "targetTitle";
 inline constexpr char TargetWritable[] = "targetWritable";
+inline constexpr char SpotifyClientId[] = "client_id";
 }
 
 #endif

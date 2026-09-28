@@ -535,9 +535,9 @@ ArtworkReplicantView::_ApplyReplicantStateMessage(BMessage* message)
     if (!fRegistered)
         _Register();
     const auto state = PlaybackStateMessages::ReadReplicantState(*message);
-    fTitle = state.metadata.title.value;
-    fArtist = state.metadata.artist.value;
-    fOpenUri = state.metadata.openUri.value;
+    fTitle = state.metadata.title.value.c_str();
+    fArtist = state.metadata.artist.value.c_str();
+    fOpenUri = state.metadata.openUri.value.c_str();
     _ApplyAppearance(message);
     SetArtworkUrl(state.metadata.artworkUrl.value.c_str());
 }

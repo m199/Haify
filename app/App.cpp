@@ -5,6 +5,7 @@
 #include "navigation/SpotifyNavigationMessages.h"
 #include "playback/LibrespotArguments.h"
 #include "playback/LibrespotEventState.h"
+#include "playback/LibrespotStopPolicy.h"
 #include "playback/LibrespotTransferMessages.h"
 #include "messages/Messages.h"
 #include "messages/MessageContracts.h"
@@ -20,14 +21,17 @@
 #include "ui/windows/QueueWindow.h"
 #include "ui/windows/SearchWindow.h"
 #include "ui/windows/SettingsWindow.h"
+#include "ui/dialogs/SpotifySetupAssistant.h"
 
 #include "app/Config.h"
 #include "settings/SettingsController.h"
 #include "spotify/SpotifyUri.h"
 #include "spotify/auth/SpotifyAuth.h"
+#include "spotify/auth/SpotifyClientId.h"
 #include "spotify/api/SpotifyApi.h"
 #include "network/ImageCache.h"
 #include "network/OAuthCallbackServer.h"
+#include "playlist/PlaylistCacheStore.h"
 
 #include <Catalog.h>
 #include <Autolock.h>
@@ -52,6 +56,8 @@
 #define B_TRANSLATION_CONTEXT "App"
 
 static const uint32 kMsgRefreshAccessToken = 'rfrt';
+// Private App timer tick for an asynchronous librespot stop.
+static const uint32 kMsgLibrespotStopCheck = 'lbSc';
 static const bigtime_t kLibrespotPlaybackPollDelay = 1500000LL;
 
 bool gIsDebug = false;
@@ -143,6 +149,7 @@ App::_RefreshSpotifyAccount()
 void
 App::ReadyToRun()
 {
+	PlaylistCacheStore::RemoveLegacyUnscopedFiles();
 	_InitAuth(true);
 
 	HaifySettings s = SettingsController::Load();
@@ -158,6 +165,10 @@ App::ReadyToRun()
 	else
 		_RemoveDeskbarReplicant();
 	_ShowPlayerWindow();
+	// First start: nobody reads the README, so the assistant explains the
+	// Spotify app registration on its own.
+	if (_ResolveClientId(s).empty())
+		_ShowSetupAssistant();
 
 	if (s.browserWindowOpen) {
 		DiscoverWindow* browser = new DiscoverWindow();
@@ -381,6 +392,17 @@ App::_BroadcastPlaylistsChanged(BMessage* message)
 		DiscoverWindow* window = dynamic_cast<DiscoverWindow*>(WindowAt(i));
 		if (window)
 			window->PostMessage(message);
+	}
+}
+
+
+void
+App::_BroadcastQueueChanged()
+{
+	BMessage changed(MSG_PLAYBACK_QUEUE_CHANGED);
+	for (int32 i = 0; i < CountWindows(); i++) {
+		if (QueueWindow* queue = dynamic_cast<QueueWindow*>(WindowAt(i)))
+			queue->PostMessage(&changed);
 	}
 }
 
@@ -895,7 +917,7 @@ App::_StoreAuthTokens(BMessage* message, std::string& error,
 void
 App::_FinishSuccessfulAuth(bool silent)
 {
-	_SendAuthStateToPlayer(true);
+	_BroadcastAuthState(true);
 	_ReloadAllWindows();
 
 	if (fLibrespotPid > 0) {
@@ -942,18 +964,20 @@ App::_ClearAuthSession()
 	fIsAuthenticated = false;
 	fCapabilities.Reset();
 	_BroadcastSpotifyCapabilities();
-	_SendAuthStateToPlayer(false);
+	_BroadcastAuthState(false);
 	return status;
 }
 
 
 void
-App::_SendAuthStateToPlayer(bool ok)
+App::_BroadcastAuthState(bool ok)
 {
-	BMessage authMsg('aust');
-	authMsg.AddBool("ok", ok);
-	if (fPlayerWindow)
-		fPlayerWindow->PostMessage(&authMsg);
+	BMessage authMsg(MSG_AUTH_STATE);
+	authMsg.AddBool(MessageFields::Ok, ok);
+	for (int32 i = 0; i < CountWindows(); i++) {
+		if (BWindow* window = WindowAt(i))
+			window->PostMessage(&authMsg);
+	}
 }
 
 
@@ -983,8 +1007,10 @@ App::_ShowAuthFailureAlert(const std::string& error,
 }
 
 
-void
-App::_SignOut()
+// Ends the current session: pending token work is invalidated and stored
+// credentials are cleared. Cached documents are left to the caller.
+status_t
+App::_EndSession()
 {
 	{
 		BAutolock lock(&fTokenLock);
@@ -994,6 +1020,18 @@ App::_SignOut()
 	status_t status = _ClearAuthSession();
 	delete fTokenRefreshTimer;
 	fTokenRefreshTimer = nullptr;
+	return status;
+}
+
+
+void
+App::_SignOut()
+{
+	std::string account = fApi->AccountId();
+	status_t status = _EndSession();
+	// Only an explicit sign-out drops cached documents; an auth failure keeps
+	// them so the same account does not have to refetch everything.
+	PlaylistCacheStore::RemoveAccountFiles(account);
 
 	const char* text = status == B_OK ? "Successfully signed out."
 		: "Signed out for this session, but saved credentials could not be removed."
@@ -1023,7 +1061,7 @@ App::_RegisterLibrespotOAuth()
 void
 App::_StopLibrespotFromMessage()
 {
-	_StopLibrespot();
+	_BeginLibrespotStop();
 }
 
 
@@ -1031,8 +1069,9 @@ void
 App::_ToggleLibrespotRunning()
 {
 	_ReapLibrespot(false);
-	if (fLibrespotPid > 0)
-		_StopLibrespot();
+	// While a stop is still escalating, a toggle means start again.
+	if (fLibrespotPid > 0 && !fLibrespotStopTimer)
+		_BeginLibrespotStop();
 	else
 		_StartLibrespot(kLibrespotTransferAlways);
 }
@@ -1152,6 +1191,9 @@ App::_HandleStateMessage(BMessage* message)
 		case MSG_LIBRARY_CHANGED:
 			_BroadcastLibraryChanged(message);
 			return true;
+		case MSG_PLAYBACK_QUEUE_CHANGED:
+			_BroadcastQueueChanged();
+			return true;
 		case MSG_SPOTIFY_CAPABILITIES_CHANGED:
 			_ApplySpotifyCapabilitiesMessage(message);
 			return true;
@@ -1238,13 +1280,19 @@ App::_HandleAuthMessage(BMessage* message)
 		case MSG_INIT_AUTH:
 			_InitAuth(false);
 			return true;
+		case MSG_OPEN_SETUP_ASSISTANT:
+			_ShowSetupAssistant();
+			return true;
+		case MSG_SPOTIFY_CLIENT_ID_CHOSEN:
+			_ApplyChosenClientId(message);
+			return true;
 		case MSG_AUTH_COMPLETE:
 			_ApplyAuthComplete(message);
 			return true;
 		case kMsgRefreshAccessToken:
 			_RefreshAccessToken(nullptr, true);
 			return true;
-		case 'sgno':
+		case MSG_SIGN_OUT:
 			_SignOut();
 			return true;
 		default:
@@ -1274,6 +1322,9 @@ App::_HandleLibrespotMessage(BMessage* message)
 			return true;
 		case MSG_LIBRESPOT_REAP:
 			_ReapLibrespot(false);
+			return true;
+		case kMsgLibrespotStopCheck:
+			_ContinueLibrespotStop();
 			return true;
 		case MSG_LIBRESPOT_TRANSFER_POLL:
 			if (!fLibrespotTransfer.Readiness().Accepts(
@@ -1310,9 +1361,11 @@ App::_InitAuth(bool silent)
 	HaifySettings settings = SettingsController::Load();
 	fApi->SetAccountId(settings.spotifyAccountId);
 
-	if (strlen(HAIFY_CLIENT_ID) == 0) {
+	std::string clientId = _ResolveClientId(settings);
+	if (clientId.empty()) {
+		// No own Spotify app registration yet: set one up instead of failing.
 		if (!silent)
-			_ShowMissingClientIdAlert();
+			_ShowSetupAssistant();
 		return;
 	}
 
@@ -1321,17 +1374,68 @@ App::_InitAuth(bool silent)
 		return;
 	}
 
-	_StartInteractiveOAuth(_BeginAuthGeneration());
+	_StartInteractiveOAuth(_BeginAuthGeneration(), clientId);
+}
+
+
+std::string
+App::_ResolveClientId(const HaifySettings& settings)
+{
+	std::string clientId = ResolveSpotifyClientId(settings.spotifyClientId,
+		!settings.refreshToken.empty(), HAIFY_CLIENT_ID);
+	// A session made with the built-in ID keeps using it after sign-out.
+	if (!clientId.empty() && settings.spotifyClientId.empty()) {
+		SettingsController::Update([&clientId](HaifySettings& stored) {
+			stored.spotifyClientId = clientId;
+		});
+	}
+	return clientId;
 }
 
 
 void
-App::_ShowMissingClientIdAlert()
+App::_ShowSetupAssistant()
 {
-	BAlert* alert = new BAlert("Error",
-		"HAIFY_CLIENT_ID missing in Config.h!", "OK", NULL, NULL,
-		B_WIDTH_AS_USUAL, B_STOP_ALERT);
-	alert->Go();
+	if (SpotifySetupAssistant* open
+			= FindOpenWindow<SpotifySetupAssistant>(this)) {
+		open->Activate();
+		return;
+	}
+	HaifySettings settings = SettingsController::Load();
+	SpotifySetupAssistant* assistant = new SpotifySetupAssistant(
+		BMessenger(this), NormalizeSpotifyClientId(settings.spotifyClientId));
+	assistant->Show();
+}
+
+
+void
+App::_ApplyChosenClientId(BMessage* message)
+{
+	std::string clientId = NormalizeSpotifyClientId(
+		message->GetString(MessageFields::SpotifyClientId, ""));
+	if (!IsValidSpotifyClientId(clientId))
+		return;
+
+	HaifySettings settings = SettingsController::Load();
+	std::string previous = ResolveSpotifyClientId(settings.spotifyClientId,
+		!settings.refreshToken.empty(), HAIFY_CLIENT_ID);
+	status_t status = SettingsController::Update(
+		[&clientId](HaifySettings& stored) {
+			stored.spotifyClientId = clientId;
+		});
+	if (status != B_OK) {
+		BAlert* alert = new BAlert("Haify",
+			"Could not save the Client ID. Please try again.", "OK", nullptr,
+			nullptr, B_WIDTH_AS_USUAL, B_WARNING_ALERT);
+		alert->Go();
+		return;
+	}
+
+	// Tokens belong to the registration that issued them.
+	bool hasSession = fIsAuthenticated || !settings.refreshToken.empty();
+	if (hasSession && previous != clientId)
+		_EndSession();
+	_InitAuth(false);
 }
 
 
@@ -1380,9 +1484,9 @@ App::_BeginAuthGeneration()
 
 
 void
-App::_StartInteractiveOAuth(int32 generation)
+App::_StartInteractiveOAuth(int32 generation, const std::string& clientId)
 {
-	auto auth = std::make_shared<SpotifyAuth>(HAIFY_CLIENT_ID);
+	auto auth = std::make_shared<SpotifyAuth>(clientId);
 	std::string authUrl = auth->BuildAuthUrl();
 	if (authUrl.empty()) {
 		BAlert* alert = new BAlert("Error",
@@ -1464,7 +1568,9 @@ App::_RefreshAccessToken(std::function<void(bool)> completion, bool silent)
 		return;
 	}
 
-	auto auth = std::make_shared<SpotifyAuth>(HAIFY_CLIENT_ID);
+	// A refresh token exists here, so the built-in fallback always applies.
+	auto auth = std::make_shared<SpotifyAuth>(ResolveSpotifyClientId(
+		settings.spotifyClientId, true, HAIFY_CLIENT_ID));
 	BMessenger messenger(this);
 	auth->RefreshToken(settings.refreshToken,
 		[auth, messenger, silent, generation](const TokenResult& result) {
@@ -1569,6 +1675,8 @@ App::QuitRequested()
 void
 App::_StartLibrespot(LibrespotTransferMode mode, bool registerOAuth)
 {
+	if (fLibrespotStopTimer)
+		_StopLibrespot();
 	_ReapLibrespot(false);
 	fLibrespotTransfer.Begin(system_time(), mode,
 		registerOAuth || fLibrespotOAuthRegistration);
@@ -1669,8 +1777,17 @@ App::_SpawnLibrespot(const std::vector<std::string>& args)
 		argv.push_back(const_cast<char*>(arg.c_str()));
 	argv.push_back(nullptr);
 
+	// Computed before fork: the child may only call async-signal-safe code.
+	long maxDescriptor = sysconf(_SC_OPEN_MAX);
+	if (maxDescriptor < 0 || maxDescriptor > 65536)
+		maxDescriptor = 1024;
+
 	pid_t pid = fork();
 	if (pid == 0) {
+		// librespot must not inherit Haify's sockets and files, e.g. the
+		// OAuth listener on port 8765 or in-flight HTTPS connections.
+		for (long descriptor = 3; descriptor < maxDescriptor; descriptor++)
+			close((int)descriptor);
 		execv(argv[0], argv.data());
 		_exit(1);
 	} else if (pid > 0) {
@@ -1823,7 +1940,7 @@ App::_WriteLibrespotEventScript()
 
 
 void
-App::_StopLibrespot()
+App::_ResetLibrespotSession()
 {
 	fLibrespotTransfer.Begin(0);
 	fLibrespotEventSession = 0;
@@ -1831,29 +1948,86 @@ App::_StopLibrespot()
 	fLibrespotTransferTimer = nullptr;
 	delete fLibrespotPlaybackPollTimer;
 	fLibrespotPlaybackPollTimer = nullptr;
+}
 
-	_ReapLibrespot(false);
-	if (fLibrespotPid <= 0)
+
+// Blocking stop for restart, OAuth registration and quit, whose next step
+// needs the process gone. Continues a pending asynchronous stop.
+void
+App::_StopLibrespot()
+{
+	_ResetLibrespotSession();
+	bool stopping = fLibrespotStopTimer != nullptr;
+	delete fLibrespotStopTimer;
+	fLibrespotStopTimer = nullptr;
+	if (_ReapLibrespot(false))
 		return;
 
 	pid_t pid = fLibrespotPid;
-	kill(pid, SIGINT);
-	for (int i = 0; i < 20; i++) {
-		if (_ReapLibrespot(false))
+	bigtime_t started = stopping ? fLibrespotStopStarted : system_time();
+	int lastSignal = stopping ? fLibrespotStopSignal : SIGINT;
+	if (!stopping)
+		kill(pid, SIGINT);
+	while (!_ReapLibrespot(false)) {
+		int next = LibrespotStopPolicy::NextSignal(system_time() - started,
+			lastSignal);
+		if (next == SIGKILL) {
+			kill(pid, SIGKILL);
+			_ReapLibrespot(true);
+			fLibrespotPid = -1;
 			return;
-		usleep(100000);
+		}
+		if (next != 0) {
+			kill(pid, next);
+			lastSignal = next;
+		}
+		usleep(LibrespotStopPolicy::kCheckIntervalUs);
 	}
+}
 
-	kill(pid, SIGTERM);
-	for (int i = 0; i < 20; i++) {
-		if (_ReapLibrespot(false))
-			return;
-		usleep(100000);
+
+// Stop requested from the UI: signal now and escalate from timer ticks so
+// the App looper keeps handling messages while librespot shuts down.
+void
+App::_BeginLibrespotStop()
+{
+	_ResetLibrespotSession();
+	if (fLibrespotStopTimer || _ReapLibrespot(false))
+		return;
+
+	kill(fLibrespotPid, SIGINT);
+	fLibrespotStopStarted = system_time();
+	fLibrespotStopSignal = SIGINT;
+	BMessage check(kMsgLibrespotStopCheck);
+	fLibrespotStopTimer = new BMessageRunner(BMessenger(this), &check,
+		LibrespotStopPolicy::kCheckIntervalUs);
+}
+
+
+void
+App::_ContinueLibrespotStop()
+{
+	if (!fLibrespotStopTimer)
+		return;
+
+	bool exited = _ReapLibrespot(false);
+	if (!exited) {
+		int next = LibrespotStopPolicy::NextSignal(
+			system_time() - fLibrespotStopStarted, fLibrespotStopSignal);
+		if (next != 0) {
+			kill(fLibrespotPid, next);
+			fLibrespotStopSignal = next;
+		}
+		if (next == SIGKILL) {
+			_ReapLibrespot(true);
+			fLibrespotPid = -1;
+			exited = true;
+		}
 	}
-
-	kill(pid, SIGKILL);
-	_ReapLibrespot(true);
-	fLibrespotPid = -1;
+	if (exited) {
+		delete fLibrespotStopTimer;
+		fLibrespotStopTimer = nullptr;
+	}
 }
 
 

@@ -6,8 +6,16 @@ namespace {
 constexpr int64_t kStartupIntervalUs = 1000000LL;
 constexpr int64_t kStartupErrorLimitUs = 5000000LL;
 constexpr int64_t kStartupEmptyRetryLimitUs = 30000000LL;
-constexpr int64_t kActiveIntervalUs = 5000000LL;
+// Progress and the track end are extrapolated locally, own commands trigger a
+// verify poll and local librespot events trigger their own poll, so the
+// periodic poll only has to notice changes made on other devices. File >
+// Refresh polls at once.
+constexpr int64_t kActiveIntervalUs = 15000000LL;
 constexpr int64_t kIdleIntervalUs = 15000000LL;
+constexpr int64_t kLongIdleIntervalUs = 60000000LL;
+constexpr int64_t kLongIdleAfterUs = 120000000LL;
+constexpr int64_t kFollowUpIntervalUs = 3000000LL;
+constexpr int32_t kFollowUpPolls = 2;
 constexpr int64_t kErrorLimitUs = 30000000LL;
 }
 
@@ -15,6 +23,14 @@ void
 PlaybackPollState::Start(int64_t nowUs)
 {
 	fStartupEmptyRetryUntilUs = nowUs + kStartupEmptyRetryLimitUs;
+}
+
+
+void
+PlaybackPollState::NoteActivity()
+{
+	fIdleSinceUs = 0;
+	fFollowUpPolls = kFollowUpPolls;
 }
 
 
@@ -56,5 +72,24 @@ PlaybackPollState::Complete(const PlaybackPollReport& report, int64_t nowUs)
 	}
 	auto action = report.hasItem
 		? PlaybackPollAction::ApplyPlayback : PlaybackPollAction::ApplyEmpty;
-	return {action, report.isPlaying ? kActiveIntervalUs : kIdleIntervalUs};
+	return {action, _SuccessDelay(report.isPlaying, nowUs)};
+}
+
+
+int64_t
+PlaybackPollState::_SuccessDelay(bool isPlaying, int64_t nowUs)
+{
+	if (isPlaying) {
+		fIdleSinceUs = 0;
+		fFollowUpPolls = 0;
+		return kActiveIntervalUs;
+	}
+	if (fFollowUpPolls > 0) {
+		fFollowUpPolls--;
+		return kFollowUpIntervalUs;
+	}
+	if (fIdleSinceUs <= 0)
+		fIdleSinceUs = nowUs;
+	return nowUs - fIdleSinceUs >= kLongIdleAfterUs
+		? kLongIdleIntervalUs : kIdleIntervalUs;
 }

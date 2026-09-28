@@ -32,7 +32,7 @@ CheckPendingAndCadence()
 	Check(state.RequestPending() && !state.BeginRequest());
 	auto result = state.Complete({true, true, true}, 2000000);
 	Check(!state.RequestPending());
-	Check(result.action == Action::ApplyPlayback && result.delayUs == 5000000);
+	Check(result.action == Action::ApplyPlayback && result.delayUs == 15000000);
 	Check(state.BeginRequest());
 	result = state.Complete({true, true, false}, 3000000);
 	Check(result.action == Action::ApplyPlayback && result.delayUs == 15000000);
@@ -54,7 +54,7 @@ CheckStartupEmptyDeadline()
 	result = state.Complete({true, false, false}, 31000000);
 	Check(result.action == Action::ApplyEmpty && result.delayUs == 15000000);
 	result = state.Complete({true, false, true}, 32000000);
-	Check(result.action == Action::ApplyEmpty && result.delayUs == 5000000);
+	Check(result.action == Action::ApplyEmpty && result.delayUs == 15000000);
 	// Successful empty state does not raise the startup error-backoff cap.
 	for (int i = 0; i < 10; ++i)
 		result = state.Complete({}, 33000000);
@@ -99,8 +99,48 @@ CheckRetryAfter()
 	Check(state.Complete({false, false, false, maxRetry}, 5000000).delayUs
 		== int64_t(maxRetry) * 1000000LL);
 	// Success ignores a retry hint and resets the next failure to one second.
-	Check(state.Complete({true, true, true, 90}, 6000000).delayUs == 5000000);
+	Check(state.Complete({true, true, true, 90}, 6000000).delayUs == 15000000);
 	Check(state.Complete({}, 7000000).delayUs == 1000000);
+}
+
+
+// Long pauses back off to 60 s; playing again restores the normal cadence.
+static void
+CheckLongIdleBackoff()
+{
+	PlaybackPollState state;
+	state.Start(0);
+	Check(state.Complete({true, true, true}, 1000000).delayUs == 15000000);
+	Check(state.Complete({true, true, false}, 10000000).delayUs == 15000000);
+	Check(state.Complete({true, true, false}, 129999999).delayUs == 15000000);
+	Check(state.Complete({true, true, false}, 130000000).delayUs == 60000000);
+	// A failure keeps the idle start; it is not a sign of playback.
+	state.Complete({}, 140000000);
+	Check(state.Complete({true, false, false}, 150000000).delayUs == 60000000);
+	Check(state.Complete({true, true, true}, 160000000).delayUs == 15000000);
+	Check(state.Complete({true, true, false}, 170000000).delayUs == 15000000);
+}
+
+
+// Regression: starting a track after a long pause waited 60 s for the next
+// poll when the verify poll came before Spotify reported playback.
+static void
+CheckActivityEndsLongIdle()
+{
+	PlaybackPollState state;
+	state.Start(0);
+	Check(state.Complete({true, true, false}, 10000000).delayUs == 15000000);
+	Check(state.Complete({true, true, false}, 130000000).delayUs == 60000000);
+	state.NoteActivity();
+	// Two quick follow-ups while the transfer is still in progress ...
+	Check(state.Complete({true, true, false}, 131500000).delayUs == 3000000);
+	Check(state.Complete({true, true, false}, 134500000).delayUs == 3000000);
+	// ... then the normal idle cadence, never the long-idle one right away.
+	Check(state.Complete({true, true, false}, 137500000).delayUs == 15000000);
+	// Playback ends the follow-ups at once.
+	state.NoteActivity();
+	Check(state.Complete({true, true, true}, 140000000).delayUs == 15000000);
+	Check(state.Complete({true, true, false}, 150000000).delayUs == 15000000);
 }
 
 
@@ -111,6 +151,8 @@ main()
 	CheckStartupEmptyDeadline();
 	CheckBackoffAndRecovery();
 	CheckRetryAfter();
+	CheckLongIdleBackoff();
+	CheckActivityEndsLongIdle();
 	std::puts("Playback poll state tests passed");
 	return 0;
 }
